@@ -204,3 +204,7 @@ pub const StateMap = struct {
         return @field(self.StateId, @typeName(State));
     }
 };
+
+comptime {
+    _ = @import("Runner.zig");
+}
