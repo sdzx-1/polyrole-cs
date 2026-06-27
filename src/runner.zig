@@ -166,9 +166,6 @@ test "symmetric run" {
     var client_context: i32 = 0;
     var server_context: i32 = 0;
 
-    _ = &client_context;
-    _ = &server_context;
-
     const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
     var server = try localhost.listen(io, .{});
     defer server.deinit(io);
