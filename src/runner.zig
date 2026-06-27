@@ -26,7 +26,17 @@ pub fn Runner(
             return state_map.StateFromId(state_id);
         }
 
-        pub fn simulate(client: *Client, server: *Server, start: type) void {
+        /// Run both sides of the protocol in-memory without a channel.
+        ///
+        /// Simulates the full protocol execution by driving client and server
+        /// states in a single thread. For each state, the owning agent's
+        /// `process` is called first, then the other side's `preprocess`
+        /// receives the transition — no serialization or network I/O involved.
+        ///
+        /// Useful for testing protocol logic before deploying it over a real
+        /// channel, or when the two sides share an address space.
+        pub fn simulate(
+            client: *Client, server: *Server, start: type) void {
             const start_id = idFromState(start);
             @setEvalBranchQuota(10_000_000);
             sw: switch (start_id) {
@@ -49,6 +59,19 @@ pub fn Runner(
             }
         }
 
+        /// Run one side of the protocol over a channel (symmetric topology).
+        ///
+        /// A single function handles both client and server roles: pass
+        /// `.client` or `.server` via `role`. States owned by the current role
+        /// are processed locally and sent over the channel; states owned by the
+        /// other role are received and handled via `preprocess`.
+        ///
+        /// "Symmetric" refers to the 1:1 communication topology —
+        /// a single client talks to a single server. For N:1 or other
+        /// asymmetric topologies, a separate runner is needed.
+        ///
+        /// The `channel` must implement `send(state_id, State, result)`
+        /// and `recv(state_id, State) -> result`.
         pub fn symmetric_run(
             comptime role: Role,
             ctx: if (role == .client) *Client else *Server,
