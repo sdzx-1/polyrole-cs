@@ -206,5 +206,5 @@ pub const StateMap = struct {
 };
 
 comptime {
-    _ = @import("Runner.zig");
+    _ = @import("runner.zig");
 }
