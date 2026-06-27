@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name != 'main' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            zig_arch: x86_64
+            zig_os: linux
+          - os: macos-latest
+            zig_arch: aarch64
+            zig_os: macos
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve Zig URL
+        id: zig-resolve
+        run: |
+          VERSION="0.16.0"
+          ARCH="${{ matrix.zig_arch }}"
+          OS="${{ matrix.zig_os }}"
+
+          curl -sL https://ziglang.org/download/index.json > /tmp/zig-index.json
+
+          URL=$(jq -r --arg v "$VERSION" '.[$v]."'"$ARCH-$OS"'".tarball // empty' /tmp/zig-index.json)
+          SHA=$(jq -r --arg v "$VERSION" '.[$v]."'"$ARCH-$OS"'".shasum // empty' /tmp/zig-index.json)
+
+          if [ -z "$URL" ]; then
+            echo "::error::Zig $VERSION not found in index.json"
+            exit 1
+          fi
+
+          echo "url=$URL"   >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Installing Zig $VERSION from $URL"
+
+      - name: Cache Zig
+        id: cache-zig
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.local/share/zig
+          key: zig-${{ runner.os }}-${{ runner.arch }}-0.16.1
+          save-always: true
+
+      - name: Install Zig
+        if: steps.cache-zig.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          ZIG_URL="${{ steps.zig-resolve.outputs.url }}"
+          EXPECTED_SHA="${{ steps.zig-resolve.outputs.sha256 }}"
+          ZIG_ROOT="$HOME/.local/share/zig"
+          TARBALL="/tmp/zig.tar.xz"
+
+          curl -fsSL "$ZIG_URL" -o "$TARBALL"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            ACTUAL_SHA=$(sha256sum "$TARBALL" | cut -d' ' -f1)
+          elif command -v shasum >/dev/null 2>&1; then
+            ACTUAL_SHA=$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)
+          else
+            echo "::error::No SHA-256 tool found"
+            exit 1
+          fi
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::SHA-256 mismatch"
+            exit 1
+          fi
+          echo "SHA-256 OK"
+
+          mkdir -p "$ZIG_ROOT"
+          tar -xf "$TARBALL" -C "$ZIG_ROOT" --strip-components=1
+          rm -f "$TARBALL"
+
+      - name: Add Zig to PATH
+        run: echo "$HOME/.local/share/zig" >> "$GITHUB_PATH"
+
+      - name: Build and test
+        run: zig build test
