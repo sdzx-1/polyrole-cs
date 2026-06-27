@@ -26,7 +26,7 @@ pub fn Runner(
             return state_map.StateFromId(state_id);
         }
 
-        pub fn direct_run(client: *Client, server: *Server, start: type) void {
+        pub fn simulate(client: *Client, server: *Server, start: type) void {
             const start_id = idFromState(start);
             @setEvalBranchQuota(10_000_000);
             sw: switch (start_id) {
@@ -125,13 +125,13 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
     };
 }
 
-test "direct run" {
+test "simulate" {
     const testing = std.testing;
     const P = CreateTestProtocol("p2", Exit);
     const R = Runner(P.A);
     var client: i32 = 0;
     var server: i32 = 0;
-    R.direct_run(&client, &server, P.A);
+    R.simulate(&client, &server, P.A);
     try testing.expectEqual(client, 10);
 }
 test "symmetric run" {
