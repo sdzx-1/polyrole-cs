@@ -26,7 +26,7 @@ pub fn Runner(
             return state_map.StateFromId(state_id);
         }
 
-        pub fn direct_connect(client: *Client, server: *Server, start: type) void {
+        pub fn direct_run(client: *Client, server: *Server, start: type) void {
             const start_id = idFromState(start);
             @setEvalBranchQuota(10_000_000);
             sw: switch (start_id) {
@@ -49,7 +49,7 @@ pub fn Runner(
             }
         }
 
-        pub fn runProtocol(
+        pub fn symmetric_run(
             comptime role: Role,
             ctx: if (role == .client) *Client else *Server,
             channel: anytype,
@@ -125,18 +125,19 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
     };
 }
 
-test "direct_connect" {
+test "direct run" {
     const testing = std.testing;
     const P = CreateTestProtocol("p2", Exit);
     const R = Runner(P.A);
     var client: i32 = 0;
     var server: i32 = 0;
-    R.direct_connect(&client, &server, P.A);
+    R.direct_run(&client, &server, P.A);
     try testing.expectEqual(client, 10);
 }
-test "runProtocol" {
+test "symmetric run" {
     const testing = std.testing;
     const io = testing.io;
+    const allocator = testing.allocator;
     const P = CreateTestProtocol("p2", Exit);
     const R = Runner(P.A);
     var client_context: i32 = 0;
@@ -149,22 +150,18 @@ test "runProtocol" {
     var server = try localhost.listen(io, .{});
     defer server.deinit(io);
 
+    const StreamChannel = @import("channel.zig").StreamChannel;
+
     const S = struct {
         fn clientFn(server_address: net.IpAddress, ctx: *i32) !void {
             var stream = try server_address.connect(io, .{ .mode = .stream });
             defer stream.close(io);
 
-            var rbuf: [100]u8 = undefined;
-            var wbuf: [100]u8 = undefined;
-            var stream_reader = stream.reader(io, &rbuf);
-            var stream_writer = stream.writer(io, &wbuf);
+            var stream_channel: StreamChannel = undefined;
+            try stream_channel.init(io, allocator, stream, 100, 100);
+            defer stream_channel.deinit(allocator);
 
-            const stream_channel: @import("channel.zig").StreamChannel = .{
-                .reader = &stream_reader.interface,
-                .writer = &stream_writer.interface,
-            };
-
-            try R.runProtocol(.client, ctx, stream_channel, P.A);
+            try R.symmetric_run(.client, ctx, &stream_channel, P.A);
         }
     };
 
@@ -174,17 +171,11 @@ test "runProtocol" {
     var stream = try server.accept(io);
     defer stream.close(io);
 
-    var rbuf: [100]u8 = undefined;
-    var wbuf: [100]u8 = undefined;
-    var stream_reader = stream.reader(io, &rbuf);
-    var stream_writer = stream.writer(io, &wbuf);
+    var stream_channel: StreamChannel = undefined;
+    try stream_channel.init(io, allocator, stream, 100, 100);
+    defer stream_channel.deinit(allocator);
 
-    const stream_channel: @import("channel.zig").StreamChannel = .{
-        .reader = &stream_reader.interface,
-        .writer = &stream_writer.interface,
-    };
-
-    try R.runProtocol(.server, &server_context, stream_channel, P.A);
+    try R.symmetric_run(.server, &server_context, &stream_channel, P.A);
 
     try testing.expectEqual(client_context, 10);
 }
