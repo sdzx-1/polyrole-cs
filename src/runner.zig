@@ -35,8 +35,7 @@ pub fn Runner(
         ///
         /// Useful for testing protocol logic before deploying it over a real
         /// channel, or when the two sides share an address space.
-        pub fn simulate(
-            client: *Client, server: *Server, start: type) void {
+        pub fn simulate(client: *Client, server: *Server, start: type) void {
             const start_id = idFromState(start);
             @setEvalBranchQuota(10_000_000);
             sw: switch (start_id) {
@@ -170,7 +169,7 @@ test "symmetric run" {
     var server = try localhost.listen(io, .{});
     defer server.deinit(io);
 
-    const StreamChannel = @import("channel.zig").StreamChannel;
+    const StreamChannel = root.channel.StreamChannel;
 
     const S = struct {
         fn clientFn(server_address: net.IpAddress, ctx: *i32) !void {
