@@ -123,8 +123,8 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
             }
 
             pub fn preprocess(ctx: *i32, msg: @This()) void {
-                ctx.* += 1;
                 _ = msg;
+                _ = ctx;
             }
         };
 
@@ -136,6 +136,7 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
 
             pub fn process(ctx: *i32) @This() {
                 if (ctx.* >= 10) return .next;
+                ctx.* += 1;
                 return .to_a;
             }
 
