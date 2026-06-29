@@ -113,35 +113,35 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
         const TestInfo = ProtocolInfo(name, i32, i32);
 
         pub const A = union(enum) {
-            to_b: Data(void, B),
-            to_next: Data(void, Next),
+            add: Data(void, B),
 
             pub const info: TestInfo = .{ .agent = .client, .name = "A" };
 
             pub fn process(ctx: *i32) @This() {
-                if (ctx.* >= 10) return .to_next;
-                return .to_b;
+                _ = ctx;
+                return .add;
             }
 
             pub fn preprocess(ctx: *i32, msg: @This()) void {
-                _ = ctx;
+                ctx.* += 1;
                 _ = msg;
             }
         };
 
         pub const B = union(enum) {
             to_a: Data(void, A),
+            next: Data(void, Next),
 
             pub const info: TestInfo = .{ .agent = .server, .name = "B" };
 
             pub fn process(ctx: *i32) @This() {
-                _ = ctx;
+                if (ctx.* >= 10) return .next;
                 return .to_a;
             }
 
             pub fn preprocess(ctx: *i32, msg: @This()) void {
                 _ = msg;
-                ctx.* += 1;
+                _ = ctx;
             }
         };
     };
@@ -154,7 +154,7 @@ test "simulate" {
     var client: i32 = 0;
     var server: i32 = 0;
     R.simulate(&client, &server, P.A);
-    try testing.expectEqual(client, 10);
+    try testing.expectEqual(server, 10);
 }
 test "symmetric run" {
     const testing = std.testing;
@@ -196,5 +196,5 @@ test "symmetric run" {
 
     try R.symmetric_run(.server, &server_context, &stream_channel, P.A);
 
-    try testing.expectEqual(client_context, 10);
+    try testing.expectEqual(server_context, 10);
 }
