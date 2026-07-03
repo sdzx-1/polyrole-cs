@@ -3,6 +3,7 @@ const Io = std.Io;
 pub const Graph = @import("Graph.zig");
 pub const codec = @import("codec.zig");
 pub const channel = @import("channel.zig");
+pub const runner = @import("runner.zig");
 
 pub const Role = enum {
     client,
