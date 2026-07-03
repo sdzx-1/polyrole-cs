@@ -46,7 +46,7 @@ pub fn Runner(
                     const process_ctx = if (comptime info.agent == .client) client else server;
                     const preprocess_ctx = if (comptime info.agent == .client) server else client;
                     const result = State.process(process_ctx);
-                    State.preprocess(preprocess_ctx, result);
+                    if (@hasDecl(State, "preprocess")) State.preprocess(preprocess_ctx, result);
 
                     switch (result) {
                         inline else => |new_state_wit| {
@@ -91,7 +91,7 @@ pub fn Runner(
                             break :blk res;
                         } else {
                             const res = try channel.recv(state_id, State);
-                            State.preprocess(ctx, res);
+                            if (@hasDecl(State, "preprocess")) State.preprocess(ctx, res);
                             break :blk res;
                         }
                     };
@@ -121,11 +121,6 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
                 _ = ctx;
                 return .add;
             }
-
-            pub fn preprocess(ctx: *i32, msg: @This()) void {
-                _ = msg;
-                _ = ctx;
-            }
         };
 
         pub const B = union(enum) {
@@ -138,11 +133,6 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
                 if (ctx.* >= 10) return .next;
                 ctx.* += 1;
                 return .to_a;
-            }
-
-            pub fn preprocess(ctx: *i32, msg: @This()) void {
-                _ = msg;
-                _ = ctx;
             }
         };
     };
