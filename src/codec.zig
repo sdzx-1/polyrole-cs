@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub fn encode(writer: *std.Io.Writer, state_id: anytype, val: anytype) !void {
     const id: u32 = @intFromEnum(state_id);
@@ -50,6 +49,13 @@ pub fn encode_anytype(writer: *std.Io.Writer, data: anytype) !void {
                 @compileError("Not impl!");
             }
         },
+        .array => |arr| {
+            if (arr.child == u8) {
+                try writer.writeAll(&data);
+            } else {
+                @compileError("Not impl!");
+            }
+        },
         .@"struct" => |stru| {
             inline for (stru.fields) |struct_field| {
                 try encode_anytype(writer, @field(data, struct_field.name));
@@ -80,6 +86,16 @@ pub fn decode_type(reader: *std.Io.Reader, Data: type) !Data {
                 const len = try reader.takeInt(usize, .big);
                 const str = try reader.take(len);
                 return str;
+            } else {
+                @compileError("Not impl!");
+            }
+        },
+        .array => |arr| {
+            if (arr.child == u8) {
+                var result: [arr.len]u8 = undefined;
+                const bytes = try reader.take(arr.len);
+                @memcpy(&result, bytes);
+                return result;
             } else {
                 @compileError("Not impl!");
             }
