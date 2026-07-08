@@ -1,10 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const native_endian = builtin.target.cpu.arch.endian();
 
 pub fn encode(writer: *std.Io.Writer, state_id: anytype, val: anytype) !void {
     const id: u32 = @intFromEnum(state_id);
-    try writer.writeInt(u32, id, native_endian);
+    try writer.writeInt(u32, id, .big);
     switch (val) {
         inline else => |msg, tag| {
             try writer.writeByte(@intFromEnum(tag));
@@ -17,7 +16,7 @@ pub fn encode(writer: *std.Io.Writer, state_id: anytype, val: anytype) !void {
 
 pub fn decode(reader: *std.Io.Reader, state_id: anytype, T: type) !T {
     const id: u32 = @intFromEnum(state_id);
-    const rid = try reader.takeInt(u32, native_endian);
+    const rid = try reader.takeInt(u32, .big);
     if (id != rid) {
         std.log.err("curr_id: {d}, reciv_id: {d}", .{ id, rid });
         return error.IncorrectStatusReceived;
@@ -40,12 +39,12 @@ pub fn encode_anytype(writer: *std.Io.Writer, data: anytype) !void {
             try writer.writeByte(v);
         },
         .int => {
-            try writer.writeInt(@TypeOf(data), data, native_endian);
+            try writer.writeInt(@TypeOf(data), data, .big);
         },
         .pointer => |p| {
             if (p.is_const == true and p.child == u8) {
                 const len: usize = data.len;
-                try writer.writeInt(usize, len, native_endian);
+                try writer.writeInt(usize, len, .big);
                 try writer.writeAll(data);
             } else {
                 @compileError("Not impl!");
@@ -73,12 +72,12 @@ pub fn decode_type(reader: *std.Io.Reader, Data: type) !Data {
             return bv;
         },
         .int => {
-            const data = try reader.takeInt(Data, native_endian);
+            const data = try reader.takeInt(Data, .big);
             return data;
         },
         .pointer => |p| {
             if (p.is_const == true and p.child == u8) {
-                const len = try reader.takeInt(usize, native_endian);
+                const len = try reader.takeInt(usize, .big);
                 const str = try reader.take(len);
                 return str;
             } else {
