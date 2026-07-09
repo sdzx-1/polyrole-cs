@@ -2,37 +2,45 @@
 
 ## Overview
 
-A simplified TLS 1.3-style protocol built on polyrole-cs state machine
-framework. No certificate exchange — both parties already know each other's
-public key out-of-band.
+A simplified TLS 1.3-style handshake protocol built on polyrole-cs. The
+protocol establishes an encrypted session in three messages — identity
+authentication via Ed25519 signatures, key agreement via ephemeral-ephemeral
+X25519 ECDH, and transcript chaining via SHA256 hashes.
 
-Forward secrecy is provided via ephemeral-ephemeral X25519 ECDH, with
-Ed25519 signatures for identity authentication.
+After the handshake, `ClientContext.write_key` / `read_key` and
+`ServerContext.write_key` / `read_key` contain the derived symmetric keys.
+The caller then creates a `TlsChannel` using these keys to encrypt arbitrary
+protocol traffic. The handshake protocol itself has no data phase — it exits
+immediately after key derivation.
 
-## Prerequisites
-
-- Client holds:
-  - `client_id_sk` (Ed25519 secret key, 64 bytes)
-  - `server_id_pk` (Ed25519 public key, 32 bytes)
-- Server holds:
-  - `server_id_sk` (Ed25519 secret key, 64 bytes)
-  - `client_id_pk` (Ed25519 public key, 32 bytes)
+Both parties know each other's Ed25519 public key out-of-band. No
+certificate exchange.
 
 ## State Machine
 
 ```
 ClientHello ─(c)──▶ ServerHello ─(s)──▶ ClientFinished ─(c)──▶ Exit
-                                                                  │
-                                              ┌───────────────────┘
-                                              ▼
-                                   ClientData ─(alt)──▶ ServerData ─(alt)──▶ ...
-                                              │                     │
-                                              └──▶ Exit             └──▶ Exit
 ```
 
-Three handshake steps (down from four — Server and Client authenticate in
-two messages total). Forward secrecy is achieved because ephemeral X25519
-keys are destroyed after each session.
+Three handshake steps. No data phase — `ClientFinished.close` transitions
+directly to `Exit`. Use `TlsChannel` for encrypted data transport instead.
+
+## Error Handling
+
+Cryptographic failures return typed errors instead of panicking:
+
+```zig
+const TlsError = error{
+    EntropyUnavailable,  // CSPRNG failed
+    DhFailed,            // X25519 key agreement failed (invalid peer key)
+    SignatureInvalid,    // Ed25519 signature verification failed
+    HmacInvalid,         // HMAC verification failed (tampered transcript or wrong key)
+};
+```
+
+The Runner propagates these through `simulate` (`!void`) and `symmetric_run`
+(`!void`). Cooperative close goes through the `Exit` transition; security
+violations abort the protocol immediately via error return.
 
 ## State-by-State Detail
 
@@ -50,13 +58,13 @@ keys are destroyed after each session.
 | `ephemeral_pk` | `[32]u8` | Client's ephemeral X25519 public key |
 
 **process (client):**
-1. Generate random `client_nonce` (24 bytes).
-2. Generate ephemeral X25519 keypair → `(esk_c, epk_c)`.
-3. Store `client_nonce`, `esk_c`, `own_ephemeral_pk` (= `epk_c`) in context.
-4. Return `.client_hello` variant.
+1. Generate random `client_nonce` (24 bytes) via `Io.randomSecure`.
+2. Generate ephemeral X25519 keypair via `crypto.dh.X25519.KeyPair.generate(io)`.
+3. Store `own_nonce`, `ephemeral_sk`, `own_ephemeral_pk` in context.
+4. Return `.to_server` variant.
 
 **preprocess (server):**
-1. Store `peer_nonce` (= `client_nonce`), `peer_ephemeral_pk` (= `epk_c`) in context.
+1. Store `peer_nonce` (= client nonce), `peer_ephemeral_pk` (= client epk) in context.
 
 ---
 
@@ -82,34 +90,25 @@ transcript_1 = SHA256(client_nonce ++ epk_c ++ server_nonce ++ epk_s)
 transcript_2 = SHA256(transcript_1 ++ signature)
 ```
 
-`transcript_1` binds both nonces and both ephemeral public keys — the entire
-DH negotiation. No message before this point was authenticated, but any
-tampering will cause the signature verification in the next step to fail.
-
-`transcript_2` includes the signature. The server MAC covers
-`transcript_2`, proving the server not only signed correctly but also
-computed the correct `shared_secret` (from which `handshake_key` derives).
+`transcript_1` binds both nonces and both ephemeral public keys.
+`transcript_2` includes the server's own signature, so the server MAC
+proves it computed the correct `shared_secret`.
 
 **process (server):**
-1. Generate random `server_nonce` (24 bytes).
-2. Generate ephemeral X25519 keypair → `(esk_s, epk_s)`.
-3. Compute `shared_secret = X25519(esk_s, peer_ephemeral_pk)`.
-4. Derive `handshake_key` from `shared_secret` (see Key Derivation).
-5. Compute `transcript_1`, `transcript_2`.
-6. Compute `signature = Ed25519.sign(server_id_sk, transcript_1)`.
-7. Compute `mac = HMAC(handshake_key, "server_fin" ++ transcript_2)`.
-8. Store `server_nonce`, `esk_s`, `own_ephemeral_pk` (= `epk_s`), `shared_secret`, `handshake_key`, `own_mac` (= `mac`) in context.
-9. Return `.server_hello` variant.
+1. Generate random `server_nonce`, ephemeral X25519 keypair.
+2. `shared_secret = X25519(esk_s, peer_ephemeral_pk)`.
+3. Derive `handshake_key` via HKDF from `shared_secret`.
+4. Compute `transcript_1`, sign it with `server_id_sk`.
+5. Compute `transcript_2`, MAC it with `handshake_key`.
+6. Store context fields, return `.to_client` variant.
 
 **preprocess (client):**
-1. Store `peer_nonce` (= `server_nonce`), `peer_ephemeral_pk` (= `epk_s`), `signature`, `mac` from payload.
-2. Compute `shared_secret = X25519(esk_c, peer_ephemeral_pk)`.
-3. Derive `handshake_key` from `shared_secret`.
-4. Compute `transcript_1`, `transcript_2`.
-5. Verify `Ed25519.verify(signature, transcript_1, server_id_pk)`. On failure → `@panic`.
-6. Compute `expected_mac = HMAC(handshake_key, "server_fin" ++ transcript_2)`.
-7. Verify `mac == expected_mac`. On failure → `@panic`.
-8. Store `shared_secret`, `handshake_key` in context.
+1. `shared_secret = X25519(esk_c, peer_ephemeral_pk)`.
+2. Derive `handshake_key`.
+3. Compute `transcript_1`, verify `signature` against `server_id_pk`.
+4. Compute `transcript_2`, verify `mac` against computed HMAC.
+5. Store `peer_nonce`, `peer_ephemeral_pk`, `peer_signature`, `peer_mac` for
+   ClientFinished transcript.
 
 ---
 
@@ -133,69 +132,38 @@ transcript_3 = SHA256(transcript_2 ++ server_mac)
 transcript_4 = SHA256(transcript_3 ++ signature)
 ```
 
-`transcript_3` binds the server's MAC (which itself covers `transcript_2`).
-The client signs this, proving possession of `client_id_sk` and confirming
-receipt of the authentic server MAC.
+`transcript_3` binds the server's MAC (proving the server's Finished message
+was authentic). `transcript_4` includes the client signature, MAC'd to prove
+the client also computed the correct `shared_secret`.
 
-`transcript_4` includes the client signature. The client MAC covers this,
-proving the client also computed the correct `shared_secret`.
-
-**process (client):**
-1. Compute `transcript_3`, `transcript_4` (using stored server MAC).
-2. Compute `client_signature = Ed25519.sign(client_id_sk, transcript_3)`.
-3. Compute `client_mac = HMAC(handshake_key, "client_fin" ++ transcript_4)`.
-4. Derive application keys (`write_key`, `read_key`) from `shared_secret` (see Key Derivation).
-5. Return `.client_finished` variant (send or close).
-
-**preprocess (server):**
-1. Compute `transcript_3`, `transcript_4` (using stored server MAC).
-2. Verify `Ed25519.verify(client_signature, transcript_3, client_id_pk)`. On failure → `@panic`.
-3. Compute `expected_mac = HMAC(handshake_key, "client_fin" ++ transcript_4)`.
-4. Verify `client_mac == expected_mac`. On failure → `@panic`.
-5. Derive application keys from `shared_secret`.
-
-**Variant design:**
-
-`ClientFinished` has two transitions: enter the data phase or exit.
-Both carry the same payload (signature + MAC) — the variant tag determines
-the next state.
+**Variant — single transition:**
 
 ```zig
 pub const ClientFinished = union(enum) {
-    enter_data: Data(ClientFinishedPayload, ClientData),
     close: Data(ClientFinishedPayload, Exit),
 };
 ```
 
----
+Only one variant: the handshake always exits after key derivation. Data
+exchange happens through `TlsChannel`, not through protocol-internal data
+states.
 
-### Data Phase — ClientData / ServerData
+**process (client):**
+1. Compute `transcript_3`, `transcript_4` (using stored `peer_signature`, `peer_mac`).
+2. Sign `transcript_3` with `client_id_sk`.
+3. MAC `transcript_4` with `handshake_key`.
+4. Derive `write_key`, `read_key` via HKDF from `shared_secret`.
+5. Return `.close` variant — Runner transitions to `Exit`.
 
-Identical to the non-FS design. XChaCha20-Poly1305 with strict alternation.
-
-**Payload:**
-
-| Name | Type | Description |
-|------|------|-------------|
-| `nonce` | `[24]u8` | Random nonce for XChaCha20-Poly1305 |
-| `tag` | `[16]u8` | Poly1305 authentication tag |
-| `ciphertext` | `[]u8` | Encrypted plaintext |
-
-```zig
-pub const ClientData = union(enum) {
-    send: Data(Ciphertext, ServerData),
-    close: Data(void, Exit),
-};
-
-pub const ServerData = union(enum) {
-    send: Data(Ciphertext, ClientData),
-    close: Data(void, Exit),
-};
-```
+**preprocess (server):**
+1. Compute `transcript_3`, `transcript_4` (using stored `own_signature`, `own_mac`).
+2. Verify client signature. Failure → `error.SignatureInvalid`.
+3. Verify client MAC. Failure → `error.HmacInvalid`.
+4. Derive `read_key`, `write_key` via HKDF from `shared_secret`.
 
 ## Key Derivation
 
-Using HKDF-SHA256 (RFC 5869) in two-phase mode:
+Using HKDF-SHA256 (RFC 5869, two-phase mode):
 
 ```
 Phase 1 — Extract (salt = zero-filled 32 bytes):
@@ -219,82 +187,55 @@ Phase 2 — Expand (each key gets its own info label):
 
 ```zig
 pub const ClientContext = struct {
-    /// Own Ed25519 identity secret key
-    id_secret: [64]u8,
-    /// Server's Ed25519 identity public key
-    peer_id_public: [32]u8,
-    /// Own ephemeral X25519 secret key (generated in ClientHello)
-    ephemeral_sk: [32]u8,
-    /// Own ephemeral X25519 public key (generated in ClientHello)
-    own_ephemeral_pk: [32]u8,
-    /// Generated in ClientHello
-    own_nonce: [24]u8,
-    /// Received in ServerHello
-    peer_nonce: [24]u8,
-    /// Peer's ephemeral X25519 public key (received in ServerHello)
-    peer_ephemeral_pk: [32]u8,
-    /// Peer's signature (received in ServerHello)
-    peer_signature: [64]u8,
-    /// Peer's Finished MAC (received in ServerHello)
-    peer_mac: [32]u8,
-    /// X25519 shared secret = derived session key
-    shared_secret: [32]u8,
-    /// Derived from shared_secret
-    handshake_key: [32]u8,
-    /// Derived: encrypt ClientData
-    write_key: [32]u8,
-    /// Derived: decrypt ServerData
-    read_key: [32]u8,
-    /// Plaintext to send in ClientData.process (set by application)
-    send_buffer: []const u8,
-    /// Plaintext received in ServerData.preprocess
-    recv_buffer: []u8,
+    io: std.Io,                              // CSPRNG
+    id_keypair: crypto.sign.Ed25519.KeyPair, // own identity
+    peer_id_public: Ed25519.PublicKey,       // server identity
+    ephemeral_sk: [32]u8,                    // own X25519 secret
+    own_ephemeral_pk: [32]u8,                // own X25519 public
+    own_nonce: [24]u8,                       // generated in ClientHello
+    peer_nonce: [24]u8,                      // received in ServerHello
+    peer_ephemeral_pk: [32]u8,               // received in ServerHello
+    peer_signature: [64]u8,                  // received in ServerHello
+    peer_mac: [32]u8,                        // received in ServerHello
+    shared_secret: [32]u8,                   // X25519 output
+    handshake_key: [32]u8,                   // HKDF-derived
+    write_key: [32]u8,                       // for TlsChannel send
+    read_key: [32]u8,                        // for TlsChannel recv
 };
 
 pub const ServerContext = struct {
-    /// Own Ed25519 identity secret key
-    id_secret: [64]u8,
-    /// Client's Ed25519 identity public key
-    peer_id_public: [32]u8,
-    /// Own ephemeral X25519 secret key (generated in ServerHello)
-    ephemeral_sk: [32]u8,
-    /// Own ephemeral X25519 public key (generated in ServerHello)
-    own_ephemeral_pk: [32]u8,
-    /// Peer's ephemeral X25519 public key (received in ClientHello)
-    peer_ephemeral_pk: [32]u8,
-    /// Received in ClientHello
-    peer_nonce: [24]u8,
-    /// Generated in ServerHello
-    own_nonce: [24]u8,
-    /// X25519 shared secret = derived session key
-    shared_secret: [32]u8,
-    /// Derived from shared_secret
-    handshake_key: [32]u8,
-    /// Own Finished MAC (computed in ServerHello, used in ClientFinished transcript)
-    own_mac: [32]u8,
-    /// Derived: decrypt ClientData
-    read_key: [32]u8,
-    /// Derived: encrypt ServerData
-    write_key: [32]u8,
-    /// Plaintext to send in ServerData.process (set by application)
-    send_buffer: []const u8,
-    /// Plaintext received in ClientData.preprocess
-    recv_buffer: []u8,
+    io: std.Io,                              // CSPRNG
+    id_keypair: crypto.sign.Ed25519.KeyPair, // own identity
+    peer_id_public: Ed25519.PublicKey,       // client identity
+    ephemeral_sk: [32]u8,                    // own X25519 secret
+    own_ephemeral_pk: [32]u8,                // own X25519 public
+    peer_ephemeral_pk: [32]u8,               // received in ClientHello
+    peer_nonce: [24]u8,                      // received in ClientHello
+    own_nonce: [24]u8,                       // generated in ServerHello
+    shared_secret: [32]u8,                   // X25519 output
+    handshake_key: [32]u8,                   // HKDF-derived
+    own_signature: [64]u8,                   // computed in ServerHello
+    own_mac: [32]u8,                         // computed in ServerHello
+    read_key: [32]u8,                        // for TlsChannel recv
+    write_key: [32]u8,                       // for TlsChannel send
 };
 ```
+
+No `send_buffer`, `recv_buffer`, `encrypted_buf`, or counters — these belong
+to `TlsChannel`, not the handshake protocol.
 
 ## Security Properties
 
 | Property | Mechanism |
 |---|---|
-| **Client authentication** | Ed25519 signature over `transcript_3` proves possession of `client_id_sk`. HMAC proves correct `shared_secret` derivation. |
-| **Server authentication** | Ed25519 signature over `transcript_1` proves possession of `server_id_sk`. HMAC proves correct `shared_secret` derivation. |
-| **Forward secrecy** | `shared_secret = X25519(esk_c, esk_s)` — ephemeral keys discarded after session. Compromise of identity keys reveals nothing about past sessions. |
-| **Key confidentiality** | `shared_secret` never transmitted — both sides compute it independently from ephemeral public keys. |
-| **Replay protection** | Fresh random nonces per session. HMAC binds the full transcript. |
-| **Transcript consistency** | Chained SHA256 hashes prevent truncation, reordering, or message insertion. Each signature and MAC covers all preceding data. |
+| **Client authentication** | Ed25519 signature over `transcript_3` proves possession of `client_id_sk`. HMAC proves correct `shared_secret`. |
+| **Server authentication** | Ed25519 signature over `transcript_1` proves possession of `server_id_sk`. HMAC proves correct `shared_secret`. |
+| **Forward secrecy** | `shared_secret = X25519(esk_c, esk_s)` — ephemeral keys discarded after session. |
+| **Key confidentiality** | `shared_secret` never transmitted — both sides compute it from ephemeral public keys. |
+| **Replay protection** | Fresh CSPRNG nonces per session. HMAC binds the full transcript. |
+| **Transcript consistency** | Chained SHA256 hashes prevent truncation, reordering, or insertion. |
 | **Key separation** | HKDF derives independent keys for handshake auth and each data direction. |
-| **Post-compromise security** | Not provided. New sessions use fresh ephemeral keys, but if an attacker actively steals an identity key they can impersonate that party in new sessions. |
+| **Post-compromise security** | Not provided. Identity key compromise enables future impersonation (but not past decryption). |
 
 ## Transcript Chain Summary
 
@@ -319,25 +260,30 @@ cn = client_nonce, epk_c = client ephemeral pk,
 sn = server_nonce, epk_s = server ephemeral pk,
 hk = handshake_key
 
-## Comparison: Without vs. With Forward Secrecy
+## Architecture: TLS + TlsChannel
 
-| | Without FS (static box) | With FS (ephemeral DH + sig) |
-|---|---|---|
-| Handshake steps | 4 | 3 |
-| Identity key type | X25519 (DH + auth) | Ed25519 (sig only) |
-| State transitions per message | 1 payload | ServerHello: 4 fields (nonce + pk + sig + mac) |
-| `session_key` origin | server generates randomly | `X25519(esk_c, esk_s)` — joint derivation |
-| Security if identity key leaks | All past sessions decrypted | Past sessions safe; future sessions impersonatable |
+The TLS handshake produces symmetric keys. Data transport is delegated to
+`TlsChannel` (see `src/channel.zig`):
 
-## Error Handling
+```
+TCP stream
+  ├─ StreamChannel ── TLS handshake ── get keys
+  ├─ StreamChannel.deinit (frees buffers, stream stays open)
+  └─ TlsChannel.init(stream, write_key, read_key)
+       └─ sends encrypted protocol messages
+```
 
-Same as before: cryptographic failures → `@panic`. This is an example protocol.
+`TlsChannel` wraps a `StreamChannel` with NaCl SecretBox AEAD encryption.
+Each message is framed as `nonce(24) || tag(16) || ct_len(2 BE) || ciphertext`.
+The nonce embeds a monotonic u64 counter for replay/reordering protection.
 
 ## Dependencies
 
 - `std.crypto.dh.X25519` — ephemeral-ephemeral Diffie-Hellman
 - `std.crypto.sign.Ed25519` — identity signatures
-- `std.crypto.aead.xchacha20_poly1305` — symmetric AEAD for data phase
 - `std.crypto.auth.hmac.sha2.HmacSha256` — HMAC for Finished messages
 - `std.crypto.hash.sha2.Sha256` — transcript hashing and HKDF
+- `std.crypto.timing_safe` — constant-time MAC comparison
+- `std.Io.randomSecure` — CSPRNG via kernel entropy
 - `polyrole_cs` — state machine framework
+- `polyrole_cs.channel.TlsChannel` — encrypted data transport
