@@ -53,10 +53,12 @@ fn initServerCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, client_pk: crypto.
     };
 }
 
+// HKDF 密钥派生自测试：验证 Extract + Expand 流程正确性
 test "hkdf" {
     _ = @import("types.zig");
 }
 
+// 纯握手：客户端和服务端完成三次握手后正常退出，不进入数据阶段
 test "simulate handshake only" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -68,6 +70,7 @@ test "simulate handshake only" {
     try R.simulate(&client, &server, tls.ClientHello);
 }
 
+// 握手 + 单轮数据交换：客户端发 "hello from client"，服务端回复 "hello from server"
 test "simulate with data exchange" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -93,6 +96,7 @@ test "simulate with data exchange" {
     try testing.expectEqualStrings(client_msg, server_recv_buf[0..client_msg.len]);
 }
 
+// 通过 TCP 网络通道运行完整协议：验证编解码 + 网络传输 + 数据正确性
 test "symmetric run" {
     const testing = std.testing;
     const io = testing.io;
@@ -151,6 +155,7 @@ test "symmetric run" {
     try testing.expectEqualStrings(client_msg, server_recv_buf[0..client_msg.len]);
 }
 
+// 客户端无数据发送时通过 .close 变体正常结束，不进入数据阶段
 test "simulate close without data" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -167,6 +172,7 @@ test "simulate close without data" {
     try R.simulate(&client, &server, tls.ClientHello);
 }
 
+// 篡改服务端签名：客户端验证 ServerHello 签名时应返回 SignatureInvalid
 test "handshake: tampered server signature → SignatureInvalid" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -188,6 +194,7 @@ test "handshake: tampered server signature → SignatureInvalid" {
     try testing.expectError(error.SignatureInvalid, err);
 }
 
+// 篡改服务端 MAC：签名正确但 HMAC 不匹配，应返回 HmacInvalid（证明 shared_secret 不一致）
 test "handshake: tampered server MAC → HmacInvalid" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -207,6 +214,7 @@ test "handshake: tampered server MAC → HmacInvalid" {
     try testing.expectError(error.HmacInvalid, err);
 }
 
+// 篡改客户端签名：服务端验证 ClientFinished 签名时应返回 SignatureInvalid
 test "handshake: tampered client signature → SignatureInvalid" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -236,6 +244,7 @@ test "handshake: tampered client signature → SignatureInvalid" {
     try testing.expectError(error.SignatureInvalid, err);
 }
 
+// 服务端提供全零临时公钥 → X25519 scalarmult 返回 IdentityElementError → 映射为 DhFailed
 test "handshake: invalid ephemeral public key → DhFailed" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -255,6 +264,7 @@ test "handshake: invalid ephemeral public key → DhFailed" {
     try testing.expectError(error.DhFailed, err);
 }
 
+// 篡改 AEAD 认证标签 → 加密数据完整性验证失败 → 返回 DecryptFailed
 test "data: AEAD decrypt with tampered ciphertext → DecryptFailed" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -286,6 +296,7 @@ test "data: AEAD decrypt with tampered ciphertext → DecryptFailed" {
     try testing.expectError(error.DecryptFailed, err);
 }
 
+// 重放相同密文帧 → AEAD 解密成功但计数器未递增 → 返回 ReplayDetected
 test "data: replay same message → ReplayDetected" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -317,6 +328,7 @@ test "data: replay same message → ReplayDetected" {
     try testing.expectError(error.ReplayDetected, err);
 }
 
+// 多轮数据交换：ping/pong 两轮，验证计数器递增和会话持续性
 test "simulate multiple data exchanges" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -348,6 +360,7 @@ test "simulate multiple data exchanges" {
     try testing.expectEqualStrings("msg2", server_recv_buf[0..4]);
 }
 
+// 乱序检测：收到消息2后重放消息1 → 计数器 0 ≤ 1 → 返回 ReplayDetected
 test "data: out-of-order message → ReplayDetected" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -383,6 +396,7 @@ test "data: out-of-order message → ReplayDetected" {
     try testing.expectError(error.ReplayDetected, err);
 }
 
+// 大消息边界测试：客户端发送 1024 字节（max_msg_size），用递增模式填充验证完整性
 test "simulate large message" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -411,6 +425,7 @@ test "simulate large message" {
     try testing.expectEqualStrings(&large_msg, server_recv_buf[0..types.max_msg_size]);
 }
 
+// 非对称消息：客户端 2 字节 / 服务端 512 字节，验证变长编解码无错位
 test "simulate asymmetric message sizes" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -437,6 +452,7 @@ test "simulate asymmetric message sizes" {
     try testing.expectEqualStrings(short_msg, server_recv_buf[0..2]);
 }
 
+// 多会话复用：同一对 context 跑两轮完整握手 + 数据交换，验证 session 隔离（新临时密钥、计数器独立）
 test "simulate multiple sessions with same contexts" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -476,6 +492,7 @@ test "simulate multiple sessions with same contexts" {
     try testing.expectEqualStrings("session2c", server_recv_buf[0..9]);
 }
 
+// TCP 传输大消息：客户端通过 TCP 发送 1024 字节，验证网络编解码 + 传输边界正确性
 test "symmetric run large message" {
     const testing = std.testing;
     const io = testing.io;
