@@ -142,6 +142,52 @@ pub fn Runner(
                 },
             }
         }
+
+        /// Run one side of the protocol where the peer itself carries communication.
+        ///
+        /// Unlike `symmetric_run` which separates `ctx` (state) from `channel`
+        /// (transport), `run` expects a single `peer` that provides both
+        /// — the protocol context type must include `send` and `recv` methods.
+        ///
+        /// This is the natural shape for a TLS context that embeds a
+        /// TlsChannel: after the handshake derives keys, the channel is
+        /// attached to the context and the protocol runs directly on it.
+        pub fn run(
+            comptime role: Role,
+            peer: if (role == .client) *Client else *Server,
+            start: type,
+        ) !void {
+            const start_id = idFromState(start);
+            @setEvalBranchQuota(10_000_000);
+            sw: switch (start_id) {
+                inline else => |state_id| {
+                    const State = StateFromId(state_id);
+                    if (comptime State == Exit) return;
+                    const info = State.info;
+                    const result = blk: {
+                        if (comptime role == info.agent) {
+                            const process = State.process;
+                            const res = if (comptime returnsError(process)) try process(peer) else process(peer);
+                            try peer.send(state_id, State, res);
+                            break :blk res;
+                        } else {
+                            const res = try peer.recv(state_id, State);
+                            if (@hasDecl(State, "preprocess")) {
+                                const preprocess = State.preprocess;
+                                if (comptime returnsError(preprocess)) try preprocess(peer, res) else preprocess(peer, res);
+                            }
+                            break :blk res;
+                        }
+                    };
+                    switch (result) {
+                        inline else => |new_state_wit| {
+                            const NewState = @TypeOf(new_state_wit).State;
+                            continue :sw comptime idFromState(NewState);
+                        },
+                    }
+                },
+            }
+        }
     };
 }
 
@@ -354,4 +400,82 @@ test "symmetric run over tls channel" {
     try R.symmetric_run(.server, &server_context, &tc, P.A);
 
     try testing.expectEqual(server_context, 10);
+}
+
+test "run with self-communicating peer" {
+    const testing = std.testing;
+    const io = testing.io;
+    const allocator = testing.allocator;
+    const StreamCh = root.channel.StreamChannel;
+
+    // A context type that holds both protocol state and communication
+    const Ctx = struct {
+        counter: i32,
+        ch: *StreamCh,
+
+        pub fn send(self: *@This(), state_id: anytype, State: type, val: State) !void {
+            try self.ch.send(state_id, State, val);
+        }
+
+        pub fn recv(self: *@This(), state_id: anytype, State: type) !State {
+            return try self.ch.recv(state_id, State);
+        }
+    };
+
+    // Protocol that uses Ctx as context
+    const P = struct {
+        const Info = ProtocolInfo("peer_proto", Ctx, Ctx);
+
+        pub const A = union(enum) {
+            add: Data(void, B),
+            pub const info: Info = .{ .agent = .client, .name = "A" };
+            pub fn process(ctx: *Ctx) @This() { _ = ctx; return .add; }
+        };
+
+        pub const B = union(enum) {
+            to_a: Data(void, A),
+            next: Data(void, Exit),
+            pub const info: Info = .{ .agent = .server, .name = "B" };
+            pub fn process(ctx: *Ctx) @This() {
+                if (ctx.counter >= 10) return .next;
+                ctx.counter += 1;
+                return .to_a;
+            }
+        };
+    };
+
+    const R = Runner(P.A);
+
+    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try localhost.listen(io, .{});
+    defer listener.deinit(io);
+
+    const S = struct {
+        fn clientFn(addr: net.IpAddress) !void {
+            var stream = try addr.connect(io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var ch: StreamCh = undefined;
+            try ch.init(io, allocator, stream, 100, 100);
+            defer ch.deinit(allocator);
+
+            var peer = Ctx{ .counter = 0, .ch = &ch };
+            try R.run(.client, &peer, P.A);
+        }
+    };
+
+    var client_task = try io.concurrent(S.clientFn, .{listener.socket.address});
+    defer client_task.cancel(io) catch {};
+
+    var stream = try listener.accept(io);
+    defer stream.close(io);
+
+    var ch: StreamCh = undefined;
+    try ch.init(io, allocator, stream, 100, 100);
+    defer ch.deinit(allocator);
+
+    var peer = Ctx{ .counter = 0, .ch = &ch };
+    try R.run(.server, &peer, P.A);
+
+    try testing.expectEqual(peer.counter, 10);
 }
