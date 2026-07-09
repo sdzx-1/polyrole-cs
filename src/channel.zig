@@ -81,6 +81,8 @@ pub const TlsChannel = struct {
         read_key: [32]u8,
         buf_size: usize,
     ) !void {
+        std.debug.assert(buf_size >= 2);
+        std.debug.assert(buf_size <= 65535);
         try self.inner.init(io, gpa, stream, buf_size, buf_size);
         self.encode_buf = try gpa.alloc(u8, buf_size);
         self.decode_buf = try gpa.alloc(u8, buf_size);
