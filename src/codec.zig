@@ -10,7 +10,6 @@ pub fn encode(writer: *std.Io.Writer, state_id: anytype, val: anytype) !void {
             try encode_anytype(writer, data);
         },
     }
-    try writer.flush();
 }
 
 pub fn decode(reader: *std.Io.Reader, state_id: anytype, T: type) !T {

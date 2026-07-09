@@ -36,6 +36,7 @@ pub const StreamChannel = struct {
 
     pub fn send(self: *@This(), state_id: anytype, _: type, val: anytype) !void {
         try codec.encode(&self.stream_writer.interface, state_id, val);
+        try (&self.stream_writer.interface).flush();
     }
 
     pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
