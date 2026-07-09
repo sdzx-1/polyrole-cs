@@ -219,20 +219,22 @@ Client 完成签名、MAC 和最终密钥派生，握手结束。
 #### process（Client 端）
 
 ```zig
-// 1. 重建 transcript 链
+// 1. 派生应用密钥（handshake_key 已在 ServerHello.preprocess 中派生）
+const keys = types.deriveKeys(shared_secret);
+
+// 2. 重建 transcript 链
 const t1 = sha256(own_nonce ++ own_epk ++ peer_nonce ++ peer_epk);
 const t2 = sha256(t1 ++ peer_signature);    // peer_signature 来自 ServerHello
 const t3 = sha256(t2 ++ peer_mac);          // peer_mac 来自 ServerHello
 
-// 2. 签名 t3
+// 3. 签名 t3
 const signature = try sign(client_id_keypair, t3);
 
-// 3. t4 → MAC
+// 4. t4 → MAC
 const t4 = sha256(t3 ++ signature);
 const mac = hmacSha256(handshake_key, "client_fin", t4);
 
-// 4. 派生应用密钥（握手结束后的 write_key / read_key）
-const keys = types.deriveKeys(shared_secret);
+// 5. 保存应用密钥，供 TlsChannel 使用
 ctx.write_key = keys.client_write_key;
 ctx.read_key = keys.server_write_key;
 
