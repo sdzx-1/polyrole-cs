@@ -107,7 +107,7 @@ pub const TlsChannel = struct {
         var buf = self.encode_buf;
         var writer = Io.Writer.fixed(buf);
         try codec.encode(&writer, state_id, val);
-        const written = buf.len - writer.buffer.len;
+        const written = writer.end;
         const plaintext = buf[0..written];
 
         // Build nonce from counter

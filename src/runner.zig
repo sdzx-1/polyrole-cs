@@ -227,3 +227,169 @@ test "symmetric run" {
 
     try testing.expectEqual(server_context, 10);
 }
+
+test "symmetric run over tls channel" {
+    const testing = std.testing;
+    const io = testing.io;
+    const allocator = testing.allocator;
+    const crypto = std.crypto;
+    const tls_mod = @import("protocol/tls.zig");
+    const tls_types = @import("protocol/types.zig");
+
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+
+    // --- Step 1: TLS handshake over TCP to get encryption keys ---
+    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
+    var tls_listener = try localhost.listen(io, .{});
+    defer tls_listener.deinit(io);
+
+    const R_tls = Runner(tls_mod.ClientHello);
+    const StreamChannel = root.channel.StreamChannel;
+
+    // Client runs in concurrent task, does TLS handshake, returns keys
+    var tls_client_write_key: [32]u8 = undefined;
+    var tls_client_read_key: [32]u8 = undefined;
+
+    const TlsClientTask = struct {
+        fn run(
+            addr: net.IpAddress,
+            kp: crypto.sign.Ed25519.KeyPair,
+            peer_pk: crypto.sign.Ed25519.PublicKey,
+            wk: *[32]u8,
+            rk: *[32]u8,
+        ) !void {
+            var tls_ctx: tls_types.ClientContext = .{
+                .io = io,
+                .send_counter = 0,
+                .recv_counter = std.math.maxInt(u64),
+                .id_keypair = kp,
+                .peer_id_public = peer_pk,
+                .ephemeral_sk = undefined,
+                .own_ephemeral_pk = undefined,
+                .own_nonce = undefined,
+                .peer_nonce = undefined,
+                .peer_ephemeral_pk = undefined,
+                .peer_signature = undefined,
+                .peer_mac = undefined,
+                .shared_secret = undefined,
+                .handshake_key = undefined,
+                .write_key = undefined,
+                .read_key = undefined,
+                .encrypted_buf = undefined,
+                .send_buffer = "",
+                .recv_buffer = undefined,
+            };
+
+            var stream = try addr.connect(io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var sc: StreamChannel = undefined;
+            try sc.init(io, allocator, stream, 256, 256);
+            defer sc.deinit(allocator);
+
+            try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls_mod.ClientHello);
+
+            wk.* = tls_ctx.write_key;
+            rk.* = tls_ctx.read_key;
+        }
+    };
+
+    var client_task = try io.concurrent(TlsClientTask.run, .{
+        tls_listener.socket.address,
+        kp_c,
+        kp_s.public_key,
+        &tls_client_write_key,
+        &tls_client_read_key,
+    });
+
+    var tls_stream = try tls_listener.accept(io);
+
+    var tls_server_write_key: [32]u8 = undefined;
+    var tls_server_read_key: [32]u8 = undefined;
+    {
+        var tls_ctx: tls_types.ServerContext = .{
+            .io = io,
+            .send_counter = 0,
+            .recv_counter = std.math.maxInt(u64),
+            .id_keypair = kp_s,
+            .peer_id_public = kp_c.public_key,
+            .ephemeral_sk = undefined,
+            .own_ephemeral_pk = undefined,
+            .peer_ephemeral_pk = undefined,
+            .peer_nonce = undefined,
+            .own_nonce = undefined,
+            .shared_secret = undefined,
+            .handshake_key = undefined,
+            .own_signature = undefined,
+            .own_mac = undefined,
+            .read_key = undefined,
+            .write_key = undefined,
+            .encrypted_buf = undefined,
+            .send_buffer = "",
+            .recv_buffer = undefined,
+        };
+
+        var sc: StreamChannel = undefined;
+        try sc.init(io, allocator, tls_stream, 256, 256);
+        defer sc.deinit(allocator);
+
+        try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls_mod.ClientHello);
+
+        tls_server_write_key = tls_ctx.write_key;
+        tls_server_read_key = tls_ctx.read_key;
+    }
+    tls_stream.close(io);
+    tls_stream = undefined;
+
+    // Wait for TLS client task to complete before starting next phase
+    _ = client_task.cancel(io) catch {};
+
+    // --- Step 2: Run test protocol over encrypted channel (new TCP connection) ---
+    const P = CreateTestProtocol("p2", Exit);
+    const R = Runner(P.A);
+    var client_context: i32 = 0;
+    var server_context: i32 = 0;
+
+    var listener = try localhost.listen(io, .{});
+    defer listener.deinit(io);
+
+    const TlsChannel = root.channel.TlsChannel;
+
+    const S = struct {
+        fn clientFn(
+            server_address: net.IpAddress,
+            ctx: *i32,
+            write_key: [32]u8,
+            read_key: [32]u8,
+        ) !void {
+            var stream = try server_address.connect(io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var tc: TlsChannel = undefined;
+            try tc.init(io, allocator, stream, write_key, read_key, 256);
+            defer tc.deinit(allocator);
+
+            try R.symmetric_run(.client, ctx, &tc, P.A);
+        }
+    };
+
+    var pp_client_task = try io.concurrent(S.clientFn, .{
+        listener.socket.address,
+        &client_context,
+        tls_client_write_key,
+        tls_client_read_key,
+    });
+
+    var stream = try listener.accept(io);
+    defer stream.close(io);
+
+    var tc: TlsChannel = undefined;
+    try tc.init(io, allocator, stream, tls_server_write_key, tls_server_read_key, 256);
+    defer tc.deinit(allocator);
+
+    try R.symmetric_run(.server, &server_context, &tc, P.A);
+
+    _ = pp_client_task.cancel(io) catch {};
+    try testing.expectEqual(server_context, 10);
+}
