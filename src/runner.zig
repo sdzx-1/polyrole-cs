@@ -8,6 +8,11 @@ const ProtocolInfo = root.ProtocolInfo;
 const Exit = root.Exit;
 const net = Io.net;
 
+fn returnsError(comptime fun: anytype) bool {
+    const ret = @typeInfo(@TypeOf(fun)).@"fn".return_type.?;
+    return @typeInfo(ret) == .error_union;
+}
+
 pub fn Runner(
     comptime State_: type,
 ) type {
@@ -35,7 +40,7 @@ pub fn Runner(
         ///
         /// Useful for testing protocol logic before deploying it over a real
         /// channel, or when the two sides share an address space.
-        pub fn simulate(client: *Client, server: *Server, start: type) void {
+        pub fn simulate(client: *Client, server: *Server, start: type) !void {
             const start_id = idFromState(start);
             @setEvalBranchQuota(10_000_000);
             sw: switch (start_id) {
@@ -45,8 +50,12 @@ pub fn Runner(
                     const info = State.info;
                     const process_ctx = if (comptime info.agent == .client) client else server;
                     const preprocess_ctx = if (comptime info.agent == .client) server else client;
-                    const result = State.process(process_ctx);
-                    if (@hasDecl(State, "preprocess")) State.preprocess(preprocess_ctx, result);
+                    const process = State.process;
+                    const result = if (comptime returnsError(process)) try process(process_ctx) else process(process_ctx);
+                    if (@hasDecl(State, "preprocess")) {
+                        const preprocess = State.preprocess;
+                        if (comptime returnsError(preprocess)) try preprocess(preprocess_ctx, result) else preprocess(preprocess_ctx, result);
+                    }
 
                     switch (result) {
                         inline else => |new_state_wit| {
@@ -86,12 +95,16 @@ pub fn Runner(
                     const info = State.info;
                     const result = blk: {
                         if (comptime role == info.agent) {
-                            const res = State.process(ctx);
+                            const process = State.process;
+                            const res = if (comptime returnsError(process)) try process(ctx) else process(ctx);
                             try channel.send(state_id, State, res);
                             break :blk res;
                         } else {
                             const res = try channel.recv(state_id, State);
-                            if (@hasDecl(State, "preprocess")) State.preprocess(ctx, res);
+                            if (@hasDecl(State, "preprocess")) {
+                                const preprocess = State.preprocess;
+                                if (comptime returnsError(preprocess)) try preprocess(ctx, res) else preprocess(ctx, res);
+                            }
                             break :blk res;
                         }
                     };
