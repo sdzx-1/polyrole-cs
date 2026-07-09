@@ -198,3 +198,117 @@ test "simulate multiple sessions with same contexts" {
 
     try testing.expect(!std.mem.eql(u8, &key1, &client.write_key));
 }
+
+// 篡改客户端 MAC：客户端签名正确但 HMAC 不匹配，应返回 HmacInvalid
+test "handshake: tampered client MAC → HmacInvalid" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    const ch = try tls.ClientHello.process(&client);
+    tls.ClientHello.preprocess(&server, ch);
+    const sh = try tls.ServerHello.process(&server);
+    try tls.ServerHello.preprocess(&client, sh);
+
+    var cf = try tls.ClientFinished.process(&client);
+    cf.close.data.mac = [_]u8{0} ** 32;
+
+    const err = tls.ClientFinished.preprocess(&server, cf);
+    try testing.expectError(error.HmacInvalid, err);
+}
+
+// Client 使用错误身份密钥（非 server 信任的公钥对应的私钥）
+// → server 端 ClientFinished.preprocess 签名验证失败 → SignatureInvalid
+test "handshake: wrong client identity key → SignatureInvalid" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_c_rogue = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+
+    // Server 信任 kp_c，但 client 用 kp_c_rogue 签名
+    var client = initClientCtx(testing.io, kp_c_rogue, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    const ch = try tls.ClientHello.process(&client);
+    tls.ClientHello.preprocess(&server, ch);
+    const sh = try tls.ServerHello.process(&server);
+    try tls.ServerHello.preprocess(&client, sh);
+
+    const err = tls.ClientFinished.process(&client);
+    // 签名本身不会失败，但 server 验证时用 kp_c.public_key 验证 kp_c_rogue 的签名
+    const cf = try err;
+    const verify_err = tls.ClientFinished.preprocess(&server, cf);
+    try testing.expectError(error.SignatureInvalid, verify_err);
+}
+
+// MITM 替换 Client 临时公钥 → Server 签名基于不同的 t1
+// → Client 重建 t1 不匹配 → SignatureInvalid
+test "handshake: swapped client ephemeral pk → SignatureInvalid" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    var ch = try tls.ClientHello.process(&client);
+    // MITM 替换临时公钥
+    const fake_kp = crypto.dh.X25519.KeyPair.generate(testing.io);
+    ch.to_server.data.ephemeral_pk = fake_kp.public_key;
+
+    tls.ClientHello.preprocess(&server, ch);
+
+    const sh = try tls.ServerHello.process(&server);
+    // Server 的 t1 = SHA256(cn || fake_epk || sn || epk_s)
+    // Client 的 t1 = SHA256(cn || real_epk || sn || epk_s) → 签名不匹配
+    const err = tls.ServerHello.preprocess(&client, sh);
+    try testing.expectError(error.SignatureInvalid, err);
+}
+
+// ServerHello 跨会话重放：
+// Client 先后执行两次 ClientHello（临时密钥不同），
+// 将第一次的 ServerHello 重放到第二次 → t1 不匹配 → SignatureInvalid
+test "handshake: replayed ServerHello from previous session → SignatureInvalid" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+
+    // Round 1: 生成 ServerHello
+    const ch1 = try tls.ClientHello.process(&client);
+    var s1 = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    tls.ClientHello.preprocess(&s1, ch1);
+    const sh1 = try tls.ServerHello.process(&s1);
+    try tls.ServerHello.preprocess(&client, sh1);
+
+    // Round 2: Client 生成新临时密钥，攻击者重放 sh1
+    _ = try tls.ClientHello.process(&client);
+    const err = tls.ServerHello.preprocess(&client, sh1);
+    try testing.expectError(error.SignatureInvalid, err);
+}
+
+// 不同身份密钥对的握手互不干扰
+test "simulate: two handshakes with different keypairs produce different keys" {
+    const testing = std.testing;
+
+    const kp_c1 = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s1 = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_c2 = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s2 = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+
+    var c1 = initClientCtx(testing.io, kp_c1, kp_s1.public_key);
+    var s1 = initServerCtx(testing.io, kp_s1, kp_c1.public_key);
+    var c2 = initClientCtx(testing.io, kp_c2, kp_s2.public_key);
+    var s2 = initServerCtx(testing.io, kp_s2, kp_c2.public_key);
+
+    const R = Runner(tls.ClientHello);
+
+    try R.simulate(&c1, &s1, tls.ClientHello);
+    try R.simulate(&c2, &s2, tls.ClientHello);
+
+    try testing.expect(!std.mem.eql(u8, &c1.write_key, &c2.write_key));
+    try testing.expect(!std.mem.eql(u8, &s1.write_key, &s2.write_key));
+}
