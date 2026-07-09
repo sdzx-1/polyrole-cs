@@ -5,8 +5,9 @@ const Runner = polyrole.runner.Runner;
 const tls = @import("tls.zig");
 const types = @import("types.zig");
 
-fn initClientCtx(kp: crypto.sign.Ed25519.KeyPair, server_pk: crypto.sign.Ed25519.PublicKey) types.ClientContext {
+fn initClientCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, server_pk: crypto.sign.Ed25519.PublicKey) types.ClientContext {
     return .{
+        .io = io,
         .id_keypair = kp,
         .peer_id_public = server_pk,
         .ephemeral_sk = undefined,
@@ -26,8 +27,9 @@ fn initClientCtx(kp: crypto.sign.Ed25519.KeyPair, server_pk: crypto.sign.Ed25519
     };
 }
 
-fn initServerCtx(kp: crypto.sign.Ed25519.KeyPair, client_pk: crypto.sign.Ed25519.PublicKey) types.ServerContext {
+fn initServerCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, client_pk: crypto.sign.Ed25519.PublicKey) types.ServerContext {
     return .{
+        .io = io,
         .id_keypair = kp,
         .peer_id_public = client_pk,
         .ephemeral_sk = undefined,
@@ -55,8 +57,8 @@ test "simulate handshake only" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(kp_c, kp_s.public_key);
-    var server = initServerCtx(kp_s, kp_c.public_key);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
     const R = Runner(tls.ClientHello);
     R.simulate(&client, &server, tls.ClientHello);
@@ -66,8 +68,8 @@ test "simulate with data exchange" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(kp_c, kp_s.public_key);
-    var server = initServerCtx(kp_s, kp_c.public_key);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
     const client_msg = "hello from client";
     const server_msg = "hello from server";
@@ -95,8 +97,8 @@ test "symmetric run" {
 
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(kp_c, kp_s.public_key);
-    var server = initServerCtx(kp_s, kp_c.public_key);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
     const client_msg = "hello from client";
     const server_msg = "hello from server";

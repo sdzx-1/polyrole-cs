@@ -46,15 +46,14 @@ fn sha256(parts: anytype) [32]u8 {
     return out;
 }
 
-fn randomBytes(comptime n: usize) [n]u8 {
+fn randomBytes(io: std.Io, comptime n: usize) [n]u8 {
     var buf: [n]u8 = undefined;
-    var prng = std.Random.DefaultPrng.init(@intFromPtr(&buf));
-    prng.random().bytes(&buf);
+    io.randomSecure(&buf) catch @panic("Io.randomSecure failed");
     return buf;
 }
 
-fn generateX25519Keypair() struct { secret: [32]u8, public: [32]u8 } {
-    const secret = randomBytes(32);
+fn generateX25519Keypair(io: std.Io) struct { secret: [32]u8, public: [32]u8 } {
+    const secret = randomBytes(io, 32);
     const basepoint = [_]u8{9} ++ ([_]u8{0} ** 31);
     const public = crypto.dh.X25519.scalarmult(secret, basepoint) catch @panic("x25519 keygen failed");
     return .{ .secret = secret, .public = public };
@@ -68,8 +67,8 @@ pub const ClientHello = union(enum) {
     pub const info: TlsInfo = .{ .agent = .client, .name = "ClientHello" };
 
     pub fn process(ctx: *types.ClientContext) @This() {
-        const nonce = randomBytes(24);
-        const kp = generateX25519Keypair();
+        const nonce = randomBytes(ctx.io, 24);
+        const kp = generateX25519Keypair(ctx.io);
 
         ctx.own_nonce = nonce;
         ctx.ephemeral_sk = kp.secret;
@@ -99,8 +98,8 @@ pub const ServerHello = union(enum) {
     pub const info: TlsInfo = .{ .agent = .server, .name = "ServerHello" };
 
     pub fn process(ctx: *types.ServerContext) @This() {
-        const nonce = randomBytes(24);
-        const kp = generateX25519Keypair();
+        const nonce = randomBytes(ctx.io, 24);
+        const kp = generateX25519Keypair(ctx.io);
 
         const shared_secret = crypto.dh.X25519.scalarmult(kp.secret, ctx.peer_ephemeral_pk) catch
             @panic("x25519 scalarmult failed");
@@ -214,7 +213,7 @@ pub const ClientData = union(enum) {
         if (ctx.send_buffer.len == 0) return .close;
 
         const plaintext = ctx.send_buffer;
-        const nonce = randomBytes(24);
+        const nonce = randomBytes(ctx.io, 24);
 
         const ct_len = plaintext.len + 16;
         const combined = ctx.encrypted_buf[0..ct_len];
@@ -264,7 +263,7 @@ pub const ServerData = union(enum) {
         if (ctx.send_buffer.len == 0) return .close;
 
         const plaintext = ctx.send_buffer;
-        const nonce = randomBytes(24);
+        const nonce = randomBytes(ctx.io, 24);
 
         const ct_len = plaintext.len + 16;
         const combined = ctx.encrypted_buf[0..ct_len];

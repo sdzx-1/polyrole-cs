@@ -5,6 +5,8 @@ const crypto = std.crypto;
 pub const max_msg_size = 1024;
 
 pub const ClientContext = struct {
+    /// Io interface for CSPRNG
+    io: std.Io,
     /// Own Ed25519 identity keypair
     id_keypair: crypto.sign.Ed25519.KeyPair,
     /// Server's Ed25519 identity public key
@@ -47,6 +49,8 @@ pub const ClientContext = struct {
 };
 
 pub const ServerContext = struct {
+    /// Io interface for CSPRNG
+    io: std.Io,
     /// Own Ed25519 identity keypair
     id_keypair: crypto.sign.Ed25519.KeyPair,
     /// Client's Ed25519 identity public key
