@@ -63,22 +63,26 @@ const polyrole = @import("polyrole_cs");
 
 const Info = polyrole.ProtocolInfo("counter", i32, i32);
 
-pub const A = union(enum) {
-    add: polyrole.Data(void, B),
-    pub const info: Info = .{ .agent = .client, .name = "A" };
-    pub fn process(ctx: *i32) @This() { _ = ctx; return .add; }
+const Counter = struct {
+    pub const B = union(enum) {
+        to_a: polyrole.Data(void, A),
+        done: polyrole.Data(void, polyrole.Exit),
+        pub const info: Info = .{ .agent = .server, .name = "B" };
+        pub fn process(ctx: *i32) @This() {
+            if (ctx.* >= 10) return .done;
+            ctx.* += 1;
+            return .to_a;
+        }
+    };
+
+    pub const A = union(enum) {
+        add: polyrole.Data(void, B),
+        pub const info: Info = .{ .agent = .client, .name = "A" };
+        pub fn process(ctx: *i32) @This() { _ = ctx; return .add; }
+    };
 };
 
-pub const B = union(enum) {
-    to_a: polyrole.Data(void, A),
-    done: polyrole.Data(void, polyrole.Exit),
-    pub const info: Info = .{ .agent = .server, .name = "B" };
-    pub fn process(ctx: *i32) @This() {
-        if (ctx.* >= 10) return .done;
-        ctx.* += 1;
-        return .to_a;
-    }
-};
+const A = Counter.A;
 ```
 
 ---
@@ -160,8 +164,12 @@ state_id(4 BE) || tag(1) || payload
 生成 DOT 格式状态图：
 
 ```zig
-const R = polyrole.runner.Runner(MyProtocol.Entry);
-try polyrole.Graph.genDotFile("graph.dot", R);
+var graph = try polyrole.Graph.initWithFsm(allocator, A);
+defer graph.deinit();
+
+var file = try std.fs.cwd().createFile("graph.dot", .{});
+defer file.close();
+try graph.generateDot(null, file.writer());
 ```
 
 可用 Graphviz 渲染：`dot -Tpng graph.dot -o graph.png`
@@ -176,7 +184,7 @@ try polyrole.Graph.genDotFile("graph.dot", R);
 
 ```zig
 pub fn process(ctx: *Ctx) !@This() {
-    const key = try loadKey() else return error.KeyNotFound;
+    const key = loadKey() catch return error.KeyNotFound;
     // ...
 }
 ```
