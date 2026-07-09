@@ -13,6 +13,31 @@ fn returnsError(comptime fun: anytype) bool {
     return @typeInfo(ret) == .error_union;
 }
 
+/// A state machine runner that drives a protocol between two agents.
+///
+/// Error handling design:
+/// ----------------------
+/// Originally, `process` and `preprocess` were not expected to return errors.
+/// The reasoning was that in typical communication protocols, neither party
+/// should unilaterally abort without first notifying the peer — a clean close
+/// through an Exit transition is the expected path.
+///
+/// However, certain scenarios demand unilateral termination. For example, a
+/// server facing an illegal or malicious client must be able to abort the
+/// protocol immediately upon detecting invalid credentials, a tampered
+/// message, or a replay attack. In these cases, attempting to cooperate with
+/// the peer (by sending a graceful close) is undesirable or impossible.
+///
+/// To support both patterns, the Runner now inspects the return type of each
+/// state's `process` and `preprocess` at compile time:
+/// - If the return type is a plain union (e.g. `@This()`), it is called
+///   directly and the protocol proceeds as before.
+/// - If the return type is an error union (e.g. `!@This()`), the Runner uses
+///   `try` and propagates the error to its own caller, terminating the
+///   protocol immediately.
+///
+/// This allows protocol authors to choose per-state whether abort-on-error
+/// semantics apply, without forcing all states into one model.
 pub fn Runner(
     comptime State_: type,
 ) type {
@@ -157,7 +182,7 @@ test "simulate" {
     const R = Runner(P.A);
     var client: i32 = 0;
     var server: i32 = 0;
-    R.simulate(&client, &server, P.A);
+    try R.simulate(&client, &server, P.A);
     try testing.expectEqual(server, 10);
 }
 test "symmetric run" {

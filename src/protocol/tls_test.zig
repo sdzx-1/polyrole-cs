@@ -65,7 +65,7 @@ test "simulate handshake only" {
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
     const R = Runner(tls.ClientHello);
-    R.simulate(&client, &server, tls.ClientHello);
+    try R.simulate(&client, &server, tls.ClientHello);
 }
 
 test "simulate with data exchange" {
@@ -87,7 +87,7 @@ test "simulate with data exchange" {
     server.recv_buffer = &server_recv_buf;
 
     const R = Runner(tls.ClientHello);
-    R.simulate(&client, &server, tls.ClientHello);
+    try R.simulate(&client, &server, tls.ClientHello);
 
     try testing.expectEqualStrings(server_msg, client_recv_buf[0..server_msg.len]);
     try testing.expectEqualStrings(client_msg, server_recv_buf[0..client_msg.len]);
