@@ -1,6 +1,6 @@
 const std = @import("std");
 const crypto = std.crypto;
-const polyrole = @import("../root.zig");
+const polyrole = @import("../../root.zig");
 const Runner = polyrole.runner.Runner;
 const tls = @import("tls.zig");
 const types = @import("types.zig");

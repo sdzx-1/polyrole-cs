@@ -210,5 +210,5 @@ pub const StateMap = struct {
 
 comptime {
     _ = @import("runner.zig");
-    _ = @import("protocol/tls_test.zig");
+    _ = @import("protocol/tls/tls_test.zig");
 }

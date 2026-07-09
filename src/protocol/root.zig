@@ -1,2 +1,2 @@
-pub const types = @import("types.zig");
-pub const tls = @import("tls.zig");
+pub const tls = @import("tls/tls.zig");
+pub const tls_types = @import("tls/types.zig");

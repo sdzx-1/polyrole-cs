@@ -1,6 +1,6 @@
 const std = @import("std");
 const crypto = std.crypto;
-const polyrole = @import("../root.zig");
+const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
 const Exit = polyrole.Exit;
