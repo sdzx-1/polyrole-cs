@@ -8,8 +8,6 @@ const types = @import("types.zig");
 fn initClientCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, server_pk: crypto.sign.Ed25519.PublicKey) types.ClientContext {
     return .{
         .io = io,
-        .send_counter = 0,
-        .recv_counter = std.math.maxInt(u64),
         .id_keypair = kp,
         .peer_id_public = server_pk,
         .ephemeral_sk = undefined,
@@ -23,17 +21,12 @@ fn initClientCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, server_pk: crypto.
         .handshake_key = undefined,
         .write_key = undefined,
         .read_key = undefined,
-        .encrypted_buf = undefined,
-        .send_buffer = "",
-        .recv_buffer = undefined,
     };
 }
 
 fn initServerCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, client_pk: crypto.sign.Ed25519.PublicKey) types.ServerContext {
     return .{
         .io = io,
-        .send_counter = 0,
-        .recv_counter = std.math.maxInt(u64),
         .id_keypair = kp,
         .peer_id_public = client_pk,
         .ephemeral_sk = undefined,
@@ -47,9 +40,6 @@ fn initServerCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, client_pk: crypto.
         .own_mac = undefined,
         .read_key = undefined,
         .write_key = undefined,
-        .encrypted_buf = undefined,
-        .send_buffer = "",
-        .recv_buffer = undefined,
     };
 }
 
@@ -58,7 +48,7 @@ test "hkdf" {
     _ = @import("types.zig");
 }
 
-// 纯握手：客户端和服务端完成三次握手后正常退出，不进入数据阶段
+// 纯握手：客户端和服务端完成三次握手后正常退出
 test "simulate handshake only" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -70,34 +60,8 @@ test "simulate handshake only" {
     try R.simulate(&client, &server, tls.ClientHello);
 }
 
-// 握手 + 单轮数据交换：客户端发 "hello from client"，服务端回复 "hello from server"
-test "simulate with data exchange" {
-    const testing = std.testing;
-    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
-
-    const client_msg = "hello from client";
-    const server_msg = "hello from server";
-
-    var client_recv_buf: [128]u8 = undefined;
-    var server_recv_buf: [128]u8 = undefined;
-
-    client.send_buffer = client_msg;
-    client.recv_buffer = &client_recv_buf;
-    server.send_buffer = server_msg;
-    server.recv_buffer = &server_recv_buf;
-
-    const R = Runner(tls.ClientHello);
-    try R.simulate(&client, &server, tls.ClientHello);
-
-    try testing.expectEqualStrings(server_msg, client_recv_buf[0..server_msg.len]);
-    try testing.expectEqualStrings(client_msg, server_recv_buf[0..client_msg.len]);
-}
-
-// 通过 TCP 网络通道运行完整协议：验证编解码 + 网络传输 + 数据正确性
-test "symmetric run" {
+// 通过 TCP 网络通道运行完整握手：验证编解码 + 网络传输
+test "symmetric run handshake" {
     const testing = std.testing;
     const io = testing.io;
     const allocator = testing.allocator;
@@ -107,17 +71,6 @@ test "symmetric run" {
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
-
-    const client_msg = "hello from client";
-    const server_msg = "hello from server";
-
-    var client_recv_buf: [128]u8 = undefined;
-    var server_recv_buf: [128]u8 = undefined;
-
-    client.send_buffer = client_msg;
-    client.recv_buffer = &client_recv_buf;
-    server.send_buffer = server_msg;
-    server.recv_buffer = &server_recv_buf;
 
     const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
     var listener = try localhost.listen(io, .{});
@@ -132,7 +85,7 @@ test "symmetric run" {
             defer stream.close(io);
 
             var ch: StreamChannel = undefined;
-            try ch.init(io, allocator, stream, 1024, 1024);
+            try ch.init(io, allocator, stream, 256, 256);
             defer ch.deinit(allocator);
 
             try R.symmetric_run(.client, ctx, &ch, tls.ClientHello);
@@ -146,30 +99,10 @@ test "symmetric run" {
     defer stream.close(io);
 
     var ch: StreamChannel = undefined;
-    try ch.init(io, allocator, stream, 1024, 1024);
+    try ch.init(io, allocator, stream, 256, 256);
     defer ch.deinit(allocator);
 
     try R.symmetric_run(.server, &server, &ch, tls.ClientHello);
-
-    try testing.expectEqualStrings(server_msg, client_recv_buf[0..server_msg.len]);
-    try testing.expectEqualStrings(client_msg, server_recv_buf[0..client_msg.len]);
-}
-
-// 客户端无数据发送时通过 .close 变体正常结束，不进入数据阶段
-test "simulate close without data" {
-    const testing = std.testing;
-    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
-
-    // No send_buffer set → ClientFinished chooses .close variant
-    client.send_buffer = "";
-    server.send_buffer = "";
-
-    const R = Runner(tls.ClientHello);
-    // Should complete without error and without entering data phase
-    try R.simulate(&client, &server, tls.ClientHello);
 }
 
 // 篡改服务端签名：客户端验证 ServerHello 签名时应返回 SignatureInvalid
@@ -180,21 +113,17 @@ test "handshake: tampered server signature → SignatureInvalid" {
     var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
-    // Step 1: ClientHello
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
 
-    // Step 2: ServerHello
     var sh = try tls.ServerHello.process(&server);
-
-    // Tamper server signature
     sh.to_client.data.signature = [_]u8{0} ** 64;
 
     const err = tls.ServerHello.preprocess(&client, sh);
     try testing.expectError(error.SignatureInvalid, err);
 }
 
-// 篡改服务端 MAC：签名正确但 HMAC 不匹配，应返回 HmacInvalid（证明 shared_secret 不一致）
+// 篡改服务端 MAC：签名正确但 HMAC 不匹配，应返回 HmacInvalid
 test "handshake: tampered server MAC → HmacInvalid" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -206,8 +135,6 @@ test "handshake: tampered server MAC → HmacInvalid" {
     tls.ClientHello.preprocess(&server, ch);
 
     var sh = try tls.ServerHello.process(&server);
-
-    // Tamper server MAC (signature is valid, MAC is not)
     sh.to_client.data.mac = [_]u8{0} ** 32;
 
     const err = tls.ServerHello.preprocess(&client, sh);
@@ -222,29 +149,19 @@ test "handshake: tampered client signature → SignatureInvalid" {
     var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
-    // Drive through ClientHello + ServerHello
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
     const sh = try tls.ServerHello.process(&server);
     try tls.ServerHello.preprocess(&client, sh);
 
-    // Set send_buffer so ClientFinished chooses .enter_data variant
-    client.send_buffer = "test";
-
-    // Step 3: ClientFinished
     var cf = try tls.ClientFinished.process(&client);
-
-    // Ensure it chose .enter_data, not .close
-    try testing.expect(cf == .enter_data);
-
-    // Tamper client signature
-    cf.enter_data.data.signature = [_]u8{0} ** 64;
+    cf.close.data.signature = [_]u8{0} ** 64;
 
     const err = tls.ClientFinished.preprocess(&server, cf);
     try testing.expectError(error.SignatureInvalid, err);
 }
 
-// 服务端提供全零临时公钥 → X25519 scalarmult 返回 IdentityElementError → 映射为 DhFailed
+// 服务端提供全零临时公钥 → X25519 scalarmult 返回错误 → 映射为 DhFailed
 test "handshake: invalid ephemeral public key → DhFailed" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -256,203 +173,13 @@ test "handshake: invalid ephemeral public key → DhFailed" {
     tls.ClientHello.preprocess(&server, ch);
 
     var sh = try tls.ServerHello.process(&server);
-
-    // Zero ephemeral public key → scalarmult fails with IdentityElementError
     sh.to_client.data.ephemeral_pk = [_]u8{0} ** 32;
 
     const err = tls.ServerHello.preprocess(&client, sh);
     try testing.expectError(error.DhFailed, err);
 }
 
-// 篡改 AEAD 认证标签 → 加密数据完整性验证失败 → 返回 DecryptFailed
-test "data: AEAD decrypt with tampered ciphertext → DecryptFailed" {
-    const testing = std.testing;
-    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
-
-    var client_recv_buf: [128]u8 = undefined;
-    var server_recv_buf: [128]u8 = undefined;
-    client.send_buffer = "hello";
-    client.recv_buffer = &client_recv_buf;
-    server.recv_buffer = &server_recv_buf;
-
-    // Complete handshake
-    const R = Runner(tls.ClientHello);
-    try R.simulate(&client, &server, tls.ClientHello);
-
-    // Send one legitimate message to establish counter state
-    server.send_buffer = "legit";
-    const sd = try tls.ServerData.process(&server);
-    try tls.ServerData.preprocess(&client, sd);
-
-    // Now craft a tampered ciphertext
-    client.send_buffer = "tampered";
-    var cd = try tls.ClientData.process(&client);
-    cd.send.data.tag[0] ^= 0xFF; // flip one byte in authentication tag
-
-    const err = tls.ClientData.preprocess(&server, cd);
-    try testing.expectError(error.DecryptFailed, err);
-}
-
-// 重放相同密文帧 → AEAD 解密成功但计数器未递增 → 返回 ReplayDetected
-test "data: replay same message → ReplayDetected" {
-    const testing = std.testing;
-    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
-
-    var client_recv_buf: [128]u8 = undefined;
-    var server_recv_buf: [128]u8 = undefined;
-    client.send_buffer = "hello";
-    client.recv_buffer = &client_recv_buf;
-    server.recv_buffer = &server_recv_buf;
-
-    const R = Runner(tls.ClientHello);
-    try R.simulate(&client, &server, tls.ClientHello);
-
-    // First delivery succeeds
-    server.send_buffer = "legit";
-    const sd = try tls.ServerData.process(&server);
-    // Save ciphertext before encrypted_buf is overwritten by subsequent calls
-    var saved_ct: [128]u8 = undefined;
-    @memcpy(saved_ct[0..sd.send.data.ciphertext.len], sd.send.data.ciphertext);
-    try tls.ServerData.preprocess(&client, sd);
-
-    // Replay: reconstruct with saved ciphertext
-    var replay = sd;
-    replay.send.data.ciphertext = saved_ct[0..sd.send.data.ciphertext.len];
-    const err = tls.ServerData.preprocess(&client, replay);
-    try testing.expectError(error.ReplayDetected, err);
-}
-
-// 多轮数据交换：ping/pong 两轮，验证计数器递增和会话持续性
-test "simulate multiple data exchanges" {
-    const testing = std.testing;
-    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
-
-    var client_recv_buf: [1024]u8 = undefined;
-    var server_recv_buf: [1024]u8 = undefined;
-    client.recv_buffer = &client_recv_buf;
-    server.recv_buffer = &server_recv_buf;
-
-    const R = Runner(tls.ClientHello);
-
-    // First exchange
-    client.send_buffer = "ping";
-    server.send_buffer = "pong";
-    try R.simulate(&client, &server, tls.ClientHello);
-
-    try testing.expectEqualStrings("pong", client_recv_buf[0..4]);
-    try testing.expectEqualStrings("ping", server_recv_buf[0..4]);
-
-    // Reset buffers for next exchange
-    client.send_buffer = "msg2";
-    server.send_buffer = "ack2";
-    try R.simulate(&client, &server, tls.ClientHello);
-
-    try testing.expectEqualStrings("ack2", client_recv_buf[0..4]);
-    try testing.expectEqualStrings("msg2", server_recv_buf[0..4]);
-}
-
-// 乱序检测：收到消息2后重放消息1 → 计数器 0 ≤ 1 → 返回 ReplayDetected
-test "data: out-of-order message → ReplayDetected" {
-    const testing = std.testing;
-    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
-
-    var client_recv_buf: [128]u8 = undefined;
-    var server_recv_buf: [128]u8 = undefined;
-    client.send_buffer = "hello";
-    client.recv_buffer = &client_recv_buf;
-    server.recv_buffer = &server_recv_buf;
-
-    const R = Runner(tls.ClientHello);
-    try R.simulate(&client, &server, tls.ClientHello);
-
-    // Send and receive first message
-    server.send_buffer = "first";
-    const sd1 = try tls.ServerData.process(&server);
-    var saved_ct1: [128]u8 = undefined;
-    @memcpy(saved_ct1[0..sd1.send.data.ciphertext.len], sd1.send.data.ciphertext);
-    try tls.ServerData.preprocess(&client, sd1);
-
-    // Send and receive second message (increments counter to 1)
-    server.send_buffer = "second";
-    const sd2 = try tls.ServerData.process(&server);
-    try tls.ServerData.preprocess(&client, sd2);
-
-    // Replay first message (counter=0) after second (counter=1) was received
-    var replay = sd1;
-    replay.send.data.ciphertext = saved_ct1[0..sd1.send.data.ciphertext.len];
-    const err = tls.ServerData.preprocess(&client, replay);
-    try testing.expectError(error.ReplayDetected, err);
-}
-
-// 大消息边界测试：客户端发送 1024 字节（max_msg_size），用递增模式填充验证完整性
-test "simulate large message" {
-    const testing = std.testing;
-    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
-
-    var client_recv_buf: [types.max_msg_size]u8 = undefined;
-    var server_recv_buf: [types.max_msg_size]u8 = undefined;
-    client.recv_buffer = &client_recv_buf;
-    server.recv_buffer = &server_recv_buf;
-
-    // Fill message with non-trivial pattern
-    var large_msg: [types.max_msg_size]u8 = undefined;
-    for (&large_msg, 0..) |*b, i| {
-        b.* = @truncate(i);
-    }
-
-    client.send_buffer = &large_msg;
-    server.send_buffer = "ok";
-
-    const R = Runner(tls.ClientHello);
-    try R.simulate(&client, &server, tls.ClientHello);
-
-    try testing.expectEqualStrings("ok", client_recv_buf[0..2]);
-    try testing.expectEqualStrings(&large_msg, server_recv_buf[0..types.max_msg_size]);
-}
-
-// 非对称消息：客户端 2 字节 / 服务端 512 字节，验证变长编解码无错位
-test "simulate asymmetric message sizes" {
-    const testing = std.testing;
-    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
-
-    var client_recv_buf: [types.max_msg_size]u8 = undefined;
-    var server_recv_buf: [types.max_msg_size]u8 = undefined;
-    client.recv_buffer = &client_recv_buf;
-    server.recv_buffer = &server_recv_buf;
-
-    const short_msg = "hi";
-    var long_msg: [512]u8 = undefined;
-    @memset(&long_msg, 'x');
-
-    client.send_buffer = short_msg;
-    server.send_buffer = &long_msg;
-
-    const R = Runner(tls.ClientHello);
-    try R.simulate(&client, &server, tls.ClientHello);
-
-    try testing.expectEqualStrings(&long_msg, client_recv_buf[0..512]);
-    try testing.expectEqualStrings(short_msg, server_recv_buf[0..2]);
-}
-
-// 多会话复用：同一对 context 跑两轮完整握手 + 数据交换，验证 session 隔离（新临时密钥、计数器独立）
+// 多会话复用：两轮握手产生不同的 write_key，验证 session 隔离
 test "simulate multiple sessions with same contexts" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -460,95 +187,14 @@ test "simulate multiple sessions with same contexts" {
     var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
-    var client_recv_buf: [128]u8 = undefined;
-    var server_recv_buf: [128]u8 = undefined;
-    client.recv_buffer = &client_recv_buf;
-    server.recv_buffer = &server_recv_buf;
-
     const R = Runner(tls.ClientHello);
 
     // Session 1
-    client.send_buffer = "session1c";
-    server.send_buffer = "session1s";
-    client.send_counter = 0;
-    client.recv_counter = std.math.maxInt(u64);
-    server.send_counter = 0;
-    server.recv_counter = std.math.maxInt(u64);
-
     try R.simulate(&client, &server, tls.ClientHello);
-    try testing.expectEqualStrings("session1s", client_recv_buf[0..9]);
-    try testing.expectEqualStrings("session1c", server_recv_buf[0..9]);
+    const key1 = client.write_key;
 
-    // Session 2 — fresh counters, new ephemeral keys
-    client.send_buffer = "session2c";
-    server.send_buffer = "session2s";
-    client.send_counter = 0;
-    client.recv_counter = std.math.maxInt(u64);
-    server.send_counter = 0;
-    server.recv_counter = std.math.maxInt(u64);
-
+    // Session 2 — 新的临时密钥对，write_key 应不同
     try R.simulate(&client, &server, tls.ClientHello);
-    try testing.expectEqualStrings("session2s", client_recv_buf[0..9]);
-    try testing.expectEqualStrings("session2c", server_recv_buf[0..9]);
-}
 
-// TCP 传输大消息：客户端通过 TCP 发送 1024 字节，验证网络编解码 + 传输边界正确性
-test "symmetric run large message" {
-    const testing = std.testing;
-    const io = testing.io;
-    const allocator = testing.allocator;
-    const net = std.Io.net;
-
-    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
-
-    var large_msg: [types.max_msg_size]u8 = undefined;
-    for (&large_msg, 0..) |*b, i| {
-        b.* = @truncate(i);
-    }
-
-    var client_recv_buf: [types.max_msg_size]u8 = undefined;
-    var server_recv_buf: [types.max_msg_size]u8 = undefined;
-
-    client.send_buffer = &large_msg;
-    client.recv_buffer = &client_recv_buf;
-    server.send_buffer = "done";
-    server.recv_buffer = &server_recv_buf;
-
-    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
-    var listener = try localhost.listen(io, .{});
-    defer listener.deinit(io);
-
-    const StreamChannel = polyrole.channel.StreamChannel;
-    const R = Runner(tls.ClientHello);
-
-    const S = struct {
-        fn clientFn(address: net.IpAddress, ctx: *types.ClientContext) !void {
-            var stream = try address.connect(io, .{ .mode = .stream });
-            defer stream.close(io);
-
-            var ch: StreamChannel = undefined;
-            try ch.init(io, allocator, stream, 2048, 2048);
-            defer ch.deinit(allocator);
-
-            try R.symmetric_run(.client, ctx, &ch, tls.ClientHello);
-        }
-    };
-
-    var client_task = try io.concurrent(S.clientFn, .{ listener.socket.address, &client });
-    defer client_task.cancel(io) catch {};
-
-    var stream = try listener.accept(io);
-    defer stream.close(io);
-
-    var ch: StreamChannel = undefined;
-    try ch.init(io, allocator, stream, 2048, 2048);
-    defer ch.deinit(allocator);
-
-    try R.symmetric_run(.server, &server, &ch, tls.ClientHello);
-
-    try testing.expectEqualStrings("done", client_recv_buf[0..4]);
-    try testing.expectEqualStrings(&large_msg, server_recv_buf[0..types.max_msg_size]);
+    try testing.expect(!std.mem.eql(u8, &key1, &client.write_key));
 }

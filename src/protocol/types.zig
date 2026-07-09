@@ -1,16 +1,9 @@
 const std = @import("std");
 const crypto = std.crypto;
 
-/// Maximum plaintext size for a single data-phase message.
-pub const max_msg_size = 1024;
-
 pub const ClientContext = struct {
     /// Io interface for CSPRNG
     io: std.Io,
-    /// Monotonic counter for outbound data-phase messages
-    send_counter: u64,
-    /// Last-seen inbound data-phase message counter
-    recv_counter: u64,
     /// Own Ed25519 identity keypair
     id_keypair: crypto.sign.Ed25519.KeyPair,
     /// Server's Ed25519 identity public key
@@ -38,27 +31,15 @@ pub const ClientContext = struct {
     /// Derived from shared_secret via HKDF
     handshake_key: [32]u8,
 
-    /// Derived application key: encrypts ClientData
+    /// Derived application key (for TlsChannel write)
     write_key: [32]u8,
-    /// Derived application key: decrypts ServerData
+    /// Derived application key (for TlsChannel read)
     read_key: [32]u8,
-
-    /// Buffer for encrypting outbound data-phase messages
-    encrypted_buf: [max_msg_size + 16]u8,
-
-    /// Plaintext to send (set by application before calling Runner)
-    send_buffer: []const u8,
-    /// Buffer for received plaintext (set by application)
-    recv_buffer: []u8,
 };
 
 pub const ServerContext = struct {
     /// Io interface for CSPRNG
     io: std.Io,
-    /// Monotonic counter for outbound data-phase messages
-    send_counter: u64,
-    /// Last-seen inbound data-phase message counter
-    recv_counter: u64,
     /// Own Ed25519 identity keypair
     id_keypair: crypto.sign.Ed25519.KeyPair,
     /// Client's Ed25519 identity public key
@@ -85,18 +66,10 @@ pub const ServerContext = struct {
     /// Own Finished MAC (computed in ServerHello, used in ClientFinished transcript)
     own_mac: [32]u8,
 
-    /// Derived application key: decrypts ClientData
+    /// Derived application key (for TlsChannel read)
     read_key: [32]u8,
-    /// Derived application key: encrypts ServerData
+    /// Derived application key (for TlsChannel write)
     write_key: [32]u8,
-
-    /// Buffer for encrypting outbound data-phase messages
-    encrypted_buf: [max_msg_size + 16]u8,
-
-    /// Plaintext to send (set by application before calling Runner)
-    send_buffer: []const u8,
-    /// Buffer for received plaintext (set by application)
-    recv_buffer: []u8,
 };
 
 /// HKDF-Extract: prk = HMAC-SHA256(salt, ikm)

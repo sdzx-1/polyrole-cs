@@ -18,10 +18,6 @@ const TlsError = error{
     SignatureInvalid,
     /// HMAC verification failed (wrong handshake key or tampered transcript)
     HmacInvalid,
-    /// AEAD decryption failed (wrong key, tampered ciphertext, or wrong nonce)
-    DecryptFailed,
-    /// Replayed or out-of-order data-phase message detected
-    ReplayDetected,
 };
 
 // ─────────────────── Payload Types ───────────────────
@@ -41,12 +37,6 @@ const ServerHelloPayload = struct {
 const ClientFinishedPayload = struct {
     signature: [64]u8,
     mac: [32]u8,
-};
-
-pub const Ciphertext = struct {
-    nonce: [24]u8,
-    tag: [16]u8,
-    ciphertext: []const u8,
 };
 
 // ─────────────────── SHA256 helper ───────────────────
@@ -69,28 +59,6 @@ fn randomBytes(io: std.Io, comptime n: usize) ![n]u8 {
 
 fn generateX25519Keypair(io: std.Io) crypto.dh.X25519.KeyPair {
     return crypto.dh.X25519.KeyPair.generate(io);
-}
-
-fn packNonce(counter: u64, random: [16]u8) [24]u8 {
-    var nonce: [24]u8 = undefined;
-    std.mem.writeInt(u64, nonce[0..8], counter, .big);
-    @memcpy(nonce[8..24], &random);
-    return nonce;
-}
-
-fn unpackNonce(nonce: [24]u8) struct { counter: u64, random: [16]u8 } {
-    const counter = std.mem.readInt(u64, nonce[0..8], .big);
-    var random: [16]u8 = undefined;
-    @memcpy(&random, nonce[8..24]);
-    return .{ .counter = counter, .random = random };
-}
-
-fn verifyCounter(ctx_recv_counter: *u64, received: u64) TlsError!void {
-    // maxInt(u64) is the sentinel for "no message received yet"
-    if (ctx_recv_counter.* != std.math.maxInt(u64) and received <= ctx_recv_counter.*) {
-        return error.ReplayDetected;
-    }
-    ctx_recv_counter.* = received;
 }
 
 // ─────────────────── Step 1: ClientHello ───────────────────
@@ -190,7 +158,6 @@ pub const ServerHello = union(enum) {
 // ─────────────────── Step 3: ClientFinished ───────────────────
 
 pub const ClientFinished = union(enum) {
-    enter_data: Data(ClientFinishedPayload, ClientData),
     close: Data(ClientFinishedPayload, Exit),
 
     pub const info: TlsInfo = .{ .agent = .client, .name = "ClientFinished" };
@@ -208,19 +175,14 @@ pub const ClientFinished = union(enum) {
         ctx.write_key = keys.client_write_key;
         ctx.read_key = keys.server_write_key;
 
-        const payload = ClientFinishedPayload{ .signature = signature, .mac = mac };
-        if (ctx.send_buffer.len > 0) {
-            return .{ .enter_data = .{ .data = payload } };
-        } else {
-            return .{ .close = .{ .data = payload } };
-        }
+        return .{ .close = .{ .data = .{
+            .signature = signature,
+            .mac = mac,
+        } } };
     }
 
     pub fn preprocess(ctx: *types.ServerContext, result: @This()) !void {
-        const payload: ClientFinishedPayload = switch (result) {
-            .enter_data => |d| d.data,
-            .close => |d| d.data,
-        };
+        const payload = result.close.data;
 
         const t1 = sha256(.{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &ctx.own_nonce, &ctx.own_ephemeral_pk });
         const t2 = sha256(.{ &t1, &ctx.own_signature });
@@ -232,116 +194,6 @@ pub const ClientFinished = union(enum) {
         const keys = types.deriveKeys(ctx.shared_secret);
         ctx.read_key = keys.client_write_key;
         ctx.write_key = keys.server_write_key;
-    }
-};
-
-// ─────────────────── Data Phase: ClientData ───────────────────
-
-pub const ClientData = union(enum) {
-    send: Data(Ciphertext, ServerData),
-    close: Data(void, Exit),
-
-    pub const info: TlsInfo = .{ .agent = .client, .name = "ClientData" };
-
-    pub fn process(ctx: *types.ClientContext) !@This() {
-        if (ctx.send_buffer.len == 0) return .close;
-
-        const plaintext = ctx.send_buffer;
-        const counter = ctx.send_counter;
-        ctx.send_counter += 1;
-        const nonce = packNonce(counter, try randomBytes(ctx.io, 16));
-
-        const ct_len = plaintext.len + 16;
-        const combined = ctx.encrypted_buf[0..ct_len];
-        crypto.nacl.SecretBox.seal(combined, plaintext, nonce, ctx.write_key);
-
-        const tag = combined[0..16].*;
-        const ct = combined[16..][0..plaintext.len];
-
-        ctx.send_buffer = ""; // mark as sent
-
-        return .{ .send = .{ .data = .{
-            .nonce = nonce,
-            .tag = tag,
-            .ciphertext = ct,
-        } } };
-    }
-
-    pub fn preprocess(ctx: *types.ServerContext, result: @This()) !void {
-        switch (result) {
-            .send => |d| {
-                const payload = d.data;
-                const combined_len = payload.ciphertext.len + 16;
-                const combined = ctx.encrypted_buf[0..combined_len];
-                @memcpy(combined[0..16], &payload.tag);
-                @memcpy(combined[16..], payload.ciphertext);
-                crypto.nacl.SecretBox.open(
-                    ctx.recv_buffer[0 .. combined_len - 16],
-                    combined,
-                    payload.nonce,
-                    ctx.read_key,
-                ) catch return error.DecryptFailed;
-
-                const n = unpackNonce(payload.nonce);
-                try verifyCounter(&ctx.recv_counter, n.counter);
-            },
-            .close => {},
-        }
-    }
-};
-
-// ─────────────────── Data Phase: ServerData ───────────────────
-
-pub const ServerData = union(enum) {
-    send: Data(Ciphertext, ClientData),
-    close: Data(void, Exit),
-
-    pub const info: TlsInfo = .{ .agent = .server, .name = "ServerData" };
-
-    pub fn process(ctx: *types.ServerContext) !@This() {
-        if (ctx.send_buffer.len == 0) return .close;
-
-        const plaintext = ctx.send_buffer;
-        const counter = ctx.send_counter;
-        ctx.send_counter += 1;
-        const nonce = packNonce(counter, try randomBytes(ctx.io, 16));
-
-        const ct_len = plaintext.len + 16;
-        const combined = ctx.encrypted_buf[0..ct_len];
-        crypto.nacl.SecretBox.seal(combined, plaintext, nonce, ctx.write_key);
-
-        const tag = combined[0..16].*;
-        const ct = combined[16..][0..plaintext.len];
-
-        ctx.send_buffer = ""; // mark as sent
-
-        return .{ .send = .{ .data = .{
-            .nonce = nonce,
-            .tag = tag,
-            .ciphertext = ct,
-        } } };
-    }
-
-    pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
-        switch (result) {
-            .send => |d| {
-                const payload = d.data;
-                const combined_len = payload.ciphertext.len + 16;
-                const combined = ctx.encrypted_buf[0..combined_len];
-                @memcpy(combined[0..16], &payload.tag);
-                @memcpy(combined[16..], payload.ciphertext);
-                crypto.nacl.SecretBox.open(
-                    ctx.recv_buffer[0 .. combined_len - 16],
-                    combined,
-                    payload.nonce,
-                    ctx.read_key,
-                ) catch return error.DecryptFailed;
-
-                const n = unpackNonce(payload.nonce);
-                try verifyCounter(&ctx.recv_counter, n.counter);
-            },
-            .close => {},
-        }
     }
 };
 

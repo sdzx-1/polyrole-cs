@@ -312,8 +312,6 @@ test "symmetric run over tls channel" {
             // Phase 1: TLS handshake via StreamChannel
             var tls_ctx: tls_types.ClientContext = .{
                 .io = io,
-                .send_counter = 0,
-                .recv_counter = std.math.maxInt(u64),
                 .id_keypair = kp,
                 .peer_id_public = peer_pk,
                 .ephemeral_sk = undefined,
@@ -327,9 +325,6 @@ test "symmetric run over tls channel" {
                 .handshake_key = undefined,
                 .write_key = undefined,
                 .read_key = undefined,
-                .encrypted_buf = undefined,
-                .send_buffer = "",
-                .recv_buffer = undefined,
             };
 
             var sc: StreamChannel = undefined;
@@ -363,8 +358,6 @@ test "symmetric run over tls channel" {
     {
         var tls_ctx: tls_types.ServerContext = .{
             .io = io,
-            .send_counter = 0,
-            .recv_counter = std.math.maxInt(u64),
             .id_keypair = kp_s,
             .peer_id_public = kp_c.public_key,
             .ephemeral_sk = undefined,
@@ -378,9 +371,6 @@ test "symmetric run over tls channel" {
             .own_mac = undefined,
             .read_key = undefined,
             .write_key = undefined,
-            .encrypted_buf = undefined,
-            .send_buffer = "",
-            .recv_buffer = undefined,
         };
 
         var sc: StreamChannel = undefined;
