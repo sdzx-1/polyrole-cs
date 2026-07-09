@@ -9,6 +9,21 @@ const types = @import("types.zig");
 
 const TlsInfo = ProtocolInfo("simple_tls", types.ClientContext, types.ServerContext);
 
+const TlsError = error{
+    /// System entropy unavailable
+    EntropyUnavailable,
+    /// DH key agreement failed (invalid peer public key)
+    DhFailed,
+    /// Ed25519 signature verification failed
+    SignatureInvalid,
+    /// HMAC verification failed (wrong handshake key or tampered transcript)
+    HmacInvalid,
+    /// AEAD decryption failed (wrong key, tampered ciphertext, or wrong nonce)
+    DecryptFailed,
+    /// Replayed or out-of-order data-phase message detected
+    ReplayDetected,
+};
+
 // ─────────────────── Payload Types ───────────────────
 
 const ClientHelloPayload = struct {
@@ -46,9 +61,9 @@ fn sha256(parts: anytype) [32]u8 {
     return out;
 }
 
-fn randomBytes(io: std.Io, comptime n: usize) [n]u8 {
+fn randomBytes(io: std.Io, comptime n: usize) ![n]u8 {
     var buf: [n]u8 = undefined;
-    io.randomSecure(&buf) catch @panic("Io.randomSecure failed");
+    try io.randomSecure(&buf);
     return buf;
 }
 
@@ -70,10 +85,10 @@ fn unpackNonce(nonce: [24]u8) struct { counter: u64, random: [16]u8 } {
     return .{ .counter = counter, .random = random };
 }
 
-fn verifyCounter(ctx_recv_counter: *u64, received: u64) void {
+fn verifyCounter(ctx_recv_counter: *u64, received: u64) TlsError!void {
     // maxInt(u64) is the sentinel for "no message received yet"
     if (ctx_recv_counter.* != std.math.maxInt(u64) and received <= ctx_recv_counter.*) {
-        @panic("replay or out-of-order data message detected");
+        return error.ReplayDetected;
     }
     ctx_recv_counter.* = received;
 }
@@ -85,8 +100,8 @@ pub const ClientHello = union(enum) {
 
     pub const info: TlsInfo = .{ .agent = .client, .name = "ClientHello" };
 
-    pub fn process(ctx: *types.ClientContext) @This() {
-        const nonce = randomBytes(ctx.io, 24);
+    pub fn process(ctx: *types.ClientContext) !@This() {
+        const nonce = try randomBytes(ctx.io, 24);
         const kp = generateX25519Keypair(ctx.io);
 
         ctx.own_nonce = nonce;
@@ -116,19 +131,19 @@ pub const ServerHello = union(enum) {
 
     pub const info: TlsInfo = .{ .agent = .server, .name = "ServerHello" };
 
-    pub fn process(ctx: *types.ServerContext) @This() {
-        const nonce = randomBytes(ctx.io, 24);
+    pub fn process(ctx: *types.ServerContext) !@This() {
+        const nonce = try randomBytes(ctx.io, 24);
         const kp = generateX25519Keypair(ctx.io);
 
         const shared_secret = crypto.dh.X25519.scalarmult(kp.secret_key, ctx.peer_ephemeral_pk) catch
-            @panic("x25519 scalarmult failed");
+            return error.DhFailed;
         ctx.shared_secret = shared_secret;
 
         const keys = types.deriveKeys(shared_secret);
         ctx.handshake_key = keys.handshake_key;
 
         const t1 = sha256(.{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &nonce, &kp.public_key });
-        const signature = sign(ctx.id_keypair, &t1);
+        const signature = try sign(ctx.id_keypair, &t1);
         const t2 = sha256(.{ &t1, &signature });
         const mac = hmacSha256(&ctx.handshake_key, "server_fin", &t2);
 
@@ -146,22 +161,22 @@ pub const ServerHello = union(enum) {
         } } };
     }
 
-    pub fn preprocess(ctx: *types.ClientContext, result: @This()) void {
+    pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
         switch (result) {
             .to_client => |d| {
                 const payload = d.data;
 
                 const shared_secret = crypto.dh.X25519.scalarmult(ctx.ephemeral_sk, payload.ephemeral_pk) catch
-                    @panic("x25519 scalarmult failed");
+                    return error.DhFailed;
                 ctx.shared_secret = shared_secret;
 
                 const keys = types.deriveKeys(shared_secret);
                 ctx.handshake_key = keys.handshake_key;
 
                 const t1 = sha256(.{ &ctx.own_nonce, &ctx.own_ephemeral_pk, &payload.nonce, &payload.ephemeral_pk });
-                verifySignature(payload.signature, &t1, ctx.peer_id_public);
+                try verifySignature(payload.signature, &t1, ctx.peer_id_public);
                 const t2 = sha256(.{ &t1, &payload.signature });
-                verifyHmac(&ctx.handshake_key, "server_fin", &t2, payload.mac);
+                try verifyHmac(&ctx.handshake_key, "server_fin", &t2, payload.mac);
 
                 ctx.peer_nonce = payload.nonce;
                 ctx.peer_ephemeral_pk = payload.ephemeral_pk;
@@ -180,13 +195,13 @@ pub const ClientFinished = union(enum) {
 
     pub const info: TlsInfo = .{ .agent = .client, .name = "ClientFinished" };
 
-    pub fn process(ctx: *types.ClientContext) @This() {
+    pub fn process(ctx: *types.ClientContext) !@This() {
         const keys = types.deriveKeys(ctx.shared_secret);
 
         const t1 = sha256(.{ &ctx.own_nonce, &ctx.own_ephemeral_pk, &ctx.peer_nonce, &ctx.peer_ephemeral_pk });
         const t2 = sha256(.{ &t1, &ctx.peer_signature });
         const t3 = sha256(.{ &t2, &ctx.peer_mac });
-        const signature = sign(ctx.id_keypair, &t3);
+        const signature = try sign(ctx.id_keypair, &t3);
         const t4 = sha256(.{ &t3, &signature });
         const mac = hmacSha256(&ctx.handshake_key, "client_fin", &t4);
 
@@ -201,7 +216,7 @@ pub const ClientFinished = union(enum) {
         }
     }
 
-    pub fn preprocess(ctx: *types.ServerContext, result: @This()) void {
+    pub fn preprocess(ctx: *types.ServerContext, result: @This()) !void {
         const payload: ClientFinishedPayload = switch (result) {
             .enter_data => |d| d.data,
             .close => |d| d.data,
@@ -210,9 +225,9 @@ pub const ClientFinished = union(enum) {
         const t1 = sha256(.{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &ctx.own_nonce, &ctx.own_ephemeral_pk });
         const t2 = sha256(.{ &t1, &ctx.own_signature });
         const t3 = sha256(.{ &t2, &ctx.own_mac });
-        verifySignature(payload.signature, &t3, ctx.peer_id_public);
+        try verifySignature(payload.signature, &t3, ctx.peer_id_public);
         const t4 = sha256(.{ &t3, &payload.signature });
-        verifyHmac(&ctx.handshake_key, "client_fin", &t4, payload.mac);
+        try verifyHmac(&ctx.handshake_key, "client_fin", &t4, payload.mac);
 
         const keys = types.deriveKeys(ctx.shared_secret);
         ctx.read_key = keys.client_write_key;
@@ -228,13 +243,13 @@ pub const ClientData = union(enum) {
 
     pub const info: TlsInfo = .{ .agent = .client, .name = "ClientData" };
 
-    pub fn process(ctx: *types.ClientContext) @This() {
+    pub fn process(ctx: *types.ClientContext) !@This() {
         if (ctx.send_buffer.len == 0) return .close;
 
         const plaintext = ctx.send_buffer;
         const counter = ctx.send_counter;
         ctx.send_counter += 1;
-        const nonce = packNonce(counter, randomBytes(ctx.io, 16));
+        const nonce = packNonce(counter, try randomBytes(ctx.io, 16));
 
         const ct_len = plaintext.len + 16;
         const combined = ctx.encrypted_buf[0..ct_len];
@@ -252,12 +267,10 @@ pub const ClientData = union(enum) {
         } } };
     }
 
-    pub fn preprocess(ctx: *types.ServerContext, result: @This()) void {
+    pub fn preprocess(ctx: *types.ServerContext, result: @This()) !void {
         switch (result) {
             .send => |d| {
                 const payload = d.data;
-                const n = unpackNonce(payload.nonce);
-                verifyCounter(&ctx.recv_counter, n.counter);
                 const combined_len = payload.ciphertext.len + 16;
                 const combined = ctx.encrypted_buf[0..combined_len];
                 @memcpy(combined[0..16], &payload.tag);
@@ -267,7 +280,10 @@ pub const ClientData = union(enum) {
                     combined,
                     payload.nonce,
                     ctx.read_key,
-                ) catch @panic("ClientData: AEAD decrypt failed");
+                ) catch return error.DecryptFailed;
+
+                const n = unpackNonce(payload.nonce);
+                try verifyCounter(&ctx.recv_counter, n.counter);
             },
             .close => {},
         }
@@ -282,13 +298,13 @@ pub const ServerData = union(enum) {
 
     pub const info: TlsInfo = .{ .agent = .server, .name = "ServerData" };
 
-    pub fn process(ctx: *types.ServerContext) @This() {
+    pub fn process(ctx: *types.ServerContext) !@This() {
         if (ctx.send_buffer.len == 0) return .close;
 
         const plaintext = ctx.send_buffer;
         const counter = ctx.send_counter;
         ctx.send_counter += 1;
-        const nonce = packNonce(counter, randomBytes(ctx.io, 16));
+        const nonce = packNonce(counter, try randomBytes(ctx.io, 16));
 
         const ct_len = plaintext.len + 16;
         const combined = ctx.encrypted_buf[0..ct_len];
@@ -306,12 +322,10 @@ pub const ServerData = union(enum) {
         } } };
     }
 
-    pub fn preprocess(ctx: *types.ClientContext, result: @This()) void {
+    pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
         switch (result) {
             .send => |d| {
                 const payload = d.data;
-                const n = unpackNonce(payload.nonce);
-                verifyCounter(&ctx.recv_counter, n.counter);
                 const combined_len = payload.ciphertext.len + 16;
                 const combined = ctx.encrypted_buf[0..combined_len];
                 @memcpy(combined[0..16], &payload.tag);
@@ -321,7 +335,10 @@ pub const ServerData = union(enum) {
                     combined,
                     payload.nonce,
                     ctx.read_key,
-                ) catch @panic("ServerData: AEAD decrypt failed");
+                ) catch return error.DecryptFailed;
+
+                const n = unpackNonce(payload.nonce);
+                try verifyCounter(&ctx.recv_counter, n.counter);
             },
             .close => {},
         }
@@ -330,14 +347,14 @@ pub const ServerData = union(enum) {
 
 // ─────────────────── Crypto helpers ───────────────────
 
-fn sign(kp: crypto.sign.Ed25519.KeyPair, msg: []const u8) [64]u8 {
-    const sig = kp.sign(msg, null) catch @panic("Ed25519 sign failed");
+fn sign(kp: crypto.sign.Ed25519.KeyPair, msg: []const u8) ![64]u8 {
+    const sig = try kp.sign(msg, null);
     return sig.toBytes();
 }
 
-fn verifySignature(sig_bytes: [64]u8, msg: []const u8, pubkey: crypto.sign.Ed25519.PublicKey) void {
+fn verifySignature(sig_bytes: [64]u8, msg: []const u8, pubkey: crypto.sign.Ed25519.PublicKey) TlsError!void {
     const sig = crypto.sign.Ed25519.Signature.fromBytes(sig_bytes);
-    sig.verify(msg, pubkey) catch @panic("Ed25519 verify failed");
+    sig.verify(msg, pubkey) catch return error.SignatureInvalid;
 }
 
 fn hmacSha256(key: *const [32]u8, comptime label: []const u8, msg: []const u8) [32]u8 {
@@ -350,9 +367,9 @@ fn hmacSha256(key: *const [32]u8, comptime label: []const u8, msg: []const u8) [
     return out;
 }
 
-fn verifyHmac(key: *const [32]u8, comptime label: []const u8, msg: []const u8, expected: [32]u8) void {
+fn verifyHmac(key: *const [32]u8, comptime label: []const u8, msg: []const u8, expected: [32]u8) TlsError!void {
     const got = hmacSha256(key, label, msg);
     if (!crypto.timing_safe.eql([32]u8, got, expected)) {
-        @panic("HMAC verify failed");
+        return error.HmacInvalid;
     }
 }
