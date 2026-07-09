@@ -51,6 +51,10 @@ pub const StreamChannel = struct {
 /// Wire format per message:
 ///   nonce(24) || tag(16) || ct_len(2 BE) || ciphertext(ct_len)
 ///
+/// The payload inside ciphertext is:  msg_len(2 BE) || protocol_message(msg_len).
+/// ct_len on the wire is a frame delimiter; the authenticated msg_len inside the
+/// AEAD envelope is the source of truth.
+///
 /// The nonce is a monotonic counter (u64 big-endian, zero-padded to 24 bytes).
 /// Each direction has its own counter starting from 0.
 pub const TlsChannel = struct {
@@ -60,7 +64,8 @@ pub const TlsChannel = struct {
     write_counter: u64,
     read_counter: u64,
 
-    /// Buffer for encoding protocol messages before encryption
+    /// Buffer for encoding protocol messages before encryption.
+    /// First 2 bytes reserved for the authenticated length prefix.
     encode_buf: []u8,
     /// Buffer for decrypted plaintext before decoding
     decode_buf: []u8,
@@ -91,33 +96,42 @@ pub const TlsChannel = struct {
         gpa.free(self.encode_buf);
         gpa.free(self.decode_buf);
         gpa.free(self.combined_buf);
+        @memset(&self.write_key, 0);
+        @memset(&self.read_key, 0);
     }
 
     pub fn send(self: *@This(), state_id: anytype, _: type, val: anytype) !void {
-        // Encode protocol message to plaintext buffer
-        var buf = self.encode_buf;
+        // Encode protocol message after 2-byte length prefix
+        const buf = self.encode_buf[2..];
         var writer = Io.Writer.fixed(buf);
         try codec.encode(&writer, state_id, val);
-        const plaintext = buf[0..writer.end];
+        const msg = buf[0..writer.end];
 
-        // Build nonce from counter
+        // Prepend authenticated length prefix
+        std.mem.writeInt(u16, self.encode_buf[0..2], @intCast(msg.len), .big);
+        const plaintext = self.encode_buf[0 .. 2 + msg.len];
+
+        // Build nonce from counter (don't commit yet)
+        const this_counter = self.write_counter;
         var nonce: [24]u8 = [_]u8{0} ** 24;
-        std.mem.writeInt(u64, nonce[0..8], self.write_counter, .big);
-        self.write_counter += 1;
+        std.mem.writeInt(u64, nonce[0..8], this_counter, .big);
 
         // AEAD encrypt
-        const ct_overhead = 16;
-        const combined_len = plaintext.len + ct_overhead;
-        const combined = self.combined_buf[0..combined_len];
+        const combined = self.combined_buf[0 .. plaintext.len + 16];
         crypto.nacl.SecretBox.seal(combined, plaintext, nonce, self.write_key);
+        const ct = combined[16..][0..plaintext.len];
 
         // Wire format: nonce || tag || ct_len || ciphertext
         const sw = &self.inner.stream_writer.interface;
         try sw.writeAll(&nonce);
         try sw.writeAll(combined[0..16]); // tag
-        try sw.writeInt(u16, @intCast(plaintext.len), .big);
-        try sw.writeAll(combined[16..][0..plaintext.len]);
+        try sw.writeInt(u16, @intCast(ct.len), .big);
+        try sw.writeAll(ct);
         try sw.flush();
+
+        // Only commit counter after successful write
+        std.debug.assert(this_counter < std.math.maxInt(u64));
+        self.write_counter = this_counter + 1;
     }
 
     pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
@@ -126,7 +140,7 @@ pub const TlsChannel = struct {
         const nonce = (try sr.take(24))[0..24].*;
         const tag = try sr.take(16);
         const ct_len = try sr.takeInt(u16, .big);
-        if (ct_len > self.decode_buf.len) return error.MessageTooLarge;
+        if (ct_len < 2 or ct_len > self.decode_buf.len) return error.MessageTooLarge;
 
         const ct = try sr.take(ct_len);
 
@@ -141,13 +155,19 @@ pub const TlsChannel = struct {
             self.read_key,
         ) catch return error.DecryptFailed;
 
+        // Read authenticated message length
+        const msg_len = std.mem.readInt(u16, self.decode_buf[0..2], .big);
+        if (msg_len != ct_len - 2) return error.BadLength;
+        const msg = self.decode_buf[2..][0..msg_len];
+
         // Verify and advance counter
         const counter = std.mem.readInt(u64, nonce[0..8], .big);
         if (counter != self.read_counter) return error.ReplayDetected;
+        std.debug.assert(self.read_counter < std.math.maxInt(u64));
         self.read_counter += 1;
 
-        // Decode protocol message from decrypted plaintext
-        var reader = Io.Reader.fixed(self.decode_buf[0..ct_len]);
+        // Decode protocol message from authenticated plaintext
+        var reader = Io.Reader.fixed(msg);
         return try codec.decode(&reader, state_id, T);
     }
 };
