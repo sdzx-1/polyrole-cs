@@ -274,43 +274,72 @@ test "symmetric run" {
     try testing.expectEqual(server_context, 10);
 }
 
-test "symmetric run over tls channel" {
+test "run over tls channel: handshake then protocol with self-communicating peer" {
     const testing = std.testing;
     const io = testing.io;
     const allocator = testing.allocator;
     const crypto = std.crypto;
     const tls_mod = @import("protocol/tls.zig");
     const tls_types = @import("protocol/types.zig");
+    const TlsProto = tls_mod.TlsProtocol(Exit);
 
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
 
-    const P = CreateTestProtocol("p2", Exit);
-    const R = Runner(P.A);
-    const TlsProto = tls_mod.TlsProtocol(Exit);
-    const R_tls = Runner(TlsProto.ClientHello);
     const StreamChannel = root.channel.StreamChannel;
     const TlsChannel = root.channel.TlsChannel;
+
+    // --- Peer type: protocol context + encrypted transport ---
+    const Ctx = struct {
+        counter: i32,
+        tc: *TlsChannel,
+
+        pub fn send(self: *@This(), state_id: anytype, State: type, val: State) !void {
+            try self.tc.send(state_id, State, val);
+        }
+        pub fn recv(self: *@This(), state_id: anytype, State: type) !State {
+            return try self.tc.recv(state_id, State);
+        }
+    };
+
+    const P = struct {
+        const Info = ProtocolInfo("peer_proto", Ctx, Ctx);
+
+        pub const A = union(enum) {
+            add: Data(void, B),
+            pub const info: Info = .{ .agent = .client, .name = "A" };
+            pub fn process(ctx: *Ctx) @This() { _ = ctx; return .add; }
+        };
+
+        pub const B = union(enum) {
+            to_a: Data(void, A),
+            next: Data(void, Exit),
+            pub const info: Info = .{ .agent = .server, .name = "B" };
+            pub fn process(ctx: *Ctx) @This() {
+                if (ctx.counter >= 10) return .next;
+                ctx.counter += 1;
+                return .to_a;
+            }
+        };
+    };
+
+    const R_pp = Runner(P.A);
+    const R_tls = Runner(TlsProto.ClientHello);
 
     const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
     var listener = try localhost.listen(io, .{});
     defer listener.deinit(io);
 
-    var client_context: i32 = 0;
-    var server_context: i32 = 0;
-
-    // Client does TLS handshake then test protocol on the same TCP stream
     const ClientTask = struct {
         fn run(
             addr: net.IpAddress,
             kp: crypto.sign.Ed25519.KeyPair,
             peer_pk: crypto.sign.Ed25519.PublicKey,
-            pp_ctx: *i32,
         ) !void {
             var stream = try addr.connect(io, .{ .mode = .stream });
             defer stream.close(io);
 
-            // Phase 1: TLS handshake via StreamChannel
+            // Phase 1: TLS handshake
             var tls_ctx: tls_types.ClientContext = .{
                 .io = io,
                 .id_keypair = kp,
@@ -333,12 +362,13 @@ test "symmetric run over tls channel" {
             try R_tls.symmetric_run(.client, &tls_ctx, &sc, TlsProto.ClientHello);
             sc.deinit(allocator);
 
-            // Phase 2: test protocol via TlsChannel
+            // Phase 2: encrypted protocol via self-communicating peer
             var tc: TlsChannel = undefined;
             try tc.init(io, allocator, stream, tls_ctx.write_key, tls_ctx.read_key, 512);
             defer tc.deinit(allocator);
 
-            try R.symmetric_run(.client, pp_ctx, &tc, P.A);
+            var peer = Ctx{ .counter = 0, .tc = &tc };
+            try R_pp.run(.client, &peer, P.A);
         }
     };
 
@@ -346,127 +376,43 @@ test "symmetric run over tls channel" {
         listener.socket.address,
         kp_c,
         kp_s.public_key,
-        &client_context,
     });
     defer client_task.cancel(io) catch {};
 
     var stream = try listener.accept(io);
     defer stream.close(io);
 
-    // Phase 1: TLS handshake via StreamChannel
-    var tls_server_write_key: [32]u8 = undefined;
-    var tls_server_read_key: [32]u8 = undefined;
+    // Phase 1: TLS handshake
+    var tls_ctx: tls_types.ServerContext = .{
+        .io = io,
+        .id_keypair = kp_s,
+        .peer_id_public = kp_c.public_key,
+        .ephemeral_sk = undefined,
+        .own_ephemeral_pk = undefined,
+        .peer_ephemeral_pk = undefined,
+        .peer_nonce = undefined,
+        .own_nonce = undefined,
+        .shared_secret = undefined,
+        .handshake_key = undefined,
+        .own_signature = undefined,
+        .own_mac = undefined,
+        .read_key = undefined,
+        .write_key = undefined,
+    };
     {
-        var tls_ctx: tls_types.ServerContext = .{
-            .io = io,
-            .id_keypair = kp_s,
-            .peer_id_public = kp_c.public_key,
-            .ephemeral_sk = undefined,
-            .own_ephemeral_pk = undefined,
-            .peer_ephemeral_pk = undefined,
-            .peer_nonce = undefined,
-            .own_nonce = undefined,
-            .shared_secret = undefined,
-            .handshake_key = undefined,
-            .own_signature = undefined,
-            .own_mac = undefined,
-            .read_key = undefined,
-            .write_key = undefined,
-        };
-
         var sc: StreamChannel = undefined;
         try sc.init(io, allocator, stream, 256, 256);
         try R_tls.symmetric_run(.server, &tls_ctx, &sc, TlsProto.ClientHello);
         sc.deinit(allocator);
-
-        tls_server_write_key = tls_ctx.write_key;
-        tls_server_read_key = tls_ctx.read_key;
     }
 
-    // Phase 2: test protocol via TlsChannel
+    // Phase 2: encrypted protocol via self-communicating peer
     var tc: TlsChannel = undefined;
-    try tc.init(io, allocator, stream, tls_server_write_key, tls_server_read_key, 512);
+    try tc.init(io, allocator, stream, tls_ctx.write_key, tls_ctx.read_key, 512);
     defer tc.deinit(allocator);
 
-    try R.symmetric_run(.server, &server_context, &tc, P.A);
-
-    try testing.expectEqual(server_context, 10);
-}
-
-test "run with self-communicating peer" {
-    const testing = std.testing;
-    const io = testing.io;
-    const allocator = testing.allocator;
-    const StreamCh = root.channel.StreamChannel;
-
-    // A context type that holds both protocol state and communication
-    const Ctx = struct {
-        counter: i32,
-        ch: *StreamCh,
-
-        pub fn send(self: *@This(), state_id: anytype, State: type, val: State) !void {
-            try self.ch.send(state_id, State, val);
-        }
-
-        pub fn recv(self: *@This(), state_id: anytype, State: type) !State {
-            return try self.ch.recv(state_id, State);
-        }
-    };
-
-    // Protocol that uses Ctx as context
-    const P = struct {
-        const Info = ProtocolInfo("peer_proto", Ctx, Ctx);
-
-        pub const A = union(enum) {
-            add: Data(void, B),
-            pub const info: Info = .{ .agent = .client, .name = "A" };
-            pub fn process(ctx: *Ctx) @This() { _ = ctx; return .add; }
-        };
-
-        pub const B = union(enum) {
-            to_a: Data(void, A),
-            next: Data(void, Exit),
-            pub const info: Info = .{ .agent = .server, .name = "B" };
-            pub fn process(ctx: *Ctx) @This() {
-                if (ctx.counter >= 10) return .next;
-                ctx.counter += 1;
-                return .to_a;
-            }
-        };
-    };
-
-    const R = Runner(P.A);
-
-    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
-    var listener = try localhost.listen(io, .{});
-    defer listener.deinit(io);
-
-    const S = struct {
-        fn clientFn(addr: net.IpAddress) !void {
-            var stream = try addr.connect(io, .{ .mode = .stream });
-            defer stream.close(io);
-
-            var ch: StreamCh = undefined;
-            try ch.init(io, allocator, stream, 100, 100);
-            defer ch.deinit(allocator);
-
-            var peer = Ctx{ .counter = 0, .ch = &ch };
-            try R.run(.client, &peer, P.A);
-        }
-    };
-
-    var client_task = try io.concurrent(S.clientFn, .{listener.socket.address});
-    defer client_task.cancel(io) catch {};
-
-    var stream = try listener.accept(io);
-    defer stream.close(io);
-
-    var ch: StreamCh = undefined;
-    try ch.init(io, allocator, stream, 100, 100);
-    defer ch.deinit(allocator);
-
-    var peer = Ctx{ .counter = 0, .ch = &ch };
-    try R.run(.server, &peer, P.A);
+    var peer = Ctx{ .counter = 0, .tc = &tc };
+    try R_pp.run(.server, &peer, P.A);
 
     try testing.expectEqual(peer.counter, 10);
 }
