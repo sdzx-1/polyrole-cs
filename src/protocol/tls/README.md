@@ -311,7 +311,7 @@ Phase 2 — Expand:
     server_write_key = HMAC-SHA256(prk, "s2c" || 0x01)
 ```
 
-**代码实现**（`types.zig`）：
+**代码实现**（`context.zig`）：
 
 ```zig
 pub fn deriveKeys(shared_secret: [32]u8) struct {
@@ -451,11 +451,11 @@ try R.symmetric_run(.client, &app_ctx, &tc, AppProtocol.Start);
 
 ```
 src/protocol/tls/
-├── tls.zig         — 状态机定义 (ClientHello, ServerHello, ClientFinished)
-├── types.zig        — 共享类型 (ClientContext, ServerContext, deriveKeys)
-├── tls_test.zig     — 测试 (simulate 和 symmetric_run 测试)
-├── simple_tls.md    — 设计文档（英文）
+├── root.zig         — 状态机定义 (ClientHello, ServerHello, ClientFinished)
+├── context.zig      — 共享类型 (ClientContext, ServerContext, deriveKeys)
+├── test.zig         — 测试 (simulate 和 symmetric_run 测试)
+├── design.md        — 设计文档（英文）
 └── README.md        — 本文档
 ```
 
-状态机定义、类型和测试完全分离，`tls.zig` 纯描述协议逻辑，`types.zig` 纯数据结构和密码学工具函数。
+状态机定义、类型和测试完全分离，`root.zig` 纯描述协议逻辑，`context.zig` 纯数据结构和密码学工具函数。

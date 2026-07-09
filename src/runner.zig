@@ -234,8 +234,8 @@ test "tls channel: symmetric_run over encrypted channel" {
     const io = testing.io;
     const allocator = testing.allocator;
     const crypto = std.crypto;
-    const tls_mod = @import("protocol/tls/tls.zig");
-    const tls_types = @import("protocol/tls/types.zig");
+    const tls_mod = @import("protocol/tls/root.zig");
+    const tls_types = @import("protocol/tls/context.zig");
 
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);

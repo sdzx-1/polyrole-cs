@@ -4,7 +4,7 @@ const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
 const Exit = polyrole.Exit;
-const types = @import("types.zig");
+const types = @import("context.zig");
 
 const TlsInfo = ProtocolInfo("simple_tls", types.ClientContext, types.ServerContext);
 

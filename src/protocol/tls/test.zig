@@ -2,8 +2,8 @@ const std = @import("std");
 const crypto = std.crypto;
 const polyrole = @import("../../root.zig");
 const Runner = polyrole.runner.Runner;
-const tls = @import("tls.zig");
-const types = @import("types.zig");
+const tls = @import("root.zig");
+const types = @import("context.zig");
 
 fn initClientCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, server_pk: crypto.sign.Ed25519.PublicKey) types.ClientContext {
     return .{
@@ -45,7 +45,7 @@ fn initServerCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, client_pk: crypto.
 
 // HKDF 密钥派生自测试：验证 Extract + Expand 流程正确性
 test "hkdf" {
-    _ = @import("types.zig");
+    _ = @import("context.zig");
 }
 
 // 纯握手：客户端和服务端完成三次握手后正常退出
