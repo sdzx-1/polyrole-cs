@@ -357,17 +357,17 @@ fn verifySignature(sig_bytes: [64]u8, msg: []const u8, pubkey: crypto.sign.Ed255
     sig.verify(msg, pubkey) catch return error.SignatureInvalid;
 }
 
-fn hmacSha256(key: *const [32]u8, comptime label: []const u8, msg: []const u8) [32]u8 {
-    var buf: [512]u8 = undefined;
+fn hmacSha256(key: *const [32]u8, comptime label: []const u8, msg: *const [32]u8) [32]u8 {
+    var buf: [label.len + 32]u8 = undefined;
     @memcpy(buf[0..label.len], label);
-    @memcpy(buf[label.len..][0..msg.len], msg);
-    const total = buf[0 .. label.len + msg.len];
+    @memcpy(buf[label.len..], msg);
+    const total = buf[0 .. label.len + 32];
     var out: [32]u8 = undefined;
     crypto.auth.hmac.sha2.HmacSha256.create(&out, total, key);
     return out;
 }
 
-fn verifyHmac(key: *const [32]u8, comptime label: []const u8, msg: []const u8, expected: [32]u8) TlsError!void {
+fn verifyHmac(key: *const [32]u8, comptime label: []const u8, msg: *const [32]u8, expected: [32]u8) TlsError!void {
     const got = hmacSha256(key, label, msg);
     if (!crypto.timing_safe.eql([32]u8, got, expected)) {
         return error.HmacInvalid;

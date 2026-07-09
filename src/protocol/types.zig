@@ -107,6 +107,10 @@ fn hkdf_extract(salt: [32]u8, ikm: [32]u8) [32]u8 {
 }
 
 /// HKDF-Expand: okm = HMAC-SHA256(prk, info || 0x01)[0..L]
+///
+/// Currently single-iteration only (one HMAC call). The return type `[32]u8`
+/// enforces this at the type level — if a larger output is ever needed, the
+/// caller must implement RFC 5869 §2.3 multi-iteration chaining.
 inline fn hkdf_expand(prk: [32]u8, info: []const u8) [32]u8 {
     var buf: [info.len + 1]u8 = undefined;
     @memcpy(buf[0..info.len], info);
