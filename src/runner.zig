@@ -239,26 +239,31 @@ test "symmetric run over tls channel" {
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
 
-    // --- Step 1: TLS handshake over TCP to get encryption keys ---
-    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
-    var tls_listener = try localhost.listen(io, .{});
-    defer tls_listener.deinit(io);
-
+    const P = CreateTestProtocol("p2", Exit);
+    const R = Runner(P.A);
     const R_tls = Runner(tls_mod.ClientHello);
     const StreamChannel = root.channel.StreamChannel;
+    const TlsChannel = root.channel.TlsChannel;
 
-    // Client runs in concurrent task, does TLS handshake, returns keys
-    var tls_client_write_key: [32]u8 = undefined;
-    var tls_client_read_key: [32]u8 = undefined;
+    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try localhost.listen(io, .{});
+    defer listener.deinit(io);
 
-    const TlsClientTask = struct {
+    var client_context: i32 = 0;
+    var server_context: i32 = 0;
+
+    // Client does TLS handshake then test protocol on the same TCP stream
+    const ClientTask = struct {
         fn run(
             addr: net.IpAddress,
             kp: crypto.sign.Ed25519.KeyPair,
             peer_pk: crypto.sign.Ed25519.PublicKey,
-            wk: *[32]u8,
-            rk: *[32]u8,
+            pp_ctx: *i32,
         ) !void {
+            var stream = try addr.connect(io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            // Phase 1: TLS handshake via StreamChannel
             var tls_ctx: tls_types.ClientContext = .{
                 .io = io,
                 .send_counter = 0,
@@ -281,30 +286,32 @@ test "symmetric run over tls channel" {
                 .recv_buffer = undefined,
             };
 
-            var stream = try addr.connect(io, .{ .mode = .stream });
-            defer stream.close(io);
-
             var sc: StreamChannel = undefined;
             try sc.init(io, allocator, stream, 256, 256);
-            defer sc.deinit(allocator);
-
             try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls_mod.ClientHello);
+            sc.deinit(allocator);
 
-            wk.* = tls_ctx.write_key;
-            rk.* = tls_ctx.read_key;
+            // Phase 2: test protocol via TlsChannel
+            var tc: TlsChannel = undefined;
+            try tc.init(io, allocator, stream, tls_ctx.write_key, tls_ctx.read_key, 512);
+            defer tc.deinit(allocator);
+
+            try R.symmetric_run(.client, pp_ctx, &tc, P.A);
         }
     };
 
-    var client_task = try io.concurrent(TlsClientTask.run, .{
-        tls_listener.socket.address,
+    var client_task = try io.concurrent(ClientTask.run, .{
+        listener.socket.address,
         kp_c,
         kp_s.public_key,
-        &tls_client_write_key,
-        &tls_client_read_key,
+        &client_context,
     });
+    defer client_task.cancel(io) catch {};
 
-    var tls_stream = try tls_listener.accept(io);
+    var stream = try listener.accept(io);
+    defer stream.close(io);
 
+    // Phase 1: TLS handshake via StreamChannel
     var tls_server_write_key: [32]u8 = undefined;
     var tls_server_read_key: [32]u8 = undefined;
     {
@@ -331,65 +338,20 @@ test "symmetric run over tls channel" {
         };
 
         var sc: StreamChannel = undefined;
-        try sc.init(io, allocator, tls_stream, 256, 256);
-        defer sc.deinit(allocator);
-
+        try sc.init(io, allocator, stream, 256, 256);
         try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls_mod.ClientHello);
+        sc.deinit(allocator);
 
         tls_server_write_key = tls_ctx.write_key;
         tls_server_read_key = tls_ctx.read_key;
     }
-    tls_stream.close(io);
-    tls_stream = undefined;
 
-    // Wait for TLS client task to complete before starting next phase
-    _ = client_task.cancel(io) catch {};
-
-    // --- Step 2: Run test protocol over encrypted channel (new TCP connection) ---
-    const P = CreateTestProtocol("p2", Exit);
-    const R = Runner(P.A);
-    var client_context: i32 = 0;
-    var server_context: i32 = 0;
-
-    var listener = try localhost.listen(io, .{});
-    defer listener.deinit(io);
-
-    const TlsChannel = root.channel.TlsChannel;
-
-    const S = struct {
-        fn clientFn(
-            server_address: net.IpAddress,
-            ctx: *i32,
-            write_key: [32]u8,
-            read_key: [32]u8,
-        ) !void {
-            var stream = try server_address.connect(io, .{ .mode = .stream });
-            defer stream.close(io);
-
-            var tc: TlsChannel = undefined;
-            try tc.init(io, allocator, stream, write_key, read_key, 256);
-            defer tc.deinit(allocator);
-
-            try R.symmetric_run(.client, ctx, &tc, P.A);
-        }
-    };
-
-    var pp_client_task = try io.concurrent(S.clientFn, .{
-        listener.socket.address,
-        &client_context,
-        tls_client_write_key,
-        tls_client_read_key,
-    });
-
-    var stream = try listener.accept(io);
-    defer stream.close(io);
-
+    // Phase 2: test protocol via TlsChannel
     var tc: TlsChannel = undefined;
-    try tc.init(io, allocator, stream, tls_server_write_key, tls_server_read_key, 256);
+    try tc.init(io, allocator, stream, tls_server_write_key, tls_server_read_key, 512);
     defer tc.deinit(allocator);
 
     try R.symmetric_run(.server, &server_context, &tc, P.A);
 
-    _ = pp_client_task.cancel(io) catch {};
     try testing.expectEqual(server_context, 10);
 }
