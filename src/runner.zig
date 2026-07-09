@@ -264,22 +264,7 @@ test "tls channel: symmetric_run over encrypted channel" {
             defer stream.close(io);
 
             // Phase 1: TLS handshake
-            var tls_ctx: tls.ClientContext = .{
-                .io = io,
-                .id_keypair = kp,
-                .peer_id_public = peer_pk,
-                .ephemeral_sk = undefined,
-                .own_ephemeral_pk = undefined,
-                .own_nonce = undefined,
-                .peer_nonce = undefined,
-                .peer_ephemeral_pk = undefined,
-                .peer_signature = undefined,
-                .peer_mac = undefined,
-                .shared_secret = undefined,
-                .handshake_key = undefined,
-                .write_key = undefined,
-                .read_key = undefined,
-            };
+            var tls_ctx = tls.ClientContext.init(io, kp, peer_pk);
 
             var sc: StreamChannel = undefined;
             try sc.init(io, allocator, stream, 256, 256);
@@ -307,22 +292,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     defer stream.close(io);
 
     // Phase 1: TLS handshake
-    var tls_ctx: tls.ServerContext = .{
-        .io = io,
-        .id_keypair = kp_s,
-        .peer_id_public = kp_c.public_key,
-        .ephemeral_sk = undefined,
-        .own_ephemeral_pk = undefined,
-        .peer_ephemeral_pk = undefined,
-        .peer_nonce = undefined,
-        .own_nonce = undefined,
-        .shared_secret = undefined,
-        .handshake_key = undefined,
-        .own_signature = undefined,
-        .own_mac = undefined,
-        .read_key = undefined,
-        .write_key = undefined,
-    };
+    var tls_ctx = tls.ServerContext.init(io, kp_s, kp_c.public_key);
     {
         var sc: StreamChannel = undefined;
         try sc.init(io, allocator, stream, 256, 256);

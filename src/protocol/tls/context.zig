@@ -35,6 +35,25 @@ pub const ClientContext = struct {
     write_key: [32]u8,
     /// Derived application key (for TlsChannel read)
     read_key: [32]u8,
+
+    pub fn init(io: std.Io, id_keypair: crypto.sign.Ed25519.KeyPair, peer_id_public: crypto.sign.Ed25519.PublicKey) ClientContext {
+        return .{
+            .io = io,
+            .id_keypair = id_keypair,
+            .peer_id_public = peer_id_public,
+            .ephemeral_sk = undefined,
+            .own_ephemeral_pk = undefined,
+            .own_nonce = undefined,
+            .peer_nonce = undefined,
+            .peer_ephemeral_pk = undefined,
+            .peer_signature = undefined,
+            .peer_mac = undefined,
+            .shared_secret = undefined,
+            .handshake_key = undefined,
+            .write_key = undefined,
+            .read_key = undefined,
+        };
+    }
 };
 
 pub const ServerContext = struct {
@@ -70,6 +89,25 @@ pub const ServerContext = struct {
     read_key: [32]u8,
     /// Derived application key (for TlsChannel write)
     write_key: [32]u8,
+
+    pub fn init(io: std.Io, id_keypair: crypto.sign.Ed25519.KeyPair, peer_id_public: crypto.sign.Ed25519.PublicKey) ServerContext {
+        return .{
+            .io = io,
+            .id_keypair = id_keypair,
+            .peer_id_public = peer_id_public,
+            .ephemeral_sk = undefined,
+            .own_ephemeral_pk = undefined,
+            .peer_ephemeral_pk = undefined,
+            .peer_nonce = undefined,
+            .own_nonce = undefined,
+            .shared_secret = undefined,
+            .handshake_key = undefined,
+            .own_signature = undefined,
+            .own_mac = undefined,
+            .read_key = undefined,
+            .write_key = undefined,
+        };
+    }
 };
 
 /// HKDF-Extract: prk = HMAC-SHA256(salt, ikm)

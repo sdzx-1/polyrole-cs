@@ -5,45 +5,6 @@ const Runner = polyrole.runner.Runner;
 const tls = @import("root.zig");
 const types = @import("context.zig");
 
-fn initClientCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, server_pk: crypto.sign.Ed25519.PublicKey) types.ClientContext {
-    return .{
-        .io = io,
-        .id_keypair = kp,
-        .peer_id_public = server_pk,
-        .ephemeral_sk = undefined,
-        .own_ephemeral_pk = undefined,
-        .own_nonce = undefined,
-        .peer_nonce = undefined,
-        .peer_ephemeral_pk = undefined,
-        .peer_signature = undefined,
-        .peer_mac = undefined,
-        .shared_secret = undefined,
-        .handshake_key = undefined,
-        .write_key = undefined,
-        .read_key = undefined,
-    };
-}
-
-fn initServerCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, client_pk: crypto.sign.Ed25519.PublicKey) types.ServerContext {
-    return .{
-        .io = io,
-        .id_keypair = kp,
-        .peer_id_public = client_pk,
-        .ephemeral_sk = undefined,
-        .own_ephemeral_pk = undefined,
-        .peer_ephemeral_pk = undefined,
-        .peer_nonce = undefined,
-        .own_nonce = undefined,
-        .shared_secret = undefined,
-        .handshake_key = undefined,
-        .own_signature = undefined,
-        .own_mac = undefined,
-        .read_key = undefined,
-        .write_key = undefined,
-    };
-}
-
-// HKDF 密钥派生自测试：验证 Extract + Expand 流程正确性
 test "hkdf" {
     _ = @import("context.zig");
 }
@@ -53,8 +14,8 @@ test "simulate handshake only" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
+    var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
     const R = Runner(tls.ClientHello);
     try R.simulate(&client, &server, tls.ClientHello);
@@ -69,8 +30,8 @@ test "symmetric run handshake" {
 
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
+    var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
     const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
     var listener = try localhost.listen(io, .{});
@@ -110,8 +71,8 @@ test "handshake: tampered server signature → SignatureInvalid" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
+    var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
@@ -128,8 +89,8 @@ test "handshake: tampered server MAC → HmacInvalid" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
+    var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
@@ -146,8 +107,8 @@ test "handshake: tampered client signature → SignatureInvalid" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
+    var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
@@ -166,8 +127,8 @@ test "handshake: invalid ephemeral public key → DhFailed" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
+    var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
@@ -184,8 +145,8 @@ test "simulate multiple sessions with same contexts" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
+    var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
     const R = Runner(tls.ClientHello);
 
@@ -204,8 +165,8 @@ test "handshake: tampered client MAC → HmacInvalid" {
     const testing = std.testing;
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
+    var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
@@ -228,8 +189,8 @@ test "handshake: wrong client identity key → SignatureInvalid" {
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
 
     // Server 信任 kp_c，但 client 用 kp_c_rogue 签名
-    var client = initClientCtx(testing.io, kp_c_rogue, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c_rogue, kp_s.public_key);
+    var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
@@ -250,8 +211,8 @@ test "handshake: swapped client ephemeral pk → SignatureInvalid" {
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
 
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
-    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
+    var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
     var ch = try tls.ClientHello.process(&client);
     // MITM 替换临时公钥
@@ -275,11 +236,11 @@ test "handshake: replayed ServerHello from previous session → SignatureInvalid
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
 
-    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
 
     // Round 1: 生成 ServerHello
     const ch1 = try tls.ClientHello.process(&client);
-    var s1 = initServerCtx(testing.io, kp_s, kp_c.public_key);
+    var s1 = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
     tls.ClientHello.preprocess(&s1, ch1);
     const sh1 = try tls.ServerHello.process(&s1);
     try tls.ServerHello.preprocess(&client, sh1);
@@ -299,10 +260,10 @@ test "simulate: two handshakes with different keypairs produce different keys" {
     const kp_c2 = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s2 = crypto.sign.Ed25519.KeyPair.generate(testing.io);
 
-    var c1 = initClientCtx(testing.io, kp_c1, kp_s1.public_key);
-    var s1 = initServerCtx(testing.io, kp_s1, kp_c1.public_key);
-    var c2 = initClientCtx(testing.io, kp_c2, kp_s2.public_key);
-    var s2 = initServerCtx(testing.io, kp_s2, kp_c2.public_key);
+    var c1 = types.ClientContext.init(testing.io, kp_c1, kp_s1.public_key);
+    var s1 = types.ServerContext.init(testing.io, kp_s1, kp_c1.public_key);
+    var c2 = types.ClientContext.init(testing.io, kp_c2, kp_s2.public_key);
+    var s2 = types.ServerContext.init(testing.io, kp_s2, kp_c2.public_key);
 
     const R = Runner(tls.ClientHello);
 
