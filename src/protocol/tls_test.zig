@@ -8,6 +8,8 @@ const types = @import("types.zig");
 fn initClientCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, server_pk: crypto.sign.Ed25519.PublicKey) types.ClientContext {
     return .{
         .io = io,
+        .send_counter = 0,
+        .recv_counter = std.math.maxInt(u64),
         .id_keypair = kp,
         .peer_id_public = server_pk,
         .ephemeral_sk = undefined,
@@ -30,6 +32,8 @@ fn initClientCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, server_pk: crypto.
 fn initServerCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, client_pk: crypto.sign.Ed25519.PublicKey) types.ServerContext {
     return .{
         .io = io,
+        .send_counter = 0,
+        .recv_counter = std.math.maxInt(u64),
         .id_keypair = kp,
         .peer_id_public = client_pk,
         .ephemeral_sk = undefined,

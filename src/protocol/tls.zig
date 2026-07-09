@@ -52,11 +52,30 @@ fn randomBytes(io: std.Io, comptime n: usize) [n]u8 {
     return buf;
 }
 
-fn generateX25519Keypair(io: std.Io) struct { secret: [32]u8, public: [32]u8 } {
-    const secret = randomBytes(io, 32);
-    const basepoint = [_]u8{9} ++ ([_]u8{0} ** 31);
-    const public = crypto.dh.X25519.scalarmult(secret, basepoint) catch @panic("x25519 keygen failed");
-    return .{ .secret = secret, .public = public };
+fn generateX25519Keypair(io: std.Io) crypto.dh.X25519.KeyPair {
+    return crypto.dh.X25519.KeyPair.generate(io);
+}
+
+fn packNonce(counter: u64, random: [16]u8) [24]u8 {
+    var nonce: [24]u8 = undefined;
+    std.mem.writeInt(u64, nonce[0..8], counter, .big);
+    @memcpy(nonce[8..24], &random);
+    return nonce;
+}
+
+fn unpackNonce(nonce: [24]u8) struct { counter: u64, random: [16]u8 } {
+    const counter = std.mem.readInt(u64, nonce[0..8], .big);
+    var random: [16]u8 = undefined;
+    @memcpy(&random, nonce[8..24]);
+    return .{ .counter = counter, .random = random };
+}
+
+fn verifyCounter(ctx_recv_counter: *u64, received: u64) void {
+    // maxInt(u64) is the sentinel for "no message received yet"
+    if (ctx_recv_counter.* != std.math.maxInt(u64) and received <= ctx_recv_counter.*) {
+        @panic("replay or out-of-order data message detected");
+    }
+    ctx_recv_counter.* = received;
 }
 
 // ─────────────────── Step 1: ClientHello ───────────────────
@@ -71,12 +90,12 @@ pub const ClientHello = union(enum) {
         const kp = generateX25519Keypair(ctx.io);
 
         ctx.own_nonce = nonce;
-        ctx.ephemeral_sk = kp.secret;
-        ctx.own_ephemeral_pk = kp.public;
+        ctx.ephemeral_sk = kp.secret_key;
+        ctx.own_ephemeral_pk = kp.public_key;
 
         return .{ .to_server = .{ .data = .{
             .nonce = nonce,
-            .ephemeral_pk = kp.public,
+            .ephemeral_pk = kp.public_key,
         } } };
     }
 
@@ -101,27 +120,27 @@ pub const ServerHello = union(enum) {
         const nonce = randomBytes(ctx.io, 24);
         const kp = generateX25519Keypair(ctx.io);
 
-        const shared_secret = crypto.dh.X25519.scalarmult(kp.secret, ctx.peer_ephemeral_pk) catch
+        const shared_secret = crypto.dh.X25519.scalarmult(kp.secret_key, ctx.peer_ephemeral_pk) catch
             @panic("x25519 scalarmult failed");
         ctx.shared_secret = shared_secret;
 
         const keys = types.deriveKeys(shared_secret);
         ctx.handshake_key = keys.handshake_key;
 
-        const t1 = sha256(.{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &nonce, &kp.public });
+        const t1 = sha256(.{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &nonce, &kp.public_key });
         const signature = sign(ctx.id_keypair, &t1);
         const t2 = sha256(.{ &t1, &signature });
         const mac = hmacSha256(&ctx.handshake_key, "server_fin", &t2);
 
         ctx.own_nonce = nonce;
-        ctx.ephemeral_sk = kp.secret;
-        ctx.own_ephemeral_pk = kp.public;
+        ctx.ephemeral_sk = kp.secret_key;
+        ctx.own_ephemeral_pk = kp.public_key;
         ctx.own_signature = signature;
         ctx.own_mac = mac;
 
         return .{ .to_client = .{ .data = .{
             .nonce = nonce,
-            .ephemeral_pk = kp.public,
+            .ephemeral_pk = kp.public_key,
             .signature = signature,
             .mac = mac,
         } } };
@@ -213,7 +232,9 @@ pub const ClientData = union(enum) {
         if (ctx.send_buffer.len == 0) return .close;
 
         const plaintext = ctx.send_buffer;
-        const nonce = randomBytes(ctx.io, 24);
+        const counter = ctx.send_counter;
+        ctx.send_counter += 1;
+        const nonce = packNonce(counter, randomBytes(ctx.io, 16));
 
         const ct_len = plaintext.len + 16;
         const combined = ctx.encrypted_buf[0..ct_len];
@@ -235,6 +256,8 @@ pub const ClientData = union(enum) {
         switch (result) {
             .send => |d| {
                 const payload = d.data;
+                const n = unpackNonce(payload.nonce);
+                verifyCounter(&ctx.recv_counter, n.counter);
                 const combined_len = payload.ciphertext.len + 16;
                 const combined = ctx.encrypted_buf[0..combined_len];
                 @memcpy(combined[0..16], &payload.tag);
@@ -263,7 +286,9 @@ pub const ServerData = union(enum) {
         if (ctx.send_buffer.len == 0) return .close;
 
         const plaintext = ctx.send_buffer;
-        const nonce = randomBytes(ctx.io, 24);
+        const counter = ctx.send_counter;
+        ctx.send_counter += 1;
+        const nonce = packNonce(counter, randomBytes(ctx.io, 16));
 
         const ct_len = plaintext.len + 16;
         const combined = ctx.encrypted_buf[0..ct_len];
@@ -285,6 +310,8 @@ pub const ServerData = union(enum) {
         switch (result) {
             .send => |d| {
                 const payload = d.data;
+                const n = unpackNonce(payload.nonce);
+                verifyCounter(&ctx.recv_counter, n.counter);
                 const combined_len = payload.ciphertext.len + 16;
                 const combined = ctx.encrypted_buf[0..combined_len];
                 @memcpy(combined[0..16], &payload.tag);
