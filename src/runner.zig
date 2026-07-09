@@ -234,8 +234,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     const io = testing.io;
     const allocator = testing.allocator;
     const crypto = std.crypto;
-    const tls_mod = @import("protocol/tls/root.zig");
-    const tls_types = @import("protocol/tls/context.zig");
+    const tls = @import("protocol/tls.zig");
 
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -245,7 +244,7 @@ test "tls channel: symmetric_run over encrypted channel" {
 
     const P = CreateTestProtocol("tls_proto", Exit);
     const R_pp = Runner(P.A);
-    const R_tls = Runner(tls_mod.ClientHello);
+    const R_tls = Runner(tls.ClientHello);
 
     const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
     var listener = try localhost.listen(io, .{});
@@ -265,7 +264,7 @@ test "tls channel: symmetric_run over encrypted channel" {
             defer stream.close(io);
 
             // Phase 1: TLS handshake
-            var tls_ctx: tls_types.ClientContext = .{
+            var tls_ctx: tls.ClientContext = .{
                 .io = io,
                 .id_keypair = kp,
                 .peer_id_public = peer_pk,
@@ -284,7 +283,7 @@ test "tls channel: symmetric_run over encrypted channel" {
 
             var sc: StreamChannel = undefined;
             try sc.init(io, allocator, stream, 256, 256);
-            try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls_mod.ClientHello);
+            try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello);
             sc.deinit(allocator);
 
             // Phase 2: encrypted protocol via symmetric_run
@@ -308,7 +307,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     defer stream.close(io);
 
     // Phase 1: TLS handshake
-    var tls_ctx: tls_types.ServerContext = .{
+    var tls_ctx: tls.ServerContext = .{
         .io = io,
         .id_keypair = kp_s,
         .peer_id_public = kp_c.public_key,
@@ -327,7 +326,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     {
         var sc: StreamChannel = undefined;
         try sc.init(io, allocator, stream, 256, 256);
-        try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls_mod.ClientHello);
+        try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello);
         sc.deinit(allocator);
     }
 
