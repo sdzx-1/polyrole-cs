@@ -54,6 +54,10 @@ pub const StreamChannel = struct {
 /// The nonce is a monotonic counter (u64 big-endian, zero-padded to 24 bytes).
 /// Each direction has its own counter starting from 0.
 pub const TlsChannel = struct {
+    /// Maximum plaintext (and therefore ciphertext) size.  Limits both
+    /// buf_size and the stack-allocated combined buffer.
+    const max_plaintext = 4096 - 16;
+
     inner: StreamChannel,
     write_key: [32]u8,
     read_key: [32]u8,
@@ -74,6 +78,7 @@ pub const TlsChannel = struct {
         read_key: [32]u8,
         buf_size: usize,
     ) !void {
+        std.debug.assert(buf_size <= max_plaintext);
         try self.inner.init(io, gpa, stream, buf_size, buf_size);
         self.encode_buf = try gpa.alloc(u8, buf_size);
         self.decode_buf = try gpa.alloc(u8, buf_size);
@@ -104,7 +109,7 @@ pub const TlsChannel = struct {
         // AEAD encrypt
         const ct_overhead = 16;
         const combined_len = plaintext.len + ct_overhead;
-        var combined: [4096]u8 = undefined;
+        var combined: [max_plaintext + ct_overhead]u8 = undefined;
         if (combined_len > combined.len) return error.MessageTooLarge;
         crypto.nacl.SecretBox.seal(combined[0..combined_len], plaintext, nonce, self.write_key);
 
@@ -120,7 +125,7 @@ pub const TlsChannel = struct {
     pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
         const sr = &self.inner.stream_reader.interface;
 
-        const nonce = try sr.take(24);
+        const nonce = (try sr.take(24))[0..24].*;
         const tag = try sr.take(16);
         const ct_len = try sr.takeInt(u16, .big);
         if (ct_len > self.decode_buf.len) return error.MessageTooLarge;
@@ -128,13 +133,13 @@ pub const TlsChannel = struct {
         const ct = try sr.take(ct_len);
 
         // AEAD decrypt
-        var combined: [4096 + 16]u8 = undefined;
+        var combined: [max_plaintext + 16]u8 = undefined;
         @memcpy(combined[0..16], tag);
         @memcpy(combined[16..][0..ct_len], ct);
         crypto.nacl.SecretBox.open(
             self.decode_buf[0..ct_len],
             combined[0 .. ct_len + 16],
-            nonce[0..24].*,
+            nonce,
             self.read_key,
         ) catch return error.DecryptFailed;
 
