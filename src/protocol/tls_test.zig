@@ -152,5 +152,233 @@ test "symmetric run" {
 }
 
 test "simulate close without data" {
-    // todo: test close variant
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    // No send_buffer set → ClientFinished chooses .close variant
+    client.send_buffer = "";
+    server.send_buffer = "";
+
+    const R = Runner(tls.ClientHello);
+    // Should complete without error and without entering data phase
+    try R.simulate(&client, &server, tls.ClientHello);
+}
+
+test "handshake: tampered server signature → SignatureInvalid" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    // Step 1: ClientHello
+    const ch = try tls.ClientHello.process(&client);
+    tls.ClientHello.preprocess(&server, ch);
+
+    // Step 2: ServerHello
+    var sh = try tls.ServerHello.process(&server);
+
+    // Tamper server signature
+    sh.to_client.data.signature = [_]u8{0} ** 64;
+
+    const err = tls.ServerHello.preprocess(&client, sh);
+    try testing.expectError(error.SignatureInvalid, err);
+}
+
+test "handshake: tampered server MAC → HmacInvalid" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    const ch = try tls.ClientHello.process(&client);
+    tls.ClientHello.preprocess(&server, ch);
+
+    var sh = try tls.ServerHello.process(&server);
+
+    // Tamper server MAC (signature is valid, MAC is not)
+    sh.to_client.data.mac = [_]u8{0} ** 32;
+
+    const err = tls.ServerHello.preprocess(&client, sh);
+    try testing.expectError(error.HmacInvalid, err);
+}
+
+test "handshake: tampered client signature → SignatureInvalid" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    // Drive through ClientHello + ServerHello
+    const ch = try tls.ClientHello.process(&client);
+    tls.ClientHello.preprocess(&server, ch);
+    const sh = try tls.ServerHello.process(&server);
+    try tls.ServerHello.preprocess(&client, sh);
+
+    // Set send_buffer so ClientFinished chooses .enter_data variant
+    client.send_buffer = "test";
+
+    // Step 3: ClientFinished
+    var cf = try tls.ClientFinished.process(&client);
+
+    // Ensure it chose .enter_data, not .close
+    try testing.expect(cf == .enter_data);
+
+    // Tamper client signature
+    cf.enter_data.data.signature = [_]u8{0} ** 64;
+
+    const err = tls.ClientFinished.preprocess(&server, cf);
+    try testing.expectError(error.SignatureInvalid, err);
+}
+
+test "handshake: invalid ephemeral public key → DhFailed" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    const ch = try tls.ClientHello.process(&client);
+    tls.ClientHello.preprocess(&server, ch);
+
+    var sh = try tls.ServerHello.process(&server);
+
+    // Zero ephemeral public key → scalarmult fails with IdentityElementError
+    sh.to_client.data.ephemeral_pk = [_]u8{0} ** 32;
+
+    const err = tls.ServerHello.preprocess(&client, sh);
+    try testing.expectError(error.DhFailed, err);
+}
+
+test "data: AEAD decrypt with tampered ciphertext → DecryptFailed" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    var client_recv_buf: [128]u8 = undefined;
+    var server_recv_buf: [128]u8 = undefined;
+    client.send_buffer = "hello";
+    client.recv_buffer = &client_recv_buf;
+    server.recv_buffer = &server_recv_buf;
+
+    // Complete handshake
+    const R = Runner(tls.ClientHello);
+    try R.simulate(&client, &server, tls.ClientHello);
+
+    // Send one legitimate message to establish counter state
+    server.send_buffer = "legit";
+    const sd = try tls.ServerData.process(&server);
+    try tls.ServerData.preprocess(&client, sd);
+
+    // Now craft a tampered ciphertext
+    client.send_buffer = "tampered";
+    var cd = try tls.ClientData.process(&client);
+    cd.send.data.tag[0] ^= 0xFF; // flip one byte in authentication tag
+
+    const err = tls.ClientData.preprocess(&server, cd);
+    try testing.expectError(error.DecryptFailed, err);
+}
+
+test "data: replay same message → ReplayDetected" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    var client_recv_buf: [128]u8 = undefined;
+    var server_recv_buf: [128]u8 = undefined;
+    client.send_buffer = "hello";
+    client.recv_buffer = &client_recv_buf;
+    server.recv_buffer = &server_recv_buf;
+
+    const R = Runner(tls.ClientHello);
+    try R.simulate(&client, &server, tls.ClientHello);
+
+    // First delivery succeeds
+    server.send_buffer = "legit";
+    const sd = try tls.ServerData.process(&server);
+    // Save ciphertext before encrypted_buf is overwritten by subsequent calls
+    var saved_ct: [128]u8 = undefined;
+    @memcpy(saved_ct[0..sd.send.data.ciphertext.len], sd.send.data.ciphertext);
+    try tls.ServerData.preprocess(&client, sd);
+
+    // Replay: reconstruct with saved ciphertext
+    var replay = sd;
+    replay.send.data.ciphertext = saved_ct[0..sd.send.data.ciphertext.len];
+    const err = tls.ServerData.preprocess(&client, replay);
+    try testing.expectError(error.ReplayDetected, err);
+}
+
+test "simulate multiple data exchanges" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    var client_recv_buf: [1024]u8 = undefined;
+    var server_recv_buf: [1024]u8 = undefined;
+    client.recv_buffer = &client_recv_buf;
+    server.recv_buffer = &server_recv_buf;
+
+    const R = Runner(tls.ClientHello);
+
+    // First exchange
+    client.send_buffer = "ping";
+    server.send_buffer = "pong";
+    try R.simulate(&client, &server, tls.ClientHello);
+
+    try testing.expectEqualStrings("pong", client_recv_buf[0..4]);
+    try testing.expectEqualStrings("ping", server_recv_buf[0..4]);
+
+    // Reset buffers for next exchange
+    client.send_buffer = "msg2";
+    server.send_buffer = "ack2";
+    try R.simulate(&client, &server, tls.ClientHello);
+
+    try testing.expectEqualStrings("ack2", client_recv_buf[0..4]);
+    try testing.expectEqualStrings("msg2", server_recv_buf[0..4]);
+}
+
+test "data: out-of-order message → ReplayDetected" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    var client_recv_buf: [128]u8 = undefined;
+    var server_recv_buf: [128]u8 = undefined;
+    client.send_buffer = "hello";
+    client.recv_buffer = &client_recv_buf;
+    server.recv_buffer = &server_recv_buf;
+
+    const R = Runner(tls.ClientHello);
+    try R.simulate(&client, &server, tls.ClientHello);
+
+    // Send and receive first message
+    server.send_buffer = "first";
+    const sd1 = try tls.ServerData.process(&server);
+    var saved_ct1: [128]u8 = undefined;
+    @memcpy(saved_ct1[0..sd1.send.data.ciphertext.len], sd1.send.data.ciphertext);
+    try tls.ServerData.preprocess(&client, sd1);
+
+    // Send and receive second message (increments counter to 1)
+    server.send_buffer = "second";
+    const sd2 = try tls.ServerData.process(&server);
+    try tls.ServerData.preprocess(&client, sd2);
+
+    // Replay first message (counter=0) after second (counter=1) was received
+    var replay = sd1;
+    replay.send.data.ciphertext = saved_ct1[0..sd1.send.data.ciphertext.len];
+    const err = tls.ServerData.preprocess(&client, replay);
+    try testing.expectError(error.ReplayDetected, err);
 }
