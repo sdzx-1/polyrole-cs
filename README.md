@@ -167,9 +167,10 @@ state_id(4 BE) || tag(1) || payload
 var graph = try polyrole.Graph.initWithFsm(allocator, A);
 defer graph.deinit();
 
-var file = try std.fs.cwd().createFile("graph.dot", .{});
-defer file.close();
-try graph.generateDot(null, file.writer());
+var buf = std.ArrayList(u8).init(allocator);
+defer buf.deinit();
+try graph.generateDot(null, buf.writer());
+// buf.items 为 DOT 源码，可写入文件
 ```
 
 可用 Graphviz 渲染：`dot -Tpng graph.dot -o graph.png`
