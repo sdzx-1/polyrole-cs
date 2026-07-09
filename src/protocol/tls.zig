@@ -352,7 +352,7 @@ fn hmacSha256(key: *const [32]u8, comptime label: []const u8, msg: []const u8) [
 
 fn verifyHmac(key: *const [32]u8, comptime label: []const u8, msg: []const u8, expected: [32]u8) void {
     const got = hmacSha256(key, label, msg);
-    if (!std.mem.eql(u8, &got, &expected)) {
+    if (!crypto.timing_safe.eql([32]u8, got, expected)) {
         @panic("HMAC verify failed");
     }
 }
