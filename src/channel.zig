@@ -44,7 +44,7 @@ pub const StreamChannel = struct {
     }
 };
 
-/// Encrypted transport channel — wraps a TCP stream with AEAD encryption
+/// Encrypted transport channel — wraps a StreamChannel with AEAD encryption
 /// using keys derived from a prior TLS handshake.
 ///
 /// Wire format per message:
@@ -53,11 +53,7 @@ pub const StreamChannel = struct {
 /// The nonce is a monotonic counter (u64 big-endian, zero-padded to 24 bytes).
 /// Each direction has its own counter starting from 0.
 pub const TlsChannel = struct {
-    stream: Stream,
-    rbuff: []u8,
-    wbuff: []u8,
-    stream_reader: Stream.Reader,
-    stream_writer: Stream.Writer,
+    inner: StreamChannel,
     write_key: [32]u8,
     read_key: [32]u8,
     write_counter: u64,
@@ -77,27 +73,17 @@ pub const TlsChannel = struct {
         read_key: [32]u8,
         buf_size: usize,
     ) !void {
-        const rbuff = try gpa.alloc(u8, buf_size);
-        const wbuff = try gpa.alloc(u8, buf_size);
-        const encode_buf = try gpa.alloc(u8, buf_size);
-        const decode_buf = try gpa.alloc(u8, buf_size);
-
-        self.stream = stream;
-        self.rbuff = rbuff;
-        self.wbuff = wbuff;
-        self.stream_reader = stream.reader(io, rbuff);
-        self.stream_writer = stream.writer(io, wbuff);
+        try self.inner.init(io, gpa, stream, buf_size, buf_size);
+        self.encode_buf = try gpa.alloc(u8, buf_size);
+        self.decode_buf = try gpa.alloc(u8, buf_size);
         self.write_key = write_key;
         self.read_key = read_key;
         self.write_counter = 0;
         self.read_counter = 0;
-        self.encode_buf = encode_buf;
-        self.decode_buf = decode_buf;
     }
 
     pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
-        gpa.free(self.rbuff);
-        gpa.free(self.wbuff);
+        self.inner.deinit(gpa);
         gpa.free(self.encode_buf);
         gpa.free(self.decode_buf);
     }
@@ -107,8 +93,7 @@ pub const TlsChannel = struct {
         var buf = self.encode_buf;
         var writer = Io.Writer.fixed(buf);
         try codec.encode(&writer, state_id, val);
-        const written = writer.end;
-        const plaintext = buf[0..written];
+        const plaintext = buf[0..writer.end];
 
         // Build nonce from counter
         var nonce: [24]u8 = [_]u8{0} ** 24;
@@ -123,7 +108,7 @@ pub const TlsChannel = struct {
         crypto.nacl.SecretBox.seal(combined[0..combined_len], plaintext, nonce, self.write_key);
 
         // Wire format: nonce || tag || ct_len || ciphertext
-        const sw = &self.stream_writer.interface;
+        const sw = &self.inner.stream_writer.interface;
         try sw.writeAll(&nonce);
         try sw.writeAll(combined[0..16]); // tag
         try sw.writeInt(u16, @intCast(plaintext.len), .big);
@@ -132,7 +117,7 @@ pub const TlsChannel = struct {
     }
 
     pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
-        const sr = &self.stream_reader.interface;
+        const sr = &self.inner.stream_reader.interface;
 
         const nonce = try sr.take(24);
         const tag = try sr.take(16);
