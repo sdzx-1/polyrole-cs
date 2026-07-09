@@ -4,7 +4,6 @@ const polyrole = @import("../root.zig");
 const Runner = polyrole.runner.Runner;
 const tls = @import("tls.zig");
 const types = @import("types.zig");
-const Tls = tls.TlsProtocol(polyrole.Exit);
 
 fn initClientCtx(io: std.Io, kp: crypto.sign.Ed25519.KeyPair, server_pk: crypto.sign.Ed25519.PublicKey) types.ClientContext {
     return .{
@@ -57,8 +56,8 @@ test "simulate handshake only" {
     var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
-    const R = Runner(Tls.ClientHello);
-    try R.simulate(&client, &server, Tls.ClientHello);
+    const R = Runner(tls.ClientHello);
+    try R.simulate(&client, &server, tls.ClientHello);
 }
 
 // 通过 TCP 网络通道运行完整握手：验证编解码 + 网络传输
@@ -78,7 +77,7 @@ test "symmetric run handshake" {
     defer listener.deinit(io);
 
     const StreamChannel = polyrole.channel.StreamChannel;
-    const R = Runner(Tls.ClientHello);
+    const R = Runner(tls.ClientHello);
 
     const S = struct {
         fn clientFn(address: net.IpAddress, ctx: *types.ClientContext) !void {
@@ -89,7 +88,7 @@ test "symmetric run handshake" {
             try ch.init(io, allocator, stream, 256, 256);
             defer ch.deinit(allocator);
 
-            try R.symmetric_run(.client, ctx, &ch, Tls.ClientHello);
+            try R.symmetric_run(.client, ctx, &ch, tls.ClientHello);
         }
     };
 
@@ -103,7 +102,7 @@ test "symmetric run handshake" {
     try ch.init(io, allocator, stream, 256, 256);
     defer ch.deinit(allocator);
 
-    try R.symmetric_run(.server, &server, &ch, Tls.ClientHello);
+    try R.symmetric_run(.server, &server, &ch, tls.ClientHello);
 }
 
 // 篡改服务端签名：客户端验证 ServerHello 签名时应返回 SignatureInvalid
@@ -114,13 +113,13 @@ test "handshake: tampered server signature → SignatureInvalid" {
     var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
-    const ch = try Tls.ClientHello.process(&client);
-    Tls.ClientHello.preprocess(&server, ch);
+    const ch = try tls.ClientHello.process(&client);
+    tls.ClientHello.preprocess(&server, ch);
 
-    var sh = try Tls.ServerHello.process(&server);
+    var sh = try tls.ServerHello.process(&server);
     sh.to_client.data.signature = [_]u8{0} ** 64;
 
-    const err = Tls.ServerHello.preprocess(&client, sh);
+    const err = tls.ServerHello.preprocess(&client, sh);
     try testing.expectError(error.SignatureInvalid, err);
 }
 
@@ -132,13 +131,13 @@ test "handshake: tampered server MAC → HmacInvalid" {
     var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
-    const ch = try Tls.ClientHello.process(&client);
-    Tls.ClientHello.preprocess(&server, ch);
+    const ch = try tls.ClientHello.process(&client);
+    tls.ClientHello.preprocess(&server, ch);
 
-    var sh = try Tls.ServerHello.process(&server);
+    var sh = try tls.ServerHello.process(&server);
     sh.to_client.data.mac = [_]u8{0} ** 32;
 
-    const err = Tls.ServerHello.preprocess(&client, sh);
+    const err = tls.ServerHello.preprocess(&client, sh);
     try testing.expectError(error.HmacInvalid, err);
 }
 
@@ -150,15 +149,15 @@ test "handshake: tampered client signature → SignatureInvalid" {
     var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
-    const ch = try Tls.ClientHello.process(&client);
-    Tls.ClientHello.preprocess(&server, ch);
-    const sh = try Tls.ServerHello.process(&server);
-    try Tls.ServerHello.preprocess(&client, sh);
+    const ch = try tls.ClientHello.process(&client);
+    tls.ClientHello.preprocess(&server, ch);
+    const sh = try tls.ServerHello.process(&server);
+    try tls.ServerHello.preprocess(&client, sh);
 
-    var cf = try Tls.ClientFinished.process(&client);
+    var cf = try tls.ClientFinished.process(&client);
     cf.close.data.signature = [_]u8{0} ** 64;
 
-    const err = Tls.ClientFinished.preprocess(&server, cf);
+    const err = tls.ClientFinished.preprocess(&server, cf);
     try testing.expectError(error.SignatureInvalid, err);
 }
 
@@ -170,13 +169,13 @@ test "handshake: invalid ephemeral public key → DhFailed" {
     var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
-    const ch = try Tls.ClientHello.process(&client);
-    Tls.ClientHello.preprocess(&server, ch);
+    const ch = try tls.ClientHello.process(&client);
+    tls.ClientHello.preprocess(&server, ch);
 
-    var sh = try Tls.ServerHello.process(&server);
+    var sh = try tls.ServerHello.process(&server);
     sh.to_client.data.ephemeral_pk = [_]u8{0} ** 32;
 
-    const err = Tls.ServerHello.preprocess(&client, sh);
+    const err = tls.ServerHello.preprocess(&client, sh);
     try testing.expectError(error.DhFailed, err);
 }
 
@@ -188,14 +187,14 @@ test "simulate multiple sessions with same contexts" {
     var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
     var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
 
-    const R = Runner(Tls.ClientHello);
+    const R = Runner(tls.ClientHello);
 
     // Session 1
-    try R.simulate(&client, &server, Tls.ClientHello);
+    try R.simulate(&client, &server, tls.ClientHello);
     const key1 = client.write_key;
 
     // Session 2 — 新的临时密钥对，write_key 应不同
-    try R.simulate(&client, &server, Tls.ClientHello);
+    try R.simulate(&client, &server, tls.ClientHello);
 
     try testing.expect(!std.mem.eql(u8, &key1, &client.write_key));
 }

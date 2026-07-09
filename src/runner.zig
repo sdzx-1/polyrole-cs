@@ -281,7 +281,6 @@ test "run over tls channel: handshake then protocol with self-communicating peer
     const crypto = std.crypto;
     const tls_mod = @import("protocol/tls.zig");
     const tls_types = @import("protocol/types.zig");
-    const TlsProto = tls_mod.TlsProtocol(Exit);
 
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
@@ -324,7 +323,7 @@ test "run over tls channel: handshake then protocol with self-communicating peer
     };
 
     const R_pp = Runner(P.A);
-    const R_tls = Runner(TlsProto.ClientHello);
+    const R_tls = Runner(tls_mod.ClientHello);
 
     const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
     var listener = try localhost.listen(io, .{});
@@ -359,7 +358,7 @@ test "run over tls channel: handshake then protocol with self-communicating peer
 
             var sc: StreamChannel = undefined;
             try sc.init(io, allocator, stream, 256, 256);
-            try R_tls.symmetric_run(.client, &tls_ctx, &sc, TlsProto.ClientHello);
+            try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls_mod.ClientHello);
             sc.deinit(allocator);
 
             // Phase 2: encrypted protocol via self-communicating peer
@@ -402,7 +401,7 @@ test "run over tls channel: handshake then protocol with self-communicating peer
     {
         var sc: StreamChannel = undefined;
         try sc.init(io, allocator, stream, 256, 256);
-        try R_tls.symmetric_run(.server, &tls_ctx, &sc, TlsProto.ClientHello);
+        try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls_mod.ClientHello);
         sc.deinit(allocator);
     }
 
