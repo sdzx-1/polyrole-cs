@@ -382,3 +382,156 @@ test "data: out-of-order message → ReplayDetected" {
     const err = tls.ServerData.preprocess(&client, replay);
     try testing.expectError(error.ReplayDetected, err);
 }
+
+test "simulate large message" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    var client_recv_buf: [types.max_msg_size]u8 = undefined;
+    var server_recv_buf: [types.max_msg_size]u8 = undefined;
+    client.recv_buffer = &client_recv_buf;
+    server.recv_buffer = &server_recv_buf;
+
+    // Fill message with non-trivial pattern
+    var large_msg: [types.max_msg_size]u8 = undefined;
+    for (&large_msg, 0..) |*b, i| {
+        b.* = @truncate(i);
+    }
+
+    client.send_buffer = &large_msg;
+    server.send_buffer = "ok";
+
+    const R = Runner(tls.ClientHello);
+    try R.simulate(&client, &server, tls.ClientHello);
+
+    try testing.expectEqualStrings("ok", client_recv_buf[0..2]);
+    try testing.expectEqualStrings(&large_msg, server_recv_buf[0..types.max_msg_size]);
+}
+
+test "simulate asymmetric message sizes" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    var client_recv_buf: [types.max_msg_size]u8 = undefined;
+    var server_recv_buf: [types.max_msg_size]u8 = undefined;
+    client.recv_buffer = &client_recv_buf;
+    server.recv_buffer = &server_recv_buf;
+
+    const short_msg = "hi";
+    var long_msg: [512]u8 = undefined;
+    @memset(&long_msg, 'x');
+
+    client.send_buffer = short_msg;
+    server.send_buffer = &long_msg;
+
+    const R = Runner(tls.ClientHello);
+    try R.simulate(&client, &server, tls.ClientHello);
+
+    try testing.expectEqualStrings(&long_msg, client_recv_buf[0..512]);
+    try testing.expectEqualStrings(short_msg, server_recv_buf[0..2]);
+}
+
+test "simulate multiple sessions with same contexts" {
+    const testing = std.testing;
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    var client_recv_buf: [128]u8 = undefined;
+    var server_recv_buf: [128]u8 = undefined;
+    client.recv_buffer = &client_recv_buf;
+    server.recv_buffer = &server_recv_buf;
+
+    const R = Runner(tls.ClientHello);
+
+    // Session 1
+    client.send_buffer = "session1c";
+    server.send_buffer = "session1s";
+    client.send_counter = 0;
+    client.recv_counter = std.math.maxInt(u64);
+    server.send_counter = 0;
+    server.recv_counter = std.math.maxInt(u64);
+
+    try R.simulate(&client, &server, tls.ClientHello);
+    try testing.expectEqualStrings("session1s", client_recv_buf[0..9]);
+    try testing.expectEqualStrings("session1c", server_recv_buf[0..9]);
+
+    // Session 2 — fresh counters, new ephemeral keys
+    client.send_buffer = "session2c";
+    server.send_buffer = "session2s";
+    client.send_counter = 0;
+    client.recv_counter = std.math.maxInt(u64);
+    server.send_counter = 0;
+    server.recv_counter = std.math.maxInt(u64);
+
+    try R.simulate(&client, &server, tls.ClientHello);
+    try testing.expectEqualStrings("session2s", client_recv_buf[0..9]);
+    try testing.expectEqualStrings("session2c", server_recv_buf[0..9]);
+}
+
+test "symmetric run large message" {
+    const testing = std.testing;
+    const io = testing.io;
+    const allocator = testing.allocator;
+    const net = std.Io.net;
+
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    var client = initClientCtx(testing.io, kp_c, kp_s.public_key);
+    var server = initServerCtx(testing.io, kp_s, kp_c.public_key);
+
+    var large_msg: [types.max_msg_size]u8 = undefined;
+    for (&large_msg, 0..) |*b, i| {
+        b.* = @truncate(i);
+    }
+
+    var client_recv_buf: [types.max_msg_size]u8 = undefined;
+    var server_recv_buf: [types.max_msg_size]u8 = undefined;
+
+    client.send_buffer = &large_msg;
+    client.recv_buffer = &client_recv_buf;
+    server.send_buffer = "done";
+    server.recv_buffer = &server_recv_buf;
+
+    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try localhost.listen(io, .{});
+    defer listener.deinit(io);
+
+    const StreamChannel = polyrole.channel.StreamChannel;
+    const R = Runner(tls.ClientHello);
+
+    const S = struct {
+        fn clientFn(address: net.IpAddress, ctx: *types.ClientContext) !void {
+            var stream = try address.connect(io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var ch: StreamChannel = undefined;
+            try ch.init(io, allocator, stream, 2048, 2048);
+            defer ch.deinit(allocator);
+
+            try R.symmetric_run(.client, ctx, &ch, tls.ClientHello);
+        }
+    };
+
+    var client_task = try io.concurrent(S.clientFn, .{ listener.socket.address, &client });
+    defer client_task.cancel(io) catch {};
+
+    var stream = try listener.accept(io);
+    defer stream.close(io);
+
+    var ch: StreamChannel = undefined;
+    try ch.init(io, allocator, stream, 2048, 2048);
+    defer ch.deinit(allocator);
+
+    try R.symmetric_run(.server, &server, &ch, tls.ClientHello);
+
+    try testing.expectEqualStrings("done", client_recv_buf[0..4]);
+    try testing.expectEqualStrings(&large_msg, server_recv_buf[0..types.max_msg_size]);
+}
