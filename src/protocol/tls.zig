@@ -6,7 +6,6 @@ const ProtocolInfo = polyrole.ProtocolInfo;
 const Exit = polyrole.Exit;
 const types = @import("types.zig");
 
-
 const TlsInfo = ProtocolInfo("simple_tls", types.ClientContext, types.ServerContext);
 
 const TlsError = error{
@@ -61,141 +60,146 @@ fn generateX25519Keypair(io: std.Io) crypto.dh.X25519.KeyPair {
     return crypto.dh.X25519.KeyPair.generate(io);
 }
 
-// ─────────────────── Step 1: ClientHello ───────────────────
+pub fn TlsProtocol(Next: type) type {
+    return struct {
 
-pub const ClientHello = union(enum) {
-    to_server: Data(ClientHelloPayload, ServerHello),
+        // ─────────────────── Step 1: ClientHello ───────────────────
 
-    pub const info: TlsInfo = .{ .agent = .client, .name = "ClientHello" };
+        pub const ClientHello = union(enum) {
+            to_server: Data(ClientHelloPayload, ServerHello),
 
-    pub fn process(ctx: *types.ClientContext) !@This() {
-        const nonce = try randomBytes(ctx.io, 24);
-        const kp = generateX25519Keypair(ctx.io);
+            pub const info: TlsInfo = .{ .agent = .client, .name = "ClientHello" };
 
-        ctx.own_nonce = nonce;
-        ctx.ephemeral_sk = kp.secret_key;
-        ctx.own_ephemeral_pk = kp.public_key;
+            pub fn process(ctx: *types.ClientContext) !@This() {
+                const nonce = try randomBytes(ctx.io, 24);
+                const kp = generateX25519Keypair(ctx.io);
 
-        return .{ .to_server = .{ .data = .{
-            .nonce = nonce,
-            .ephemeral_pk = kp.public_key,
-        } } };
-    }
+                ctx.own_nonce = nonce;
+                ctx.ephemeral_sk = kp.secret_key;
+                ctx.own_ephemeral_pk = kp.public_key;
 
-    pub fn preprocess(ctx: *types.ServerContext, result: @This()) void {
-        switch (result) {
-            .to_server => |d| {
-                ctx.peer_nonce = d.data.nonce;
-                ctx.peer_ephemeral_pk = d.data.ephemeral_pk;
-            },
-        }
-    }
-};
+                return .{ .to_server = .{ .data = .{
+                    .nonce = nonce,
+                    .ephemeral_pk = kp.public_key,
+                } } };
+            }
 
-// ─────────────────── Step 2: ServerHello ───────────────────
+            pub fn preprocess(ctx: *types.ServerContext, result: @This()) void {
+                switch (result) {
+                    .to_server => |d| {
+                        ctx.peer_nonce = d.data.nonce;
+                        ctx.peer_ephemeral_pk = d.data.ephemeral_pk;
+                    },
+                }
+            }
+        };
 
-pub const ServerHello = union(enum) {
-    to_client: Data(ServerHelloPayload, ClientFinished),
+        // ─────────────────── Step 2: ServerHello ───────────────────
 
-    pub const info: TlsInfo = .{ .agent = .server, .name = "ServerHello" };
+        pub const ServerHello = union(enum) {
+            to_client: Data(ServerHelloPayload, ClientFinished),
 
-    pub fn process(ctx: *types.ServerContext) !@This() {
-        const nonce = try randomBytes(ctx.io, 24);
-        const kp = generateX25519Keypair(ctx.io);
+            pub const info: TlsInfo = .{ .agent = .server, .name = "ServerHello" };
 
-        const shared_secret = crypto.dh.X25519.scalarmult(kp.secret_key, ctx.peer_ephemeral_pk) catch
-            return error.DhFailed;
-        ctx.shared_secret = shared_secret;
+            pub fn process(ctx: *types.ServerContext) !@This() {
+                const nonce = try randomBytes(ctx.io, 24);
+                const kp = generateX25519Keypair(ctx.io);
 
-        const keys = types.deriveKeys(shared_secret);
-        ctx.handshake_key = keys.handshake_key;
-
-        const t1 = sha256(.{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &nonce, &kp.public_key });
-        const signature = try sign(ctx.id_keypair, &t1);
-        const t2 = sha256(.{ &t1, &signature });
-        const mac = hmacSha256(&ctx.handshake_key, "server_fin", &t2);
-
-        ctx.own_nonce = nonce;
-        ctx.ephemeral_sk = kp.secret_key;
-        ctx.own_ephemeral_pk = kp.public_key;
-        ctx.own_signature = signature;
-        ctx.own_mac = mac;
-
-        return .{ .to_client = .{ .data = .{
-            .nonce = nonce,
-            .ephemeral_pk = kp.public_key,
-            .signature = signature,
-            .mac = mac,
-        } } };
-    }
-
-    pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
-        switch (result) {
-            .to_client => |d| {
-                const payload = d.data;
-
-                const shared_secret = crypto.dh.X25519.scalarmult(ctx.ephemeral_sk, payload.ephemeral_pk) catch
+                const shared_secret = crypto.dh.X25519.scalarmult(kp.secret_key, ctx.peer_ephemeral_pk) catch
                     return error.DhFailed;
                 ctx.shared_secret = shared_secret;
 
                 const keys = types.deriveKeys(shared_secret);
                 ctx.handshake_key = keys.handshake_key;
 
-                const t1 = sha256(.{ &ctx.own_nonce, &ctx.own_ephemeral_pk, &payload.nonce, &payload.ephemeral_pk });
-                try verifySignature(payload.signature, &t1, ctx.peer_id_public);
-                const t2 = sha256(.{ &t1, &payload.signature });
-                try verifyHmac(&ctx.handshake_key, "server_fin", &t2, payload.mac);
+                const t1 = sha256(.{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &nonce, &kp.public_key });
+                const signature = try sign(ctx.id_keypair, &t1);
+                const t2 = sha256(.{ &t1, &signature });
+                const mac = hmacSha256(&ctx.handshake_key, "server_fin", &t2);
 
-                ctx.peer_nonce = payload.nonce;
-                ctx.peer_ephemeral_pk = payload.ephemeral_pk;
-                ctx.peer_signature = payload.signature;
-                ctx.peer_mac = payload.mac;
-            },
-        }
-    }
-};
+                ctx.own_nonce = nonce;
+                ctx.ephemeral_sk = kp.secret_key;
+                ctx.own_ephemeral_pk = kp.public_key;
+                ctx.own_signature = signature;
+                ctx.own_mac = mac;
 
-// ─────────────────── Step 3: ClientFinished ───────────────────
+                return .{ .to_client = .{ .data = .{
+                    .nonce = nonce,
+                    .ephemeral_pk = kp.public_key,
+                    .signature = signature,
+                    .mac = mac,
+                } } };
+            }
 
-pub const ClientFinished = union(enum) {
-    close: Data(ClientFinishedPayload, Exit),
+            pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
+                switch (result) {
+                    .to_client => |d| {
+                        const payload = d.data;
 
-    pub const info: TlsInfo = .{ .agent = .client, .name = "ClientFinished" };
+                        const shared_secret = crypto.dh.X25519.scalarmult(ctx.ephemeral_sk, payload.ephemeral_pk) catch
+                            return error.DhFailed;
+                        ctx.shared_secret = shared_secret;
 
-    pub fn process(ctx: *types.ClientContext) !@This() {
-        const keys = types.deriveKeys(ctx.shared_secret);
+                        const keys = types.deriveKeys(shared_secret);
+                        ctx.handshake_key = keys.handshake_key;
 
-        const t1 = sha256(.{ &ctx.own_nonce, &ctx.own_ephemeral_pk, &ctx.peer_nonce, &ctx.peer_ephemeral_pk });
-        const t2 = sha256(.{ &t1, &ctx.peer_signature });
-        const t3 = sha256(.{ &t2, &ctx.peer_mac });
-        const signature = try sign(ctx.id_keypair, &t3);
-        const t4 = sha256(.{ &t3, &signature });
-        const mac = hmacSha256(&ctx.handshake_key, "client_fin", &t4);
+                        const t1 = sha256(.{ &ctx.own_nonce, &ctx.own_ephemeral_pk, &payload.nonce, &payload.ephemeral_pk });
+                        try verifySignature(payload.signature, &t1, ctx.peer_id_public);
+                        const t2 = sha256(.{ &t1, &payload.signature });
+                        try verifyHmac(&ctx.handshake_key, "server_fin", &t2, payload.mac);
 
-        ctx.write_key = keys.client_write_key;
-        ctx.read_key = keys.server_write_key;
+                        ctx.peer_nonce = payload.nonce;
+                        ctx.peer_ephemeral_pk = payload.ephemeral_pk;
+                        ctx.peer_signature = payload.signature;
+                        ctx.peer_mac = payload.mac;
+                    },
+                }
+            }
+        };
 
-        return .{ .close = .{ .data = .{
-            .signature = signature,
-            .mac = mac,
-        } } };
-    }
+        // ─────────────────── Step 3: ClientFinished ───────────────────
 
-    pub fn preprocess(ctx: *types.ServerContext, result: @This()) !void {
-        const payload = result.close.data;
+        pub const ClientFinished = union(enum) {
+            close: Data(ClientFinishedPayload, Next),
 
-        const t1 = sha256(.{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &ctx.own_nonce, &ctx.own_ephemeral_pk });
-        const t2 = sha256(.{ &t1, &ctx.own_signature });
-        const t3 = sha256(.{ &t2, &ctx.own_mac });
-        try verifySignature(payload.signature, &t3, ctx.peer_id_public);
-        const t4 = sha256(.{ &t3, &payload.signature });
-        try verifyHmac(&ctx.handshake_key, "client_fin", &t4, payload.mac);
+            pub const info: TlsInfo = .{ .agent = .client, .name = "ClientFinished" };
 
-        const keys = types.deriveKeys(ctx.shared_secret);
-        ctx.read_key = keys.client_write_key;
-        ctx.write_key = keys.server_write_key;
-    }
-};
+            pub fn process(ctx: *types.ClientContext) !@This() {
+                const keys = types.deriveKeys(ctx.shared_secret);
+
+                const t1 = sha256(.{ &ctx.own_nonce, &ctx.own_ephemeral_pk, &ctx.peer_nonce, &ctx.peer_ephemeral_pk });
+                const t2 = sha256(.{ &t1, &ctx.peer_signature });
+                const t3 = sha256(.{ &t2, &ctx.peer_mac });
+                const signature = try sign(ctx.id_keypair, &t3);
+                const t4 = sha256(.{ &t3, &signature });
+                const mac = hmacSha256(&ctx.handshake_key, "client_fin", &t4);
+
+                ctx.write_key = keys.client_write_key;
+                ctx.read_key = keys.server_write_key;
+
+                return .{ .close = .{ .data = .{
+                    .signature = signature,
+                    .mac = mac,
+                } } };
+            }
+
+            pub fn preprocess(ctx: *types.ServerContext, result: @This()) !void {
+                const payload = result.close.data;
+
+                const t1 = sha256(.{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &ctx.own_nonce, &ctx.own_ephemeral_pk });
+                const t2 = sha256(.{ &t1, &ctx.own_signature });
+                const t3 = sha256(.{ &t2, &ctx.own_mac });
+                try verifySignature(payload.signature, &t3, ctx.peer_id_public);
+                const t4 = sha256(.{ &t3, &payload.signature });
+                try verifyHmac(&ctx.handshake_key, "client_fin", &t4, payload.mac);
+
+                const keys = types.deriveKeys(ctx.shared_secret);
+                ctx.read_key = keys.client_write_key;
+                ctx.write_key = keys.server_write_key;
+            }
+        };
+    };
+}
 
 // ─────────────────── Crypto helpers ───────────────────
 

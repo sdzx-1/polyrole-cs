@@ -287,7 +287,8 @@ test "symmetric run over tls channel" {
 
     const P = CreateTestProtocol("p2", Exit);
     const R = Runner(P.A);
-    const R_tls = Runner(tls_mod.ClientHello);
+    const TlsProto = tls_mod.TlsProtocol(Exit);
+    const R_tls = Runner(TlsProto.ClientHello);
     const StreamChannel = root.channel.StreamChannel;
     const TlsChannel = root.channel.TlsChannel;
 
@@ -329,7 +330,7 @@ test "symmetric run over tls channel" {
 
             var sc: StreamChannel = undefined;
             try sc.init(io, allocator, stream, 256, 256);
-            try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls_mod.ClientHello);
+            try R_tls.symmetric_run(.client, &tls_ctx, &sc, TlsProto.ClientHello);
             sc.deinit(allocator);
 
             // Phase 2: test protocol via TlsChannel
@@ -375,7 +376,7 @@ test "symmetric run over tls channel" {
 
         var sc: StreamChannel = undefined;
         try sc.init(io, allocator, stream, 256, 256);
-        try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls_mod.ClientHello);
+        try R_tls.symmetric_run(.server, &tls_ctx, &sc, TlsProto.ClientHello);
         sc.deinit(allocator);
 
         tls_server_write_key = tls_ctx.write_key;
