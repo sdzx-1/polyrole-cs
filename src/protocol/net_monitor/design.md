@@ -243,10 +243,10 @@ for (ctx.windows.items, 0..) |w, i| {
 
 The protocol itself has no concept of persistence. Periodic saving is
 achieved by splitting a long session into consecutive short runs over the
-same `TlsChannel` — no re-handshake needed:
+same `TlsChannel` — no re-handshake needed as long as the connection
+stays healthy:
 
 ```zig
-// One chunk: run monitor for N minutes, save windows, repeat
 while (total_remaining > 0) {
     const chunk = @min(total_remaining, pings_per_10min);
     ctx.remaining = chunk;
@@ -263,9 +263,41 @@ while (total_remaining > 0) {
 }
 ```
 
+**After a timeout** (`error.WouldBlock`), the underlying TCP connection and
+TlsChannel are dead — the AEAD nonce counters have diverged, and reusing
+the same channel would produce `error.ReplayDetected`. The caller must
+reconnect and redo the TLS handshake from scratch.
+
+A robust retry loop:
+
+```zig
+const RetryStrategy = struct {
+    max_retries: u32 = 3,
+    backoff_ns: u64 = 5_000_000_000, // 5s between retries
+};
+
+fn monitorWithRetry(ctx: *ClientContext, tc: *TlsChannel, retry: RetryStrategy) !void {
+    var attempts: u32 = 0;
+    while (attempts < retry.max_retries) : (attempts += 1) {
+        Runner(PingQuery).symmetric_run(.client, ctx, tc, PingQuery) catch |err| {
+            if (err == error.WouldBlock) {
+                std.time.sleep(retry.backoff_ns);
+                try reconnectAndHandshake(ctx, tc); // new TLS session
+                continue;
+            }
+            return err;
+        };
+        return; // success
+    }
+    return error.MaxRetriesExceeded;
+}
+```
+
 Key invariants:
 - `TlsChannel` and TCP stream stay open across Runner calls — re-entry is
-  cheap, no TLS handshake overhead.
+  cheap, no TLS handshake overhead, *as long as the connection is alive*.
+- After `error.WouldBlock`, the TLS session is gone. A fresh handshake
+  resets both ends' AEAD counters to zero, making them consistent again.
 - Each chunk resets `session_start_ns` and `windows`, so file content
   covers exactly one time slice.
 - Caller controls the file naming and format; protocol layer stays focused
