@@ -11,7 +11,7 @@ test "模拟：N 次 ping" {
         .allocator = testing.allocator,
         .remaining = 5,
         .interval_ms = 0,
-        .window_duration_ns = 60_000_000_000,
+        .window_duration_ms = 60000,
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
     defer client.windows.deinit(client.allocator);
@@ -33,7 +33,7 @@ test "模拟：remaining=1 恰好产生一次 ping" {
         .allocator = testing.allocator,
         .remaining = 1,
         .interval_ms = 0,
-        .window_duration_ns = 60_000_000_000,
+        .window_duration_ms = 60000,
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
     defer client.windows.deinit(client.allocator);
@@ -58,7 +58,7 @@ test "对称运行：通过 StreamChannel 通信" {
         .allocator = allocator,
         .remaining = 5,
         .interval_ms = 0,
-        .window_duration_ns = 60_000_000_000,
+        .window_duration_ms = 60000,
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
     defer client.windows.deinit(client.allocator);
@@ -108,7 +108,7 @@ test "RTT 值非负" {
         .allocator = testing.allocator,
         .remaining = 3,
         .interval_ms = 0,
-        .window_duration_ns = 60_000_000_000,
+        .window_duration_ms = 60000,
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
     defer client.windows.deinit(client.allocator);
@@ -119,7 +119,7 @@ test "RTT 值非负" {
 
     for (client.windows.items) |w| {
         if (w.rtt_count == 0) continue;
-        try testing.expect(w.rtt_min_ns < std.math.maxInt(u64));
-        try testing.expect(w.rtt_max_ns >= w.rtt_min_ns);
+        try testing.expect(w.rtt_min_ms < std.math.maxInt(u64));
+        try testing.expect(w.rtt_max_ms >= w.rtt_min_ms);
     }
 }

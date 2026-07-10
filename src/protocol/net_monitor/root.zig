@@ -16,9 +16,9 @@ pub const PingQuery = union(enum) {
     pub const info: NetMonitorInfo = .{ .agent = .client, .name = "PingQuery" };
 
     pub fn process(ctx: *types.ClientContext) @This() {
-        const now = types.monotonicNs(ctx.io);
-        if (ctx.session_start_ns == 0) {
-            ctx.session_start_ns = now;
+        const now = types.monotonicMs(ctx.io);
+        if (ctx.session_start_ms == 0) {
+            ctx.session_start_ms = now;
         }
         ctx.seq_num += 1;
 
@@ -43,37 +43,37 @@ pub const PingResponse = union(enum) {
     pub const info: NetMonitorInfo = .{ .agent = .server, .name = "PingResponse" };
 
     pub fn process(ctx: *types.ServerContext) @This() {
-        const t_arrival = types.monotonicNs(ctx.io);
-        const t_departure = types.monotonicNs(ctx.io);
+        const t_arrival = types.monotonicMs(ctx.io);
+        const t_departure = types.monotonicMs(ctx.io);
 
         return .{ .to_client = .{ .data = .{
             .seq_num = ctx.last_seq_num,
             .client_send_time = ctx.last_client_send_time,
-            .server_dwell_ns = t_departure - t_arrival,
+            .server_dwell_ms = t_departure - t_arrival,
         } } };
     }
 
     pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
         const pong = result.to_client.data;
-        const now = types.monotonicNs(ctx.io);
+        const now = types.monotonicMs(ctx.io);
 
-        const rtt_net = now -| pong.client_send_time -| pong.server_dwell_ns;
+        const rtt_net = now -| pong.client_send_time -| pong.server_dwell_ms;
 
-        const elapsed = now -| ctx.session_start_ns;
-        assert(ctx.window_duration_ns > 0); // caller must set before symmetric_run
-        const index = elapsed / ctx.window_duration_ns;
+        const elapsed = now -| ctx.session_start_ms;
+        assert(ctx.window_duration_ms > 0);
+        const index = elapsed / ctx.window_duration_ms;
 
         while (ctx.windows.items.len <= index) {
             try ctx.windows.append(ctx.allocator, .{
-                .start_ns = ctx.session_start_ns + ctx.windows.items.len * ctx.window_duration_ns,
+                .start_ms = ctx.session_start_ms + ctx.windows.items.len * ctx.window_duration_ms,
             });
         }
 
         var w = &ctx.windows.items[index];
         w.rtt_count += 1;
-        w.rtt_sum_ns += rtt_net;
-        w.rtt_min_ns = @min(w.rtt_min_ns, rtt_net);
-        w.rtt_max_ns = @max(w.rtt_max_ns, rtt_net);
+        w.rtt_sum_ms += rtt_net;
+        w.rtt_min_ms = @min(w.rtt_min_ms, rtt_net);
+        w.rtt_max_ms = @max(w.rtt_max_ms, rtt_net);
     }
 };
 
