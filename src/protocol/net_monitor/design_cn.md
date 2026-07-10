@@ -32,6 +32,7 @@ pub const PongPayload = struct { seq_num: u64, };
 pub const PingResult = struct {
     seq_num: u64,
     rtt_ms: u64,
+    timestamp: std.Io.Timestamp,
 };
 
 pub const ClientContext = struct {

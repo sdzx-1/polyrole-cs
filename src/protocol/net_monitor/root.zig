@@ -1,3 +1,4 @@
+const std = @import("std");
 const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
@@ -40,13 +41,15 @@ pub const PingResponse = union(enum) {
 
     pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
         const pong = result.to_client.data;
-        const now = types.monotonicMs(ctx.io);
+        const now_ms = types.monotonicMs(ctx.io);
+        const now_ts = std.Io.Timestamp.now(ctx.io, .awake);
 
-        const rtt_ms = now -| ctx.last_send_ms;
+        const rtt_ms = now_ms -| ctx.last_send_ms;
 
         try ctx.results.append(ctx.allocator, .{
             .seq_num = pong.seq_num,
             .rtt_ms = rtt_ms,
+            .timestamp = now_ts,
         });
     }
 };
