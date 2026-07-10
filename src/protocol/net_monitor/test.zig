@@ -13,7 +13,7 @@ test "模拟：基本流程" {
         .interval_ms = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
-    defer client.results.deinit(client.allocator);
+    defer client.deinit();
     var server: types.ServerContext = .{};
 
     const R = Runner(nm.PingQuery);
@@ -54,7 +54,7 @@ test "对称运行：通过 StreamChannel 通信" {
         .interval_ms = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
-    defer client.results.deinit(client.allocator);
+    defer client.deinit();
     var server: types.ServerContext = .{};
 
     const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };

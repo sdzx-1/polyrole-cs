@@ -32,6 +32,12 @@ pub const ClientContext = struct {
 
     /// Per-ping RTT records, append-only.
     results: std.ArrayList(PingResult),
+
+    /// Release results memory.
+    pub fn deinit(self: *@This()) void {
+        self.results.deinit(self.allocator);
+        self.* = undefined;
+    }
 };
 
 /// Server-side protocol context — stateless echo, no IO needed.

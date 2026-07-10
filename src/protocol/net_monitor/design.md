@@ -85,7 +85,7 @@ var client = ClientContext{
     .interval_ms = 1000,
     .results = std.ArrayList(PingResult).empty,
 };
-defer client.results.deinit(client.allocator);
+defer client.deinit();
 var server = ServerContext{};
 
 try Runner(PingQuery).symmetric_run(.client, &client, &channel, PingQuery);
