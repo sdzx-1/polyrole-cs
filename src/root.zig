@@ -5,6 +5,7 @@ pub const codec = @import("codec.zig");
 pub const channel = @import("channel.zig");
 pub const runner = @import("runner.zig");
 pub const tls = @import("protocol/tls.zig");
+pub const net_monitor = @import("protocol/net_monitor.zig");
 
 pub const Role = enum {
     client,
