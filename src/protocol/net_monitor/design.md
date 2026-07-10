@@ -31,7 +31,7 @@ Three fields per round-trip, none requiring cross-machine clock sync:
 
 | Field | Type | Filled by | Purpose |
 |-------|------|-----------|---------|
-| `seq_num` | `u32` | client, echoed by server | Ordering, diagnostic tracing |
+| `seq_num` | `u64` | client, echoed by server | Ordering, diagnostic tracing |
 | `client_send_time` | `u64` | client, echoed by server | RTT = now - client_send_time (both on client clock) |
 | `server_dwell_ns` | `u64` | server | Relative duration server spent processing (own clock, short interval) |
 
@@ -55,12 +55,12 @@ stripping server-side processing delay from RTT measurements.
 
 ```zig
 const PingPayload = struct {
-    seq_num: u32,
+    seq_num: u64,
     client_send_time: u64,
 };
 
 const PongPayload = struct {
-    seq_num: u32,
+    seq_num: u64,
     client_send_time: u64,
     server_dwell_ns: u64,
 };
@@ -88,7 +88,7 @@ pub const ClientContext = struct {
     allocator: std.mem.Allocator,
 
     /// Monotonic ping sequence number
-    seq_num: u32,
+    seq_num: u64,
 
     /// Remaining cycles before close (set by caller)
     remaining: u32,
@@ -311,4 +311,3 @@ the monitor protocol starts.
 | Socket-level timeout via SO_RCVTIMEO | Protocol layer has no place to insert timeouts (recv happens inside Runner, not in a process function). Socket timeout is the correct layer — transparent to the protocol, propagated by Runner |
 | `remaining > 0` enforced at call site | Protocol assumes at least one ping; zero-ping sessions are meaningless for a monitor |
 | No loss counter | Synchronous request-response means the client blocks waiting for each reply. A `recv` timeout IS the loss signal — there is no scenario where seq_num gaps appear. The caller detects loss by catching `error.WouldBlock` |
-| `u32` seq_num | Wraps after ~4.3 billion pings (~49 days at 1/sec). Acceptable for monitoring sessions; caller should restart connections before this threshold for long-running deployments |
