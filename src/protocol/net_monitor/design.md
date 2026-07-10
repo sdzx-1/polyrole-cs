@@ -90,6 +90,12 @@ pub const ClientContext = struct {
     /// Interval between pings (nanoseconds), set by caller before symmetric_run()
     interval_ns: u64,
 
+    /// Socket read timeout (nanoseconds). Caller sets SO_RCVTIMEO before
+    /// entering symmetric_run(). If the server doesn't respond within this
+    /// window, the underlying recv() returns error.WouldBlock and Runner
+    /// propagates it — the monitoring session aborts.
+    read_timeout_ns: u64,
+
     /// Window duration (e.g. 60_000_000_000 = 1 minute)
     window_duration_ns: u64,
 
@@ -153,10 +159,15 @@ pub const PingDecision = union(enum) {
 ```
 
 `process()`:
-1. If `remaining == 0`: return `.close`.
-2. Sleep for `interval_ns` (blocking — Runner is synchronous).
-3. Decrement `remaining`.
+1. Decrement `remaining`.
+2. If `remaining == 0`: return `.close`.
+3. Sleep for `interval_ns` (blocking — Runner is synchronous).
 4. Return `.ping_again`.
+
+`remaining` counts **total** pings including the first one. The initial
+PingQuery fires unconditionally (no check), then each PingDecision
+decrements once. Setting `remaining = 5` produces exactly 5 pings.
+Caller must set `remaining > 0`.
 
 No `preprocess()` — server doesn't participate in this state.
 
@@ -181,8 +192,9 @@ Before entering `Runner(net_monitor).symmetric_run()`, the caller sets:
 
 | Parameter | Field | Meaning |
 |-----------|-------|---------|
-| Ping count | `ClientContext.remaining` | How many ping cycles to run |
+| Ping count | `ClientContext.remaining` | Total ping cycles (> 0) |
 | Interval | `ClientContext.interval_ns` | Nanoseconds between pings (e.g. `1_000_000_000` = 1s) |
+| Read timeout | `ClientContext.read_timeout_ns` | Socket recv timeout; propagated as `error.WouldBlock` |
 | Window duration | `ClientContext.window_duration_ns` | Per-window width (e.g. `60_000_000_000` = 1 min) |
 | Windows list | `ClientContext.windows` | Dynamic `ArrayList(WindowMetrics)`, caller inits before `run()`, reads after |
 | Allocator | `ClientContext.allocator` | For `windows` list growth |
@@ -196,8 +208,9 @@ for per-window aggregated results and deinits the ArrayList.
 ```zig
 var ctx: ClientContext = .{
     .allocator = allocator,
-    .remaining = 60,               // 60 pings
+    .remaining = 60,               // 60 total pings
     .interval_ns = 1_000_000_000,  // 1 second apart
+    .read_timeout_ns = 5_000_000_000, // 5s socket timeout
     .window_duration_ns = 60_000_000_000, // 1 minute windows
     .windows = std.ArrayList(WindowMetrics).init(allocator),
     .session_start_ns = 0,
@@ -248,15 +261,26 @@ Key invariants:
 
 ## Error Handling
 
-No protocol-level errors expected in normal operation. Network failures
-(connection reset, TLS decrypt failure) propagate as errors from
-`TlsChannel.send()` / `TlsChannel.recv()`, which the Runner propagates
-to its caller via `try`.
+**Network failures** (connection reset, TLS decrypt failure) propagate as
+errors from `TlsChannel.send()` / `TlsChannel.recv()`, which the Runner
+propagates to its caller via `try`.
 
-The server never rejects a ping — no authentication/authorization at
-this layer. If access control is needed, it's handled by the TLS
-handshake (Ed25519 identity verification) before the monitor protocol
-starts.
+**Timeouts** — the caller must set `SO_RCVTIMEO` on the underlying socket
+to `read_timeout_ns` before entering `symmetric_run()`. If the server
+fails to respond within this window, `TlsChannel.recv()` returns
+`error.WouldBlock` and the Runner aborts. This is the primary mechanism
+for detecting server crashes and network partitions.
+
+```zig
+stream.socket.setRecvTimeout(read_timeout_ns) catch {};
+try Runner(PingQuery).symmetric_run(.client, &ctx, &tc, PingQuery);
+// error.WouldBlock → server unreachable; caller retries or alerts
+```
+
+**No protocol-level errors** — the server never rejects a ping. No
+authentication/authorization at this layer. If access control is needed,
+it's handled by the TLS handshake (Ed25519 identity verification) before
+the monitor protocol starts.
 
 ## Design Decisions Summary
 
@@ -272,3 +296,5 @@ starts.
 | Synchronous sleep in process() | Runner is single-threaded — blocking `std.time.sleep` during interval is expected, not wasteful |
 | Windowed aggregation | Per-minute `WindowMetrics` via `ArrayList` — caller inits, protocol appends, caller reads. No length limit |
 | ArrayList over pre-allocated slice | Dynamic growth avoids forcing the caller to guess how many windows they'll need upfront |
+| Socket-level timeout via SO_RCVTIMEO | Protocol layer has no place to insert timeouts (recv happens inside Runner, not in a process function). Socket timeout is the correct layer — transparent to the protocol, propagated by Runner |
+| `remaining > 0` enforced at call site | Protocol assumes at least one ping; zero-ping sessions are meaningless for a monitor |
