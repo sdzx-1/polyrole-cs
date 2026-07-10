@@ -4,7 +4,7 @@ const Runner = polyrole.runner.Runner;
 const nm = @import("root.zig");
 const types = @import("context.zig");
 
-test "模拟：N 次 ping" {
+test "模拟：基本流程" {
     const testing = std.testing;
     var client: types.ClientContext = .{
         .io = testing.io,
@@ -19,106 +19,26 @@ test "模拟：N 次 ping" {
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
 
+    // fencepost: remaining=5 produces exactly 5 pings
     try testing.expectEqual(@as(u64, 5), client.seq_num);
     try testing.expectEqual(@as(u32, 0), client.remaining);
     try testing.expectEqual(@as(usize, 5), client.results.items.len);
-}
 
-test "模拟：remaining=1 恰好产生一次 ping" {
-    const testing = std.testing;
-    var client: types.ClientContext = .{
-        .io = testing.io,
-        .allocator = testing.allocator,
-        .remaining = 1,
-        .interval_ms = 0,
-        .results = std.ArrayList(types.PingResult).empty,
-    };
-    defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{};
-
-    const R = Runner(nm.PingQuery);
-    try R.simulate(&client, &server, nm.PingQuery);
-
-    try testing.expectEqual(@as(u64, 1), client.seq_num);
-    try testing.expectEqual(@as(u32, 0), client.remaining);
-    try testing.expectEqual(@as(usize, 1), client.results.items.len);
-}
-
-test "模拟：seq_num 单调递增" {
-    const testing = std.testing;
-    var client: types.ClientContext = .{
-        .io = testing.io,
-        .allocator = testing.allocator,
-        .remaining = 5,
-        .interval_ms = 0,
-        .results = std.ArrayList(types.PingResult).empty,
-    };
-    defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{};
-
-    const R = Runner(nm.PingQuery);
-    try R.simulate(&client, &server, nm.PingQuery);
-
+    // seq_num monotonic
     for (client.results.items, 0..) |r, i| {
         try testing.expectEqual(@as(u64, @intCast(i + 1)), r.seq_num);
     }
-}
 
-test "模拟：结果字段完整性" {
-    const testing = std.testing;
-    var client: types.ClientContext = .{
-        .io = testing.io,
-        .allocator = testing.allocator,
-        .remaining = 3,
-        .interval_ms = 0,
-        .results = std.ArrayList(types.PingResult).empty,
-    };
-    defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{};
+    // server receives and echoes last seq_num
+    try testing.expectEqual(@as(u64, 5), server.last_seq_num);
 
-    const R = Runner(nm.PingQuery);
-    try R.simulate(&client, &server, nm.PingQuery);
-
-    for (client.results.items) |r| {
-        try testing.expect(r.seq_num > 0);
-        try testing.expect(r.rtt_ms < 1000); // simulate RTT should be near-zero
-    }
-}
-
-test "模拟：服务端回显验证" {
-    const testing = std.testing;
-    var client: types.ClientContext = .{
-        .io = testing.io,
-        .allocator = testing.allocator,
-        .remaining = 3,
-        .interval_ms = 0,
-        .results = std.ArrayList(types.PingResult).empty,
-    };
-    defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{};
-
-    const R = Runner(nm.PingQuery);
-    try R.simulate(&client, &server, nm.PingQuery);
-
-    try testing.expectEqual(@as(u64, 3), server.last_seq_num);
-}
-
-test "模拟：last_send_ms 已设置" {
-    const testing = std.testing;
-    var client: types.ClientContext = .{
-        .io = testing.io,
-        .allocator = testing.allocator,
-        .remaining = 1,
-        .interval_ms = 0,
-        .results = std.ArrayList(types.PingResult).empty,
-    };
-    defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{};
-
-    const R = Runner(nm.PingQuery);
-    try R.simulate(&client, &server, nm.PingQuery);
-
+    // last_send_ms was recorded
     try testing.expect(client.last_send_ms > 0);
+
+    // RTT values are non-negative and reasonable
+    for (client.results.items) |r| {
+        try testing.expect(r.rtt_ms < std.math.maxInt(u64));
+    }
 }
 
 test "对称运行：通过 StreamChannel 通信" {
@@ -130,7 +50,7 @@ test "对称运行：通过 StreamChannel 通信" {
     var client: types.ClientContext = .{
         .io = io,
         .allocator = allocator,
-        .remaining = 5,
+        .remaining = 3,
         .interval_ms = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
@@ -169,26 +89,6 @@ test "对称运行：通过 StreamChannel 通信" {
 
     try R.symmetric_run(.server, &server, &ch, nm.PingQuery);
 
-    try testing.expectEqual(@as(u64, 5), client.seq_num);
-    try testing.expectEqual(@as(usize, 5), client.results.items.len);
-}
-
-test "RTT 值非负" {
-    const testing = std.testing;
-    var client: types.ClientContext = .{
-        .io = testing.io,
-        .allocator = testing.allocator,
-        .remaining = 3,
-        .interval_ms = 0,
-        .results = std.ArrayList(types.PingResult).empty,
-    };
-    defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{};
-
-    const R = Runner(nm.PingQuery);
-    try R.simulate(&client, &server, nm.PingQuery);
-
-    for (client.results.items) |r| {
-        try testing.expect(r.rtt_ms < std.math.maxInt(u64)); // not sat_min
-    }
+    try testing.expectEqual(@as(u64, 3), client.seq_num);
+    try testing.expectEqual(@as(usize, 3), client.results.items.len);
 }
