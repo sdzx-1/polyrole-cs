@@ -164,13 +164,12 @@ state_id(4 BE) || tag(1) || payload
 生成 DOT 格式状态图：
 
 ```zig
-var graph = try polyrole.Graph.initWithFsm(allocator, A);
+var graph = try root.Graph.initWithFsm(allocator, P.A);
 defer graph.deinit();
 
-var buf = std.ArrayList(u8).init(allocator);
-defer buf.deinit();
-try graph.generateDot(null, buf.writer());
-// buf.items 为 DOT 源码，可写入文件
+const graph_file = try std.Io.Dir.cwd().createFile(io, "graph.dot", .{});
+var graph_file_writer = graph_file.writer(io, &.{});
+try graph.generateDot(null, &graph_file_writer.interface);
 ```
 
 可用 Graphviz 渲染：`dot -Tpng graph.dot -o graph.png`
@@ -225,7 +224,7 @@ try R.simulate(&client_ctx, &server_ctx, tls.ClientHello);
 .{
     .dependencies = .{
         .polyrole_cs = .{
-            .url = "https://github.com/your/polyrole-cs/archive/v0.1.0.tar.gz",
+            .url = "https://github.com/sdzx-1/polyrole-cs",
             .hash = "...",
         },
     },
@@ -236,7 +235,7 @@ try R.simulate(&client_ctx, &server_ctx, tls.ClientHello);
 
 ```zig
 const polyrole = b.dependency("polyrole_cs", .{});
-exe.root_module.addImport("polyrole_cs", polyrole.module("polyrole_cs"));
+exe.root_module.addImport("polyrole_cs", polyrole.module("root"));
 ```
 
 ## 运行测试
