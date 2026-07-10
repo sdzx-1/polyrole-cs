@@ -75,8 +75,8 @@ pub const TlsChannel = struct {
 
     pub fn init(
         self: *@This(),
-        inner: *StreamChannel,
         gpa: std.mem.Allocator,
+        inner: *StreamChannel,
         write_key: [32]u8,
         read_key: [32]u8,
         buf_size: usize,
