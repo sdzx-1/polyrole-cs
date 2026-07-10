@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
@@ -59,6 +60,7 @@ pub const PingResponse = union(enum) {
         const rtt_net = now -| pong.client_send_time -| pong.server_dwell_ns;
 
         const elapsed = now -| ctx.session_start_ns;
+        assert(ctx.window_duration_ns > 0); // caller must set before symmetric_run
         const index = elapsed / ctx.window_duration_ns;
 
         while (ctx.windows.items.len <= index) {
