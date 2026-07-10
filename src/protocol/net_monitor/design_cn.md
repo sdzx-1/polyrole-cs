@@ -6,8 +6,8 @@
 ping，服务端原样回显。RTT 完全在客户端本地计算——`client_send_time` 不
 经过网络传输，仅在本地存储并在响应到达时与当前时间比较。
 
-每次响应记录为一条 `PingResult`，存入客户端的 `ArrayList`，可选
-`max_results` 上限。所有时间单位统一使用毫秒。
+每次响应记录为一条 `PingResult`，存入客户端的 `ArrayList`。
+所有时间单位统一使用毫秒。
 
 **传输无关。** 可工作于 StreamChannel、TlsChannel 等任何 send/recv 传输。
 
@@ -105,6 +105,6 @@ for (client.results.items) |r| {
 | 本地 RTT 计算 | `client_send_time` 不经过网络——payload 更小，无冗余 |
 | 毫秒单位 | 网络 RTT 是毫秒级别 |
 | 每条记录独立 | 简单——调用方按需分组 |
-| max_results 上限 | 防止长会话无限增长 |
 | Io 接口 | 通过 `Io.Timestamp` / `Io.sleep` 可移植 |
 | 无 panic | 错误通过 Runner 传播 |
+| 2 状态机 | PingDecision 并入 PingQuery——sleep 在 send 之前，避免 Nagle |

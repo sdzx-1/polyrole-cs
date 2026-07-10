@@ -5,7 +5,7 @@
 A session-based network connectivity and latency monitoring protocol built
 on polyrole-cs. The client sends periodic pings; the server echoes them back
 verbatim. Each response is recorded as a per-ping `PingResult` in an
-`ArrayList` on the client, with an optional `max_results` cap.
+`ArrayList` on the client.
 
 All timing uses milliseconds.
 
@@ -90,8 +90,7 @@ var server = ServerContext{};
 try Runner(PingQuery).symmetric_run(.client, &client, &channel, PingQuery);
 
 for (client.results.items) |r| {
-    std.debug.print("[{d}] rtt={d}ms dwell={d}ms\n",
-        .{ r.seq_num, r.rtt_ms, r.server_dwell_ms });
+    std.debug.print("[{d}] rtt={d}ms\n", .{ r.seq_num, r.rtt_ms });
 }
 ```
 
@@ -107,6 +106,6 @@ Runner detects at compile time and uses `try`.
 | Stateless server | Scales to arbitrary concurrent clients |
 | Millisecond units | Network RTT is ms-scale; ns adds noise |
 | Per-ping records | Simpler than windowed aggregation — caller groups as needed |
-| max_results cap | Prevents unbounded memory growth in long sessions |
 | Io interface | Portable clock and sleep via `Io.Timestamp` / `Io.sleep` |
 | No panics | Errors propagate through Runner |
+| 2-state machine | Merged PingDecision into PingQuery — sleep before send avoids Nagle |
