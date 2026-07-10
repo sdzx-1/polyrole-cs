@@ -152,6 +152,9 @@ No `preprocess()` — server state, nothing for client to receive here.
 `preprocess()` (client):
 1. Compute `rtt_net = now() - client_send_time - server_dwell_ns`.
 2. Determine window index: `(now - session_start_ns) / window_duration_ns`.
+   Window assignment is by **response arrival time** — a ping sent near a
+   window boundary whose reply arrives in the next window is counted in
+   the later window.
 3. If the window doesn't exist yet in `windows`, append a new `WindowMetrics`
    with `start_ns = session_start_ns + index * window_duration_ns`.
 4. Accumulate `rtt_net` into that window's `rtt_sum_ns`, `rtt_count`,
@@ -203,7 +206,7 @@ Before entering `Runner(net_monitor).symmetric_run()`, the caller sets:
 | Ping count | `ClientContext.remaining` | Total ping cycles (> 0) |
 | Interval | `ClientContext.interval_ns` | Nanoseconds between pings (e.g. `1_000_000_000` = 1s) |
 | Read timeout | `ClientContext.read_timeout_ns` | Socket recv timeout; propagated as `error.WouldBlock` |
-| Window duration | `ClientContext.window_duration_ns` | Per-window width (e.g. `60_000_000_000` = 1 min) |
+| Window duration | `ClientContext.window_duration_ns` | Per-window width (> 0, e.g. `60_000_000_000` = 1 min) |
 | Windows list | `ClientContext.windows` | Dynamic `ArrayList(WindowMetrics)`, caller inits before `run()`, reads after |
 | Allocator | `ClientContext.allocator` | For `windows` list growth |
 | Clock source | `ServerContext.clock` | Which monotonic clock to use |
@@ -229,6 +232,7 @@ try Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &tc, net_monitor.
 
 // ctx.windows.items now contains per-minute stats
 for (ctx.windows.items, 0..) |w, i| {
+    if (w.rtt_count == 0) continue; // empty window (no responses in this slice)
     std.debug.print("window {d}: avg={d}ns min={d} max={d} count={d}\n", .{
         i, w.rtt_sum_ns / w.rtt_count, w.rtt_min_ns, w.rtt_max_ns, w.rtt_count,
     });
@@ -307,3 +311,4 @@ the monitor protocol starts.
 | Socket-level timeout via SO_RCVTIMEO | Protocol layer has no place to insert timeouts (recv happens inside Runner, not in a process function). Socket timeout is the correct layer — transparent to the protocol, propagated by Runner |
 | `remaining > 0` enforced at call site | Protocol assumes at least one ping; zero-ping sessions are meaningless for a monitor |
 | No loss counter | Synchronous request-response means the client blocks waiting for each reply. A `recv` timeout IS the loss signal — there is no scenario where seq_num gaps appear. The caller detects loss by catching `error.WouldBlock` |
+| `u32` seq_num | Wraps after ~4.3 billion pings (~49 days at 1/sec). Acceptable for monitoring sessions; caller should restart connections before this threshold for long-running deployments |
