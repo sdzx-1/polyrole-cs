@@ -15,18 +15,15 @@ pub const PingQuery = union(enum) {
 
     pub fn process(ctx: *types.ClientContext) @This() {
         const now = types.monotonicMs(ctx.io);
+        ctx.last_send_ms = now;
         ctx.seq_num += 1;
 
-        return .{ .to_server = .{ .data = .{
-            .seq_num = ctx.seq_num,
-            .client_send_time = now,
-        } } };
+        return .{ .to_server = .{ .data = .{ .seq_num = ctx.seq_num } } };
     }
 
-    /// Server receives and stores the ping data so PingResponse can echo it back.
+    /// Server receives and stores the seq_num so PingResponse can echo it back.
     pub fn preprocess(ctx: *types.ServerContext, result: @This()) void {
         ctx.last_seq_num = result.to_server.data.seq_num;
-        ctx.last_client_send_time = result.to_server.data.client_send_time;
     }
 };
 
@@ -43,7 +40,6 @@ pub const PingResponse = union(enum) {
 
         return .{ .to_client = .{ .data = .{
             .seq_num = ctx.last_seq_num,
-            .client_send_time = ctx.last_client_send_time,
             .server_dwell_ms = t_departure - t_arrival,
         } } };
     }
@@ -52,7 +48,7 @@ pub const PingResponse = union(enum) {
         const pong = result.to_client.data;
         const now = types.monotonicMs(ctx.io);
 
-        const rtt_ms = now -| pong.client_send_time -| pong.server_dwell_ms;
+        const rtt_ms = now -| ctx.last_send_ms -| pong.server_dwell_ms;
 
         if (ctx.max_results == 0 or ctx.results.items.len < ctx.max_results) {
             try ctx.results.append(ctx.allocator, .{

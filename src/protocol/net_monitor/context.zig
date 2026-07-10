@@ -20,6 +20,10 @@ pub const ClientContext = struct {
     /// Monotonic ping sequence number (incremented each PingQuery)
     seq_num: u64 = 0,
 
+    /// Monotonic millisecond timestamp of the last sent ping.
+    /// Set locally in PingQuery.process(), used for RTT computation later.
+    last_send_ms: u64 = 0,
+
     /// Total ping cycles including the first one (> 0).
     remaining: u32 = 0,
 
@@ -41,23 +45,16 @@ pub const ServerContext = struct {
 
     /// Last received seq_num (from PingQuery), echoed back in PingResponse
     last_seq_num: u64 = 0,
-
-    /// Last received client_send_time (from PingQuery), echoed back
-    last_client_send_time: u64 = 0,
 };
 
 // ─────────────────── Payload Types ───────────────────
 
 pub const PingPayload = struct {
     seq_num: u64,
-    /// Monotonic millisecond timestamp on the client
-    client_send_time: u64,
 };
 
 pub const PongPayload = struct {
     seq_num: u64,
-    /// Echoed from PingPayload — original client-side timestamp
-    client_send_time: u64,
     /// Server-side dwell time in milliseconds
     server_dwell_ms: u64,
 };

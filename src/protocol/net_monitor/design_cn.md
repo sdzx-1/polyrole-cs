@@ -3,10 +3,11 @@
 ## 概述
 
 基于 polyrole-cs 的会话式网络连通性和延迟监控协议。客户端周期性发送
-ping，服务端原样回显。每次响应记录为一条 `PingResult`，存入客户端的
-`ArrayList`，可选 `max_results` 上限。
+ping，服务端原样回显。RTT 完全在客户端本地计算——`client_send_time` 不
+经过网络传输，仅在本地存储并在响应到达时与当前时间比较。
 
-所有时间单位统一使用毫秒。
+每次响应记录为一条 `PingResult`，存入客户端的 `ArrayList`，可选
+`max_results` 上限。所有时间单位统一使用毫秒。
 
 **传输无关。** 可工作于 StreamChannel、TlsChannel 等任何 send/recv 传输。
 
@@ -21,8 +22,8 @@ PingQuery ─(c)──▶ PingResponse ─(s)──▶ PingDecision ─(c)──
 ## 负载
 
 ```zig
-pub const PingPayload = struct { seq_num: u64, client_send_time: u64, };
-pub const PongPayload = struct { seq_num: u64, client_send_time: u64, server_dwell_ms: u64, };
+pub const PingPayload = struct { seq_num: u64, };
+pub const PongPayload = struct { seq_num: u64, server_dwell_ms: u64, };
 ```
 
 ## 上下文
@@ -38,6 +39,7 @@ pub const ClientContext = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     seq_num: u64 = 0,
+    last_send_ms: u64 = 0,           // 本地时间戳，用于 RTT 计算
     remaining: u32 = 0,              // 总 ping 次数（> 0）
     interval_ms: u64 = 0,            // ping 间隔
     max_results: u32 = 0,            // 0 = 无限制
@@ -47,7 +49,6 @@ pub const ClientContext = struct {
 pub const ServerContext = struct {
     io: std.Io,
     last_seq_num: u64 = 0,
-    last_client_send_time: u64 = 0,
 };
 ```
 
@@ -55,16 +56,17 @@ pub const ServerContext = struct {
 
 ### PingQuery (client → server)
 
-`process()` 递增 `seq_num`，发送 ping。
+`process()` 递增 `seq_num`，记录 `last_send_ms`，发送 ping。
 
-`preprocess()` 将收到的字段存入 ServerContext 供回显。
+`preprocess()` 将收到的 `seq_num` 存入 ServerContext 供回显。
 
 ### PingResponse (server → client)
 
 `process()` 在响应前后各采样一次时钟，计算 `server_dwell_ms`。
 
-`preprocess()` 计算 `rtt_ms`，追加一条 `PingResult` 到 `results`
-（受 `max_results` 限制）。返回 `!void`——分配可能失败。
+`preprocess()` 计算 `rtt_ms = now - last_send_ms - server_dwell_ms`，
+追加一条 `PingResult` 到 `results`（受 `max_results` 限制）。
+返回 `!void`——分配可能失败。
 
 ### PingDecision (client)
 
@@ -105,8 +107,9 @@ for (client.results.items) |r| {
 | 决策 | 理由 |
 |------|------|
 | 无状态服务端 | 可扩展至任意并发客户端 |
+| 本地 RTT 计算 | `client_send_time` 不经过网络——payload 更小，无冗余 |
 | 毫秒单位 | 网络 RTT 是毫秒级别 |
-| 每条记录独立 | 比窗口化聚合更简单——调用方按需分组 |
+| 每条记录独立 | 简单——调用方按需分组 |
 | max_results 上限 | 防止长会话无限增长 |
 | Io 接口 | 通过 `Io.Timestamp` / `Io.sleep` 可移植 |
 | 无 panic | 错误通过 Runner 传播 |

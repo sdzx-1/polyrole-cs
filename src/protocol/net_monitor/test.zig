@@ -130,7 +130,25 @@ test "模拟：服务端回显验证" {
     try R.simulate(&client, &server, nm.PingQuery);
 
     try testing.expectEqual(@as(u64, 3), server.last_seq_num);
-    try testing.expect(server.last_client_send_time > 0);
+}
+
+test "模拟：last_send_ms 已设置" {
+    const testing = std.testing;
+    var client: types.ClientContext = .{
+        .io = testing.io,
+        .allocator = testing.allocator,
+        .remaining = 1,
+        .interval_ms = 0,
+        .max_results = 0,
+        .results = std.ArrayList(types.PingResult).empty,
+    };
+    defer client.results.deinit(client.allocator);
+    var server: types.ServerContext = .{ .io = testing.io };
+
+    const R = Runner(nm.PingQuery);
+    try R.simulate(&client, &server, nm.PingQuery);
+
+    try testing.expect(client.last_send_ms > 0);
 }
 
 test "对称运行：通过 StreamChannel 通信" {
