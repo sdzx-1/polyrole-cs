@@ -2,24 +2,11 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
-const ms_per_s = std.time.ms_per_s;
-
-/// Per-window aggregated RTT metrics.
-pub const WindowMetrics = struct {
-    /// Monotonic timestamp of the first ping assigned to this window (ms)
-    start_ms: u64 = 0,
-
-    /// Sum of all rtt_net values in this window (milliseconds)
-    rtt_sum_ms: u64 = 0,
-
-    /// Number of ping responses in this window
-    rtt_count: u32 = 0,
-
-    /// Minimum rtt_net in this window (milliseconds)
-    rtt_min_ms: u64 = std.math.maxInt(u64),
-
-    /// Maximum rtt_net in this window (milliseconds)
-    rtt_max_ms: u64 = 0,
+/// Per-ping RTT record appended to results list.
+pub const PingResult = struct {
+    seq_num: u64,
+    rtt_ms: u64,
+    server_dwell_ms: u64,
 };
 
 /// Client-side protocol context.
@@ -27,7 +14,7 @@ pub const ClientContext = struct {
     /// IO interface for clock and sleep
     io: Io,
 
-    /// Allocator for dynamic window list
+    /// Allocator for results list
     allocator: Allocator,
 
     /// Monotonic ping sequence number (incremented each PingQuery)
@@ -39,15 +26,12 @@ pub const ClientContext = struct {
     /// Milliseconds between pings (sleep in PingDecision)
     interval_ms: u64 = 0,
 
-    /// Per-window width in milliseconds (> 0, e.g. 60000 = 1 min)
-    window_duration_ms: u64 = 0,
+    /// Maximum number of results to store (0 = unlimited).
+    /// Results beyond this count are silently dropped.
+    max_results: u32 = 0,
 
-    /// Monotonic millisecond timestamp of first PingQuery.
-    /// 0 means not started.
-    session_start_ms: u64 = 0,
-
-    /// Dynamic list of per-window metrics, append-only.
-    windows: std.ArrayList(WindowMetrics),
+    /// Per-ping RTT records, append-only.
+    results: std.ArrayList(PingResult),
 };
 
 /// Server-side protocol context — stateless across pings.

@@ -1,5 +1,3 @@
-const std = @import("std");
-const assert = std.debug.assert;
 const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
@@ -17,9 +15,6 @@ pub const PingQuery = union(enum) {
 
     pub fn process(ctx: *types.ClientContext) @This() {
         const now = types.monotonicMs(ctx.io);
-        if (ctx.session_start_ms == 0) {
-            ctx.session_start_ms = now;
-        }
         ctx.seq_num += 1;
 
         return .{ .to_server = .{ .data = .{
@@ -57,23 +52,15 @@ pub const PingResponse = union(enum) {
         const pong = result.to_client.data;
         const now = types.monotonicMs(ctx.io);
 
-        const rtt_net = now -| pong.client_send_time -| pong.server_dwell_ms;
+        const rtt_ms = now -| pong.client_send_time -| pong.server_dwell_ms;
 
-        const elapsed = now -| ctx.session_start_ms;
-        assert(ctx.window_duration_ms > 0);
-        const index = elapsed / ctx.window_duration_ms;
-
-        while (ctx.windows.items.len <= index) {
-            try ctx.windows.append(ctx.allocator, .{
-                .start_ms = ctx.session_start_ms + ctx.windows.items.len * ctx.window_duration_ms,
+        if (ctx.max_results == 0 or ctx.results.items.len < ctx.max_results) {
+            try ctx.results.append(ctx.allocator, .{
+                .seq_num = pong.seq_num,
+                .rtt_ms = rtt_ms,
+                .server_dwell_ms = pong.server_dwell_ms,
             });
         }
-
-        var w = &ctx.windows.items[index];
-        w.rtt_count += 1;
-        w.rtt_sum_ms += rtt_net;
-        w.rtt_min_ms = @min(w.rtt_min_ms, rtt_net);
-        w.rtt_max_ms = @max(w.rtt_max_ms, rtt_net);
     }
 };
 
