@@ -10,7 +10,7 @@ test "模拟：N 次 ping" {
         .io = testing.io,
         .allocator = testing.allocator,
         .remaining = 5,
-        .interval_ns = 0,
+        .interval_ms = 0,
         .window_duration_ns = 60_000_000_000,
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
@@ -32,7 +32,7 @@ test "模拟：remaining=1 恰好产生一次 ping" {
         .io = testing.io,
         .allocator = testing.allocator,
         .remaining = 1,
-        .interval_ns = 0,
+        .interval_ms = 0,
         .window_duration_ns = 60_000_000_000,
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
@@ -57,7 +57,7 @@ test "对称运行：通过 StreamChannel 通信" {
         .io = io,
         .allocator = allocator,
         .remaining = 5,
-        .interval_ns = 0,
+        .interval_ms = 0,
         .window_duration_ns = 60_000_000_000,
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
@@ -107,7 +107,7 @@ test "RTT 值非负" {
         .io = testing.io,
         .allocator = testing.allocator,
         .remaining = 3,
-        .interval_ns = 0,
+        .interval_ms = 0,
         .window_duration_ns = 60_000_000_000,
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };

@@ -34,8 +34,8 @@ pub const ClientContext = struct {
     /// Total ping cycles including the first one (> 0).
     remaining: u32 = 0,
 
-    /// Nanoseconds between pings (sleep in PingDecision)
-    interval_ns: u64 = 0,
+    /// Milliseconds between pings (sleep in PingDecision)
+    interval_ms: u64 = 0,
 
     /// Per-window width in nanoseconds (> 0, e.g. 60_000_000_000 = 1 min)
     window_duration_ns: u64 = 0,
