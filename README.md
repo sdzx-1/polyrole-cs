@@ -218,17 +218,9 @@ try R.simulate(&client_ctx, &server_ctx, tls.ClientHello);
 
 ## 安装
 
-**build.zig.zon:**
-
-```zig
-.{
-    .dependencies = .{
-        .polyrole_cs = .{
-            .url = "https://github.com/sdzx-1/polyrole-cs",
-            .hash = "...",
-        },
-    },
-}
+Download and add polyrole-cs as a dependency by running the following command in your project root:
+```shell
+zig fetch --save git+https://github.com/sdzx-1/polyrole-cs.git
 ```
 
 **build.zig:**
