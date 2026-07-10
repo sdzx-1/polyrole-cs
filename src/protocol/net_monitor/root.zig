@@ -50,7 +50,7 @@ pub const PingResponse = union(enum) {
     pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
         const pong = result.to_client.data;
         const now_ms = types.monotonicMs(ctx.io);
-        const now_ts = std.Io.Timestamp.now(ctx.io, .awake);
+        const now_ts = std.Io.Timestamp.now(ctx.io, .real);
 
         const rtt_ms = now_ms -| ctx.last_send_ms;
 

@@ -86,7 +86,7 @@ pub const PongPayload = struct {
 /// Returns the current monotonic timestamp in milliseconds.
 pub fn monotonicMs(io: Io) u64 {
     const ts = Io.Timestamp.now(io, .awake);
-    return @intCast(@divFloor(ts.nanoseconds, std.time.ns_per_ms));
+    return @intCast(ts.toMilliseconds());
 }
 
 /// Sleep for `ms` milliseconds on the monotonic clock.
