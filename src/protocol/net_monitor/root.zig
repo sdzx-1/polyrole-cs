@@ -52,7 +52,7 @@ pub const PingResponse = union(enum) {
         } } };
     }
 
-    pub fn preprocess(ctx: *types.ClientContext, result: @This()) void {
+    pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
         const pong = result.to_client.data;
         const now = types.monotonicNs(ctx.io);
 
@@ -62,9 +62,9 @@ pub const PingResponse = union(enum) {
         const index = elapsed / ctx.window_duration_ns;
 
         while (ctx.windows.items.len <= index) {
-            ctx.windows.append(ctx.allocator, .{
+            try ctx.windows.append(ctx.allocator, .{
                 .start_ns = ctx.session_start_ns + ctx.windows.items.len * ctx.window_duration_ns,
-            }) catch @panic("OOM: failed to grow windows list");
+            });
         }
 
         var w = &ctx.windows.items[index];
@@ -83,12 +83,12 @@ pub const PingDecision = union(enum) {
 
     pub const info: NetMonitorInfo = .{ .agent = .client, .name = "PingDecision" };
 
-    pub fn process(ctx: *types.ClientContext) @This() {
+    pub fn process(ctx: *types.ClientContext) !@This() {
         ctx.remaining -= 1;
         if (ctx.remaining == 0) {
             return .close;
         }
-        types.sleepNs(ctx.io, ctx.interval_ns);
+        try types.sleepNs(ctx.io, ctx.interval_ns);
         return .ping_again;
     }
 
