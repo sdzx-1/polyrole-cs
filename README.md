@@ -226,8 +226,8 @@ zig fetch --save git+https://github.com/sdzx-1/polyrole-cs.git
 **build.zig:**
 
 ```zig
-const polyrole = b.dependency("polyrole_cs", .{});
-exe.root_module.addImport("polyrole_cs", polyrole.module("polyrole_cs"));
+const polyrole_cs = b.dependency("polyrole_cs", .{});
+exe.root_module.addImport("polyrole_cs", polyrole_cs.module("polyrole_cs"));
 ```
 
 ## 运行测试
