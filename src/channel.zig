@@ -75,6 +75,7 @@ pub const TlsChannel = struct {
 
     pub fn init(
         self: *@This(),
+        inner: *StreamChannel,
         gpa: std.mem.Allocator,
         write_key: [32]u8,
         read_key: [32]u8,
@@ -82,6 +83,7 @@ pub const TlsChannel = struct {
     ) !void {
         std.debug.assert(buf_size >= 2);
         std.debug.assert(buf_size <= 65535);
+        self.inner = inner;
         self.encode_buf = try gpa.alloc(u8, buf_size);
         self.decode_buf = try gpa.alloc(u8, buf_size);
         self.combined_buf = try gpa.alloc(u8, buf_size + 16);

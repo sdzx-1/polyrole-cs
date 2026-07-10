@@ -273,8 +273,7 @@ test "tls channel: symmetric_run over encrypted channel" {
 
             // Phase 2: encrypted protocol — reuse sc
             var tc: TlsChannel = undefined;
-            tc.inner = &sc;
-            try tc.init(allocator, tls_ctx.write_key, tls_ctx.read_key, 512);
+            try tc.init(&sc, allocator, tls_ctx.write_key, tls_ctx.read_key, 512);
             defer tc.deinit(allocator);
 
             try R_pp.symmetric_run(.client, counter, &tc, P.A);
@@ -301,8 +300,7 @@ test "tls channel: symmetric_run over encrypted channel" {
 
     // Phase 2: encrypted protocol — reuse sc
     var tc: TlsChannel = undefined;
-    tc.inner = &sc;
-    try tc.init(allocator, tls_ctx.write_key, tls_ctx.read_key, 512);
+    try tc.init(&sc, allocator, tls_ctx.write_key, tls_ctx.read_key, 512);
     defer tc.deinit(allocator);
 
     try R_pp.symmetric_run(.server, &server_counter, &tc, P.A);
