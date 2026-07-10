@@ -218,7 +218,7 @@ try R.simulate(&client_ctx, &server_ctx, tls.ClientHello);
 
 ## 安装
 
-Download and add polyrole-cs as a dependency by running the following command in your project root:
+在项目根目录执行：
 ```shell
 zig fetch --save git+https://github.com/sdzx-1/polyrole-cs.git
 ```
