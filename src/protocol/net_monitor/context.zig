@@ -82,8 +82,8 @@ pub fn monotonicNs(io: Io) u64 {
     return @intCast(ts.nanoseconds);
 }
 
-/// Sleep for `ns` nanoseconds on the monotonic clock.
-pub fn sleepNs(io: Io, ns: u64) !void {
-    const dur = Io.Duration.fromNanoseconds(@intCast(ns));
+/// Sleep for `ms` milliseconds on the monotonic clock.
+pub fn sleepMs(io: Io, ms: u64) !void {
+    const dur = Io.Duration.fromMilliseconds(@intCast(ms));
     try Io.sleep(io, dur, .awake);
 }

@@ -90,7 +90,7 @@ pub const PingDecision = union(enum) {
         if (ctx.remaining == 0) {
             return .close;
         }
-        try types.sleepNs(ctx.io, ctx.interval_ms * std.time.ns_per_ms);
+        try types.sleepMs(ctx.io, ctx.interval_ms);
         return .ping_again;
     }
 
