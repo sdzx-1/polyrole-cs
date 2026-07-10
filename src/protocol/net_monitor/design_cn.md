@@ -93,11 +93,6 @@ pub const ClientContext = struct {
     /// ping 之间的间隔（纳秒），调用方在 symmetric_run() 前设置
     interval_ns: u64,
 
-    /// socket 读取超时（纳秒）。调用方在进入 symmetric_run() 前
-    /// 设置 SO_RCVTIMEO。如果服务端在此窗口内未响应，底层 recv()
-    /// 返回 error.WouldBlock，Runner 将其向外传播——监控会话中止。
-    read_timeout_ns: u64,
-
     /// 窗口宽度（如 60_000_000_000 = 1 分钟）
     window_duration_ns: u64,
 
@@ -212,7 +207,6 @@ TCP stream
 |------|------|------|
 | Ping 次数 | `ClientContext.remaining` | 总 ping 周期数 (> 0) |
 | 间隔 | `ClientContext.interval_ns` | ping 之间纳秒数（如 `1_000_000_000` = 1 秒） |
-| 读取超时 | `ClientContext.read_timeout_ns` | socket recv 超时；以 `error.WouldBlock` 传播 |
 | 窗口宽度 | `ClientContext.window_duration_ns` | 每窗口宽度（> 0，如 `60_000_000_000` = 1 分钟） |
 | 窗口列表 | `ClientContext.windows` | 动态 `ArrayList(WindowMetrics)`，调用方在 `symmetric_run()` 前初始化，之后读取 |
 | 分配器 | `ClientContext.allocator` | 用于 `windows` 列表扩容 |
@@ -228,7 +222,6 @@ var ctx: ClientContext = .{
     .allocator = allocator,
     .remaining = 60,               // 总共 60 次 ping
     .interval_ns = 1_000_000_000,  // 间隔 1 秒
-    .read_timeout_ns = 5_000_000_000, // 5 秒 socket 超时
     .window_duration_ns = 60_000_000_000, // 1 分钟窗口
     .windows = std.ArrayList(WindowMetrics).init(allocator),
     .session_start_ns = 0,
@@ -259,70 +252,26 @@ while (total_remaining > 0) {
     ctx.session_start_ns = 0;
     ctx.seq_num = 0;
 
-    try Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &channel, net_monitor.PingQuery);
+    Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &channel, net_monitor.PingQuery) catch |err| {
+        // 连接断开——重连重试，或向上传播
+        return err;
+    };
 
-    // 保存此块到文件
     try saveWindowFile("monitor_10min.json", ctx.windows.items);
-
     total_remaining -= chunk;
 }
 ```
 
-**超时后**（`error.WouldBlock`），底层连接和 channel 已死。如果 channel
-封装了 TLS 会话，AEAD nonce 计数器已发散，复用同一 channel 会产生
-`error.ReplayDetected`。调用方必须重新连接，并在需要时重做 TLS 握手。
-
-健壮的重试循环：
-
-```zig
-const RetryStrategy = struct {
-    max_retries: u32 = 3,
-    backoff_ns: u64 = 5_000_000_000, // 重试间隔 5 秒
-};
-
-fn monitorWithRetry(ctx: *ClientContext, channel: anytype, retry: RetryStrategy) !void {
-    var attempts: u32 = 0;
-    while (attempts < retry.max_retries) : (attempts += 1) {
-        Runner(PingQuery).symmetric_run(.client, ctx, channel, PingQuery) catch |err| {
-            if (err == error.WouldBlock) {
-                std.time.sleep(retry.backoff_ns);
-                try reconnect(ctx, channel); // 新建连接 + 可选 TLS 握手
-                continue;
-            }
-            return err;
-        };
-        return; // 成功
-    }
-    return error.MaxRetriesExceeded;
-}
-```
-
 关键不变量：
-- Channel 在 Runner 多次调用间保持打开——重入开销很小，*前提是连接存活*。
-- `error.WouldBlock` 之后，连接已死。重新连接（可选 TLS 握手）将两端
-  状态重置。
+- Channel 在 Runner 多次调用间保持打开——重入开销很小，只要连接存活。
 - 每块重置 `session_start_ns` 和 `windows`，因此文件内容恰好覆盖一个时间片。
 - 调用方控制文件命名和格式；协议层专注于测量。
 
 ## 错误处理
 
-**网络故障**（连接重置、解密失败）以错误形式从 `channel.send()` /
-`channel.recv()` 传播，Runner 通过 `try` 将其传播给调用方。
-
-**超时**——调用方必须在进入 `symmetric_run()` 前对底层 socket 设置
-`SO_RCVTIMEO` 为 `read_timeout_ns`。如果服务端在此窗口内未响应，
-`channel.recv()` 返回 `error.WouldBlock`，Runner 中止。这是检测
-服务端崩溃和网络分区的主要机制。
-
-```zig
-stream.socket.setRecvTimeout(read_timeout_ns) catch {};
-try Runner(PingQuery).symmetric_run(.client, &ctx, &channel, PingQuery);
-// error.WouldBlock → 服务端不可达；调用方重试或告警
-```
-
-**无协议层错误**——服务端永远不会拒绝 ping。此层不做认证/授权。
-访问控制（如需要）由传输层处理（如 TLS 配合 Ed25519 身份验证），
-在监控协议启动前完成。
+协议不定义任何错误状态。网络或 channel 故障通过 Runner 的 `try` 机制
+自然传播——调用方捕获后决定重连、重试或中止。协议本身只建模正确流程的
+状态机。
 
 ## 设计决策汇总
 
@@ -338,8 +287,7 @@ try Runner(PingQuery).symmetric_run(.client, &ctx, &channel, PingQuery);
 | process() 中同步 sleep | Runner 是单线程的——间隔期间的阻塞 `std.time.sleep` 是预期行为，不是浪费 |
 | 窗口化聚合 | 通过 `ArrayList` 实现每窗口 `WindowMetrics`——调用方初始化，协议追加，调用方读取。无长度限制 |
 | ArrayList 而非预分配切片 | 动态增长避免了调用方需要提前猜测需要多少窗口 |
-| 通过 SO_RCVTIMEO 实现 socket 级超时 | 协议层无处插入超时（recv 发生在 Runner 内部而非 process 函数中）。socket 超时是正确的层级——对协议透明，由 Runner 传播 |
 | 传输无关 | 协议仅需 send/recv 接口——可工作于 StreamChannel、TlsChannel 或任何自定义传输。加密是部署选择 |
 | `remaining > 0` 在调用点强制 | 协议假定至少一次 ping；零次 ping 会话对监控无意义 |
-| 无丢包计数器 | 同步请求-响应意味着客户端阻塞等待每次回复。`recv` 超时本身就是丢包信号——不存在 seq_num 跳空的场景。调用方通过捕获 `error.WouldBlock` 检测丢包 |
+| 错误处理是调用方职责 | 协议只建模正确流程的状态机。故障通过 Runner 传播——调用方决定重试/重连/中止 |
 | 填空式窗口追加 | `while windows.items.len <= index` 而非单次 `append`——大 RTT 可能一次跳跃多个窗口，必须填充中间的所有空位 |

@@ -99,12 +99,6 @@ pub const ClientContext = struct {
     /// Interval between pings (nanoseconds), set by caller before symmetric_run()
     interval_ns: u64,
 
-    /// Socket read timeout (nanoseconds). Caller sets SO_RCVTIMEO before
-    /// entering symmetric_run(). If the server doesn't respond within this
-    /// window, the underlying recv() returns error.WouldBlock and Runner
-    /// propagates it — the monitoring session aborts.
-    read_timeout_ns: u64,
-
     /// Window duration (e.g. 60_000_000_000 = 1 minute)
     window_duration_ns: u64,
 
@@ -225,7 +219,6 @@ Before entering `Runner(net_monitor).symmetric_run()`, the caller sets:
 |-----------|-------|---------|
 | Ping count | `ClientContext.remaining` | Total ping cycles (> 0) |
 | Interval | `ClientContext.interval_ns` | Nanoseconds between pings (e.g. `1_000_000_000` = 1s) |
-| Read timeout | `ClientContext.read_timeout_ns` | Socket recv timeout; propagated as `error.WouldBlock` |
 | Window duration | `ClientContext.window_duration_ns` | Per-window width (> 0, e.g. `60_000_000_000` = 1 min) |
 | Windows list | `ClientContext.windows` | Dynamic `ArrayList(WindowMetrics)`, caller inits before `run()`, reads after |
 | Allocator | `ClientContext.allocator` | For `windows` list growth |
@@ -241,14 +234,13 @@ var ctx: ClientContext = .{
     .allocator = allocator,
     .remaining = 60,               // 60 total pings
     .interval_ns = 1_000_000_000,  // 1 second apart
-    .read_timeout_ns = 5_000_000_000, // 5s socket timeout
     .window_duration_ns = 60_000_000_000, // 1 minute windows
     .windows = std.ArrayList(WindowMetrics).init(allocator),
     .session_start_ns = 0,
     .seq_num = 0,
 };
 defer ctx.windows.deinit();
-try Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &tc, net_monitor.PingQuery);
+try Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &channel, net_monitor.PingQuery);
 
 // ctx.windows.items now contains per-minute stats
 for (ctx.windows.items, 0..) |w, i| {
@@ -263,8 +255,8 @@ for (ctx.windows.items, 0..) |w, i| {
 
 The protocol itself has no concept of persistence. Periodic saving is
 achieved by splitting a long session into consecutive short runs over the
-same `TlsChannel` — no re-handshake needed as long as the connection
-stays healthy:
+same channel — no reconnection needed as long as the connection stays
+healthy:
 
 ```zig
 while (total_remaining > 0) {
@@ -274,51 +266,19 @@ while (total_remaining > 0) {
     ctx.session_start_ns = 0;
     ctx.seq_num = 0;
 
-    try Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &tc, net_monitor.PingQuery);
+    Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &channel, net_monitor.PingQuery) catch |err| {
+        // connection broken — reconnect and retry, or propagate to caller
+        return err;
+    };
 
-    // Save this chunk to file
     try saveWindowFile("monitor_10min.json", ctx.windows.items);
-
     total_remaining -= chunk;
 }
 ```
 
-**After a timeout** (`error.WouldBlock`), the underlying connection and
-channel are dead. If the channel wraps a TLS session, the AEAD nonce
-counters have diverged and reusing the channel would produce
-`error.ReplayDetected`. The caller must reconnect and, if applicable,
-redo the TLS handshake from scratch.
-
-A robust retry loop:
-
-```zig
-const RetryStrategy = struct {
-    max_retries: u32 = 3,
-    backoff_ns: u64 = 5_000_000_000, // 5s between retries
-};
-
-fn monitorWithRetry(ctx: *ClientContext, channel: anytype, retry: RetryStrategy) !void {
-    var attempts: u32 = 0;
-    while (attempts < retry.max_retries) : (attempts += 1) {
-        Runner(PingQuery).symmetric_run(.client, ctx, channel, PingQuery) catch |err| {
-            if (err == error.WouldBlock) {
-                std.time.sleep(retry.backoff_ns);
-                try reconnect(ctx, channel); // new connection + optional TLS handshake
-                continue;
-            }
-            return err;
-        };
-        return; // success
-    }
-    return error.MaxRetriesExceeded;
-}
-```
-
 Key invariants:
-- Channel stays open across Runner calls — re-entry is cheap, *as long as
-  the connection is alive*.
-- After `error.WouldBlock`, the connection is gone. A fresh connection
-  (optionally with TLS handshake) resets both ends' state.
+- Channel stays open across Runner calls — re-entry is cheap, as long as
+  the connection is alive.
 - Each chunk resets `session_start_ns` and `windows`, so file content
   covers exactly one time slice.
 - Caller controls the file naming and format; protocol layer stays focused
@@ -326,26 +286,10 @@ Key invariants:
 
 ## Error Handling
 
-**Network failures** (connection reset, decrypt failure) propagate as
-errors from `channel.send()` / `channel.recv()`, which the Runner
-propagates to its caller via `try`.
-
-**Timeouts** — the caller must set `SO_RCVTIMEO` on the underlying socket
-to `read_timeout_ns` before entering `symmetric_run()`. If the server
-fails to respond within this window, `channel.recv()` returns
-`error.WouldBlock` and the Runner aborts. This is the primary mechanism
-for detecting server crashes and network partitions.
-
-```zig
-stream.socket.setRecvTimeout(read_timeout_ns) catch {};
-try Runner(PingQuery).symmetric_run(.client, &ctx, &tc, PingQuery);
-// error.WouldBlock → server unreachable; caller retries or alerts
-```
-
-**No protocol-level errors** — the server never rejects a ping. No
-authentication/authorization at this layer. Access control, if needed,
-is handled by the transport layer (e.g. TLS with Ed25519 identity
-verification) before the monitor protocol starts.
+The protocol defines no error states. Network or channel failures propagate
+naturally through the Runner's `try` mechanism — the caller catches them
+and decides whether to reconnect, retry, or abort. The protocol itself
+only models the correct-flow state machine.
 
 ## Design Decisions Summary
 
@@ -361,8 +305,7 @@ verification) before the monitor protocol starts.
 | Synchronous sleep in process() | Runner is single-threaded — blocking `std.time.sleep` during interval is expected, not wasteful |
 | Windowed aggregation | Per-minute `WindowMetrics` via `ArrayList` — caller inits, protocol appends, caller reads. No length limit |
 | ArrayList over pre-allocated slice | Dynamic growth avoids forcing the caller to guess how many windows they'll need upfront |
-| Socket-level timeout via SO_RCVTIMEO | Protocol layer has no place to insert timeouts (recv happens inside Runner, not in a process function). Socket timeout is the correct layer — transparent to the protocol, propagated by Runner |
 | Transport-agnostic | Protocol only requires send/recv interface — works over StreamChannel, TlsChannel, or any custom transport. Encryption is a deployment choice |
 | `remaining > 0` enforced at call site | Protocol assumes at least one ping; zero-ping sessions are meaningless for a monitor |
-| No loss counter | Synchronous request-response means the client blocks waiting for each reply. A `recv` timeout IS the loss signal — there is no scenario where seq_num gaps appear. The caller detects loss by catching `error.WouldBlock` |
+| Error handling is a caller concern | Protocol models only the correct-flow state machine. Faults propagate through Runner — the caller decides retry/reconnect/abort |
 | Gap-filling window append | `while windows.items.len <= index`而非单次 `append` — 大 RTT 可能一次跳跃多个窗口，必须填充中间的所有空位 |
