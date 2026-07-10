@@ -4,7 +4,7 @@ const Runner = polyrole.runner.Runner;
 const nm = @import("root.zig");
 const types = @import("context.zig");
 
-test "simulate: N pings" {
+test "模拟：N 次 ping" {
     const testing = std.testing;
     var client = types.ClientContext{
         .allocator = testing.allocator,
@@ -25,7 +25,7 @@ test "simulate: N pings" {
     try testing.expectEqual(@as(u32, 5), client.windows.items[0].rtt_count);
 }
 
-test "simulate: remaining=1 produces exactly 1 ping" {
+test "模拟：remaining=1 恰好产生一次 ping" {
     const testing = std.testing;
     var client = types.ClientContext{
         .allocator = testing.allocator,
@@ -45,7 +45,7 @@ test "simulate: remaining=1 produces exactly 1 ping" {
     try testing.expectEqual(@as(u32, 1), client.windows.items[0].rtt_count);
 }
 
-test "symmetric run over StreamChannel" {
+test "对称运行：通过 StreamChannel 通信" {
     const testing = std.testing;
     const io = testing.io;
     const allocator = testing.allocator;
@@ -98,7 +98,7 @@ test "symmetric run over StreamChannel" {
     try testing.expectEqual(@as(u32, 5), client.windows.items[0].rtt_count);
 }
 
-test "RTT values are non-negative" {
+test "RTT 值非负" {
     const testing = std.testing;
     var client = types.ClientContext{
         .allocator = testing.allocator,

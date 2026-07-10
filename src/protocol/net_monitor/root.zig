@@ -7,7 +7,7 @@ const types = @import("context.zig");
 
 const NetMonitorInfo = ProtocolInfo("net_monitor", types.ClientContext, types.ServerContext);
 
-// ─────────────────── Step 1: PingQuery (client → server)  第一步：PingQuery ───────────────────
+// ─────────────────── Step 1: PingQuery (client → server) ───────────────────
 
 pub const PingQuery = union(enum) {
     to_server: Data(types.PingPayload, PingResponse),
@@ -28,14 +28,13 @@ pub const PingQuery = union(enum) {
     }
 
     /// Server receives and stores the ping data so PingResponse can echo it back.
-    /// 服务端接收并存储 ping 数据，供 PingResponse 回显
     pub fn preprocess(ctx: *types.ServerContext, result: @This()) void {
         ctx.last_seq_num = result.to_server.data.seq_num;
         ctx.last_client_send_time = result.to_server.data.client_send_time;
     }
 };
 
-// ─────────────────── Step 2: PingResponse (server → client)  第二步：PingResponse ───────────────────
+// ─────────────────── Step 2: PingResponse (server → client) ───────────────────
 
 pub const PingResponse = union(enum) {
     to_client: Data(types.PongPayload, PingDecision),
@@ -76,7 +75,7 @@ pub const PingResponse = union(enum) {
     }
 };
 
-// ─────────────────── Step 3: PingDecision (client)  第三步：PingDecision ──────────────────────────
+// ─────────────────── Step 3: PingDecision (client) ──────────────────────────
 
 pub const PingDecision = union(enum) {
     ping_again: Data(void, PingQuery),
@@ -94,5 +93,4 @@ pub const PingDecision = union(enum) {
     }
 
     // No preprocess — server doesn't participate in this decision.
-    // 无 preprocess——服务端不参与此决策
 };
