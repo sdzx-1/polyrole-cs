@@ -193,16 +193,25 @@ pub fn process(ctx: *Ctx) !@This() {
 
 ## TLS 协议（示例）
 
-项目包含一个简化 TLS 1.3 握手实现，展示了 polyrole-cs 的完整用法：
+项目包含一个简化 TLS 1.3 握手实现，展示了 polyrole-cs 的完整用法。
 
-- 三消息握手：`ClientHello → ServerHello → ClientFinished → Exit`
-- X25519 临时密钥协商 + Ed25519 身份签名
-- Transcript 链式哈希防篡改
-- HKDF 密钥派生
+**前提**：Client 和 Server 已通过带外方式互知对方的 Ed25519 公钥——无需证书交换或 PKI。双方各自持有自己的身份密钥对，并信任对方的公钥。
+
+**握手流程**：三条消息完成密钥协商和双向认证，不包含数据阶段。
+
+- `ClientHello → ServerHello → ClientFinished → Exit`
+- X25519 临时密钥协商（ephemeral-ephemeral，提供前向安全）
+- Ed25519 身份签名 + HMAC 双向认证
+- Transcript 链式 SHA256 哈希防篡改
+- HKDF-SHA256 派生三把独立密钥
+
+握手后 `write_key` / `read_key` 即为派生的对称密钥，可直接用于 `TlsChannel` 加密通信：
 
 ```zig
 const tls = polyrole.tls;
 
+// client_kp / server_pk 为 Client 持有的密钥对和 Server 公钥
+// server_kp / client_pk 为 Server 持有的密钥对和 Client 公钥
 var client_ctx = tls.ClientContext.init(io, client_kp, server_pk);
 var server_ctx = tls.ServerContext.init(io, server_kp, client_pk);
 
