@@ -268,12 +268,13 @@ test "tls channel: symmetric_run over encrypted channel" {
 
             var sc: StreamChannel = undefined;
             try sc.init(io, allocator, stream, 256, 256);
+            defer sc.deinit(allocator);
             try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello);
-            sc.deinit(allocator);
 
-            // Phase 2: encrypted protocol via symmetric_run
+            // Phase 2: encrypted protocol — reuse sc
             var tc: TlsChannel = undefined;
-            try tc.init(io, allocator, stream, tls_ctx.write_key, tls_ctx.read_key, 512);
+            tc.inner = &sc;
+            try tc.init(allocator, tls_ctx.write_key, tls_ctx.read_key, 512);
             defer tc.deinit(allocator);
 
             try R_pp.symmetric_run(.client, counter, &tc, P.A);
@@ -293,16 +294,15 @@ test "tls channel: symmetric_run over encrypted channel" {
 
     // Phase 1: TLS handshake
     var tls_ctx = tls.ServerContext.init(io, kp_s, kp_c.public_key);
-    {
-        var sc: StreamChannel = undefined;
-        try sc.init(io, allocator, stream, 256, 256);
-        try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello);
-        sc.deinit(allocator);
-    }
+    var sc: StreamChannel = undefined;
+    try sc.init(io, allocator, stream, 256, 256);
+    defer sc.deinit(allocator);
+    try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello);
 
-    // Phase 2: encrypted protocol via symmetric_run
+    // Phase 2: encrypted protocol — reuse sc
     var tc: TlsChannel = undefined;
-    try tc.init(io, allocator, stream, tls_ctx.write_key, tls_ctx.read_key, 512);
+    tc.inner = &sc;
+    try tc.init(allocator, tls_ctx.write_key, tls_ctx.read_key, 512);
     defer tc.deinit(allocator);
 
     try R_pp.symmetric_run(.server, &server_counter, &tc, P.A);

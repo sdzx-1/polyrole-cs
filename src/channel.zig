@@ -45,8 +45,8 @@ pub const StreamChannel = struct {
     }
 };
 
-/// Encrypted transport channel — wraps a StreamChannel with AEAD encryption
-/// using keys derived from a prior TLS handshake.
+/// Encrypted transport channel — wraps a borrowed StreamChannel with AEAD
+/// encryption using keys derived from a prior TLS handshake.
 ///
 /// Wire format per message:
 ///   nonce(24) || tag(16) || ct_len(2 BE) || ciphertext(ct_len)
@@ -58,7 +58,8 @@ pub const StreamChannel = struct {
 /// The nonce is a monotonic counter (u64 big-endian, zero-padded to 24 bytes).
 /// Each direction has its own counter starting from 0.
 pub const TlsChannel = struct {
-    inner: StreamChannel,
+    /// Borrowed — caller owns the StreamChannel and must deinit it after TlsChannel.
+    inner: *StreamChannel,
     write_key: [32]u8,
     read_key: [32]u8,
     write_counter: u64,
@@ -74,16 +75,13 @@ pub const TlsChannel = struct {
 
     pub fn init(
         self: *@This(),
-        io: Io,
         gpa: std.mem.Allocator,
-        stream: Io.net.Stream,
         write_key: [32]u8,
         read_key: [32]u8,
         buf_size: usize,
     ) !void {
         std.debug.assert(buf_size >= 2);
         std.debug.assert(buf_size <= 65535);
-        try self.inner.init(io, gpa, stream, buf_size, buf_size);
         self.encode_buf = try gpa.alloc(u8, buf_size);
         self.decode_buf = try gpa.alloc(u8, buf_size);
         self.combined_buf = try gpa.alloc(u8, buf_size + 16);
@@ -94,7 +92,6 @@ pub const TlsChannel = struct {
     }
 
     pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
-        self.inner.deinit(gpa);
         gpa.free(self.encode_buf);
         gpa.free(self.decode_buf);
         gpa.free(self.combined_buf);
