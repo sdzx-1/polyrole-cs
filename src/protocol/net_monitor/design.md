@@ -103,8 +103,9 @@ pub const ClientContext = struct {
     window_duration_ns: u64,
 
     /// Session start time (recorded on first PingQuery).
-    /// 0 means not started. Monotonic clocks start near 0 at boot but the
-    /// TLS handshake takes long enough that this sentinel is safe in practice.
+    /// 0 means not started. Monotonic clocks start near 0 at boot but
+    /// establishing a connection takes long enough that this sentinel
+    /// is safe in practice.
     session_start_ns: u64,
 
     /// Dynamic list of per-window metrics, append-only
@@ -220,7 +221,7 @@ Before entering `Runner(net_monitor).symmetric_run()`, the caller sets:
 | Ping count | `ClientContext.remaining` | Total ping cycles (> 0) |
 | Interval | `ClientContext.interval_ns` | Nanoseconds between pings (e.g. `1_000_000_000` = 1s) |
 | Window duration | `ClientContext.window_duration_ns` | Per-window width (> 0, e.g. `60_000_000_000` = 1 min) |
-| Windows list | `ClientContext.windows` | Dynamic `ArrayList(WindowMetrics)`, caller inits before `run()`, reads after |
+| Windows list | `ClientContext.windows` | Dynamic `ArrayList(WindowMetrics)`, caller inits before `symmetric_run()`, reads after |
 | Allocator | `ClientContext.allocator` | For `windows` list growth |
 | Clock source | `ServerContext.clock` | Which monotonic clock to use |
 
