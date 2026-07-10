@@ -7,6 +7,7 @@ const types = @import("context.zig");
 test "模拟：N 次 ping" {
     const testing = std.testing;
     var client = types.ClientContext{
+        .io = testing.io,
         .allocator = testing.allocator,
         .remaining = 5,
         .interval_ns = 0,
@@ -14,7 +15,7 @@ test "模拟：N 次 ping" {
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
     defer client.windows.deinit(client.allocator);
-    var server: types.ServerContext = .{};
+    var server: types.ServerContext = .{ .io = testing.io };
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
@@ -28,6 +29,7 @@ test "模拟：N 次 ping" {
 test "模拟：remaining=1 恰好产生一次 ping" {
     const testing = std.testing;
     var client = types.ClientContext{
+        .io = testing.io,
         .allocator = testing.allocator,
         .remaining = 1,
         .interval_ns = 0,
@@ -35,7 +37,7 @@ test "模拟：remaining=1 恰好产生一次 ping" {
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
     defer client.windows.deinit(client.allocator);
-    var server: types.ServerContext = .{};
+    var server: types.ServerContext = .{ .io = testing.io };
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
@@ -52,6 +54,7 @@ test "对称运行：通过 StreamChannel 通信" {
     const net = std.Io.net;
 
     var client = types.ClientContext{
+        .io = io,
         .allocator = allocator,
         .remaining = 5,
         .interval_ns = 0,
@@ -59,7 +62,7 @@ test "对称运行：通过 StreamChannel 通信" {
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
     defer client.windows.deinit(client.allocator);
-    var server: types.ServerContext = .{};
+    var server: types.ServerContext = .{ .io = io };
 
     const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
     var listener = try localhost.listen(io, .{});
@@ -101,6 +104,7 @@ test "对称运行：通过 StreamChannel 通信" {
 test "RTT 值非负" {
     const testing = std.testing;
     var client = types.ClientContext{
+        .io = testing.io,
         .allocator = testing.allocator,
         .remaining = 3,
         .interval_ns = 0,
@@ -108,7 +112,7 @@ test "RTT 值非负" {
         .windows = std.ArrayList(types.WindowMetrics).empty,
     };
     defer client.windows.deinit(client.allocator);
-    var server: types.ServerContext = .{};
+    var server: types.ServerContext = .{ .io = testing.io };
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);

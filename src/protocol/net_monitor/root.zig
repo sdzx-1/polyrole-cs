@@ -15,7 +15,7 @@ pub const PingQuery = union(enum) {
     pub const info: NetMonitorInfo = .{ .agent = .client, .name = "PingQuery" };
 
     pub fn process(ctx: *types.ClientContext) @This() {
-        const now = types.monotonicNs();
+        const now = types.monotonicNs(ctx.io);
         if (ctx.session_start_ns == 0) {
             ctx.session_start_ns = now;
         }
@@ -42,8 +42,8 @@ pub const PingResponse = union(enum) {
     pub const info: NetMonitorInfo = .{ .agent = .server, .name = "PingResponse" };
 
     pub fn process(ctx: *types.ServerContext) @This() {
-        const t_arrival = types.monotonicNs();
-        const t_departure = types.monotonicNs();
+        const t_arrival = types.monotonicNs(ctx.io);
+        const t_departure = types.monotonicNs(ctx.io);
 
         return .{ .to_client = .{ .data = .{
             .seq_num = ctx.last_seq_num,
@@ -54,7 +54,7 @@ pub const PingResponse = union(enum) {
 
     pub fn preprocess(ctx: *types.ClientContext, result: @This()) void {
         const pong = result.to_client.data;
-        const now = types.monotonicNs();
+        const now = types.monotonicNs(ctx.io);
 
         const rtt_net = now -| pong.client_send_time -| pong.server_dwell_ns;
 
@@ -88,7 +88,7 @@ pub const PingDecision = union(enum) {
         if (ctx.remaining == 0) {
             return .close;
         }
-        types.sleepNs(ctx.interval_ns);
+        types.sleepNs(ctx.io, ctx.interval_ns);
         return .ping_again;
     }
 

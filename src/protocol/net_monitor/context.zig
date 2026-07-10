@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 /// Per-window aggregated RTT metrics.
@@ -20,12 +21,10 @@ pub const WindowMetrics = struct {
 };
 
 /// Client-side protocol context.
-///
-/// Caller sets `allocator`, `remaining`, `interval_ns`,
-/// `window_duration_ns`, and inits `windows` before entering
-/// `symmetric_run()`. After the Runner exits, read
-/// `windows.items` for per-window aggregated results.
 pub const ClientContext = struct {
+    /// IO interface for clock and sleep
+    io: Io,
+
     /// Allocator for dynamic window list
     allocator: Allocator,
 
@@ -51,6 +50,9 @@ pub const ClientContext = struct {
 
 /// Server-side protocol context — stateless across pings.
 pub const ServerContext = struct {
+    /// IO interface for clock
+    io: Io,
+
     /// Last received seq_num (from PingQuery), echoed back in PingResponse
     last_seq_num: u64 = 0,
 
@@ -74,23 +76,14 @@ pub const PongPayload = struct {
     server_dwell_ns: u64,
 };
 
-// ─────────────────── Monotonic clock helper ───────────────────
-
-/// Returns the current CLOCK_MONOTONIC value in nanoseconds.
-/// Panics if the syscall fails (should never happen in practice).
-pub fn monotonicNs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    if (std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts) != 0) {
-        @panic("clock_gettime(MONOTONIC) failed");
-    }
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+/// Returns the current monotonic timestamp as u64 nanoseconds.
+pub fn monotonicNs(io: Io) u64 {
+    const ts = Io.Timestamp.now(io, .awake);
+    return @intCast(ts.nanoseconds);
 }
 
-/// Sleep for `ns` nanoseconds using nanosleep.
-pub fn sleepNs(ns: u64) void {
-    const req = std.os.linux.timespec{
-        .sec = @intCast(ns / std.time.ns_per_s),
-        .nsec = @intCast(ns % std.time.ns_per_s),
-    };
-    _ = std.os.linux.nanosleep(&req, null);
+/// Sleep for `ns` nanoseconds on the monotonic clock.
+pub fn sleepNs(io: Io, ns: u64) void {
+    const dur = Io.Duration.fromNanoseconds(@intCast(ns));
+    Io.sleep(io, dur, .awake) catch @panic("sleep canceled");
 }
