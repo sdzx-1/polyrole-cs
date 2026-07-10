@@ -14,10 +14,12 @@ ping，服务端原样回显。RTT 完全在客户端本地计算——`client_s
 ## 状态机
 
 ```
-PingQuery ─(c)──▶ PingResponse ─(s)──▶ PingDecision ─(c)──┬── ping_again → PingQuery (循环)
-                                                          │
-                                                          └── close → Exit
+PingQuery ─(c)──▶ PingResponse ─(s)──▶ PingQuery (循环)
+  │                                    │
+  └─────── close → Exit ◀──────────────┘
 ```
+
+两个状态。`PingQuery` 同时负责发送和继续/关闭决策。`PingResponse` 纯回显。
 
 ## 负载
 
@@ -52,26 +54,22 @@ pub const ServerContext = struct {
 
 ## 状态详述
 
-### PingQuery (client → server)
+### PingQuery (client)
 
-`process()` 递增 `seq_num`，记录 `last_send_ms`，发送 ping。
+`process()`：若 `remaining == 0`，返回 `.close → Exit`。否则休眠
+`interval_ms`（首轮 `seq_num == 0` 时跳过），递减 `remaining`，记录
+`last_send_ms`，递增 `seq_num`，发送 `.to_server → PingResponse`。
+返回 `!@This()`。
 
-`preprocess()` 将收到的 `seq_num` 存入 ServerContext 供回显。
+`preprocess()`：服务端存储 `seq_num` 供回显。遇到 `.close` 时直接透传
+至 Exit。
 
 ### PingResponse (server → client)
 
-纯回显——`process()` 直接返回 PingQuery.preprocess 存储的 `seq_num`。
-无需时钟采样，无需任何处理。
+纯回显——`process()` 返回 PingQuery.preprocess 存储的 `seq_num`。
 
 `preprocess()` 计算 `rtt_ms = now - last_send_ms`，追加一条
 `PingResult` 到 `results`。返回 `!void`。
-
-### PingDecision (client)
-
-`process()` 递减 `remaining`；若为 0 返回 `.close`；否则休眠后返回
-`.ping_again`。返回 `!@This()`。
-
-`remaining` 计包含首次 ping 的**总数**。必须 > 0。
 
 ## 调用示例
 
@@ -96,7 +94,7 @@ for (client.results.items) |r| {
 
 ## 错误传播
 
-`PingDecision.process` 和 `PingResponse.preprocess` 返回错误。Runner
+`PingQuery.process` 和 `PingResponse.preprocess` 返回错误。Runner
 在编译期检测并通过 `try` 传播。
 
 ## 设计决策

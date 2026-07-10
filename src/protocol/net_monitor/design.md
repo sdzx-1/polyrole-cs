@@ -15,16 +15,19 @@ transport implementing send/recv.
 ## State Machine
 
 ```
-PingQuery ─(c)──▶ PingResponse ─(s)──▶ PingDecision ─(c)──┬── ping_again → PingQuery (cycle)
-                                                          │
-                                                          └── close → Exit
+PingQuery ─(c)──▶ PingResponse ─(s)──▶ PingQuery (cycle)
+  │                                    │
+  └───────── close → Exit ◀────────────┘
 ```
+
+Two states. `PingQuery` handles both the send and the continue/close
+decision. `PingResponse` is a pure echo.
 
 ## Payload
 
 ```zig
-pub const PingPayload = struct { seq_num: u64, };
-pub const PongPayload = struct { seq_num: u64, };
+pub const PingPayload = struct { seq_num: u64, _pad: [48]u8 = [_]u8{0} ** 48, };
+pub const PongPayload = struct { seq_num: u64, _pad: [48]u8 = [_]u8{0} ** 48, };
 ```
 
 ## Context
@@ -53,27 +56,23 @@ pub const ServerContext = struct {
 
 ## States
 
-### PingQuery (client → server)
+### PingQuery (client)
 
-`process()` increments `seq_num`, records `last_send_ms` locally, and
-sends the ping.
+`process()`: if `remaining == 0`, returns `.close → Exit`. Otherwise
+sleeps `interval_ms` (skip on first entry when `seq_num == 0`),
+decrements `remaining`, records `last_send_ms`, increments `seq_num`,
+and sends `.to_server → PingResponse`. Returns `!@This()`.
 
-`preprocess()` stores the received `seq_num` in `ServerContext` for echo-back.
+`preprocess()`: server stores `seq_num` for echo-back. On the `.close`
+variant, the server simply passes through to Exit.
 
 ### PingResponse (server → client)
 
 Pure echo — `process()` returns the `seq_num` stored by PingQuery's
-preprocess. No clock sampling, no processing.
+preprocess.
 
 `preprocess()` computes `rtt_ms = now - last_send_ms` and appends a
 `PingResult` to `results`. Returns `!void` — allocation failure.
-
-### PingDecision (client)
-
-`process()` decrements `remaining`. If 0, returns `.close`. Otherwise
-sleeps `interval_ms` and returns `.ping_again`. Returns `!@This()`.
-
-`remaining` counts **total** pings including the first. Must be > 0.
 
 ## Caller Example
 
@@ -98,7 +97,7 @@ for (client.results.items) |r| {
 
 ## Error Propagation
 
-`PingDecision.process` and `PingResponse.preprocess` return errors.
+`PingQuery.process` and `PingResponse.preprocess` return errors.
 Runner detects at compile time and uses `try`.
 
 ## Design Decisions

@@ -7,14 +7,19 @@ const types = @import("context.zig");
 
 const NetMonitorInfo = ProtocolInfo("net_monitor", types.ClientContext, types.ServerContext);
 
-// ─────────────────── Step 1: PingQuery (client → server) ───────────────────
+// ─────────────────── PingQuery (client) ─────────────────────────────────────
 
 pub const PingQuery = union(enum) {
     to_server: Data(types.PingPayload, PingResponse),
+    close: Data(void, Exit),
 
     pub const info: NetMonitorInfo = .{ .agent = .client, .name = "PingQuery" };
 
-    pub fn process(ctx: *types.ClientContext) @This() {
+    pub fn process(ctx: *types.ClientContext) !@This() {
+        if (ctx.remaining == 0) return .close;
+        if (ctx.seq_num > 0) try types.sleepMs(ctx.io, ctx.interval_ms);
+        ctx.remaining -= 1;
+
         const now = types.monotonicMs(ctx.io);
         ctx.last_send_ms = now;
         ctx.seq_num += 1;
@@ -22,16 +27,19 @@ pub const PingQuery = union(enum) {
         return .{ .to_server = .{ .data = .{ .seq_num = ctx.seq_num } } };
     }
 
-    /// Server stores seq_num so PingResponse can echo it back.
+    /// Server receives PingQuery: store seq_num for echo, or exit.
     pub fn preprocess(ctx: *types.ServerContext, result: @This()) void {
-        ctx.last_seq_num = result.to_server.data.seq_num;
+        switch (result) {
+            .to_server => |d| ctx.last_seq_num = d.data.seq_num,
+            .close => {},
+        }
     }
 };
 
-// ─────────────────── Step 2: PingResponse (server → client) ───────────────────
+// ─────────────────── PingResponse (server → client) ─────────────────────────
 
 pub const PingResponse = union(enum) {
-    to_client: Data(types.PongPayload, PingDecision),
+    to_client: Data(types.PongPayload, PingQuery),
 
     pub const info: NetMonitorInfo = .{ .agent = .server, .name = "PingResponse" };
 
@@ -52,24 +60,4 @@ pub const PingResponse = union(enum) {
             .timestamp = now_ts,
         });
     }
-};
-
-// ─────────────────── Step 3: PingDecision (client) ──────────────────────────
-
-pub const PingDecision = union(enum) {
-    ping_again: Data(void, PingQuery),
-    close: Data(void, Exit),
-
-    pub const info: NetMonitorInfo = .{ .agent = .client, .name = "PingDecision" };
-
-    pub fn process(ctx: *types.ClientContext) !@This() {
-        ctx.remaining -= 1;
-        if (ctx.remaining == 0) {
-            return .close;
-        }
-        try types.sleepMs(ctx.io, ctx.interval_ms);
-        return .ping_again;
-    }
-
-    // No preprocess — server doesn't participate in this decision.
 };
