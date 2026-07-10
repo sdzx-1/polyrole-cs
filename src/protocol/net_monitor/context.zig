@@ -30,11 +30,38 @@ pub const ClientContext = struct {
     /// Milliseconds between pings (sleep in PingDecision)
     interval_ms: u64 = 0,
 
-    /// Per-ping RTT records, append-only.
+    /// Optional CSV file. When set, results are flushed every 30 entries
+    /// in append mode and cleared from the in-memory list.
+    file: ?std.Io.File = null,
+
+    /// Per-ping RTT records, append-only. Automatically flushed to file
+    /// when it reaches 30 entries (if `file` is set).
     results: std.ArrayList(PingResult),
 
-    /// Release results memory.
+    /// Flush results to CSV and clear the list. Called automatically at
+    /// 30 entries and on deinit. No-op if file is null.
+    pub fn flushResults(self: *@This()) !void {
+        if (self.file) |f| {
+            if (self.results.items.len == 0) return;
+
+            var csv: [1024]u8 = undefined;
+            var pos: usize = 0;
+            for (self.results.items) |r| {
+                const line = std.fmt.bufPrint(csv[pos..], "{d},{d},{d}\n", .{ r.seq_num, r.rtt_ms, r.timestamp.nanoseconds }) catch break;
+                pos += line.len;
+            }
+            if (pos == 0) return;
+
+            const offset = f.length(self.io) catch return;
+            try f.writePositionalAll(self.io, csv[0..pos], offset);
+
+            self.results.clearRetainingCapacity();
+        }
+    }
+
+    /// Release results memory. Flushes remaining results to file if set.
     pub fn deinit(self: *@This()) void {
+        self.flushResults() catch {};
         self.results.deinit(self.allocator);
         self.* = undefined;
     }

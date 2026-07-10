@@ -59,5 +59,7 @@ pub const PingResponse = union(enum) {
             .rtt_ms = rtt_ms,
             .timestamp = now_ts,
         });
+
+        if (ctx.results.items.len >= 30) try ctx.flushResults();
     }
 };
