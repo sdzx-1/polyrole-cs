@@ -11,7 +11,6 @@ test "模拟：N 次 ping" {
         .allocator = testing.allocator,
         .remaining = 5,
         .interval_ms = 0,
-        .max_results = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
@@ -32,7 +31,6 @@ test "模拟：remaining=1 恰好产生一次 ping" {
         .allocator = testing.allocator,
         .remaining = 1,
         .interval_ms = 0,
-        .max_results = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
@@ -46,29 +44,6 @@ test "模拟：remaining=1 恰好产生一次 ping" {
     try testing.expectEqual(@as(usize, 1), client.results.items.len);
 }
 
-test "模拟：max_results 限制" {
-    const testing = std.testing;
-    var client: types.ClientContext = .{
-        .io = testing.io,
-        .allocator = testing.allocator,
-        .remaining = 10,
-        .interval_ms = 0,
-        .max_results = 3,
-        .results = std.ArrayList(types.PingResult).empty,
-    };
-    defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{};
-
-    const R = Runner(nm.PingQuery);
-    try R.simulate(&client, &server, nm.PingQuery);
-
-    // Only first 3 results stored, seq still reached 10
-    try testing.expectEqual(@as(u64, 10), client.seq_num);
-    try testing.expectEqual(@as(usize, 3), client.results.items.len);
-    try testing.expectEqual(@as(u64, 1), client.results.items[0].seq_num);
-    try testing.expectEqual(@as(u64, 3), client.results.items[2].seq_num);
-}
-
 test "模拟：seq_num 单调递增" {
     const testing = std.testing;
     var client: types.ClientContext = .{
@@ -76,7 +51,6 @@ test "模拟：seq_num 单调递增" {
         .allocator = testing.allocator,
         .remaining = 5,
         .interval_ms = 0,
-        .max_results = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
@@ -97,7 +71,6 @@ test "模拟：结果字段完整性" {
         .allocator = testing.allocator,
         .remaining = 3,
         .interval_ms = 0,
-        .max_results = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
@@ -119,7 +92,6 @@ test "模拟：服务端回显验证" {
         .allocator = testing.allocator,
         .remaining = 3,
         .interval_ms = 0,
-        .max_results = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
@@ -138,7 +110,6 @@ test "模拟：last_send_ms 已设置" {
         .allocator = testing.allocator,
         .remaining = 1,
         .interval_ms = 0,
-        .max_results = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
@@ -161,7 +132,6 @@ test "对称运行：通过 StreamChannel 通信" {
         .allocator = allocator,
         .remaining = 5,
         .interval_ms = 0,
-        .max_results = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
@@ -210,7 +180,6 @@ test "RTT 值非负" {
         .allocator = testing.allocator,
         .remaining = 3,
         .interval_ms = 0,
-        .max_results = 0,
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);

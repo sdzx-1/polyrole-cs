@@ -44,12 +44,10 @@ pub const PingResponse = union(enum) {
 
         const rtt_ms = now -| ctx.last_send_ms;
 
-        if (ctx.max_results == 0 or ctx.results.items.len < ctx.max_results) {
-            try ctx.results.append(ctx.allocator, .{
-                .seq_num = pong.seq_num,
-                .rtt_ms = rtt_ms,
-            });
-        }
+        try ctx.results.append(ctx.allocator, .{
+            .seq_num = pong.seq_num,
+            .rtt_ms = rtt_ms,
+        });
     }
 };
 

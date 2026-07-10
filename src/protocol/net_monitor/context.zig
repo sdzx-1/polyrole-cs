@@ -29,10 +29,6 @@ pub const ClientContext = struct {
     /// Milliseconds between pings (sleep in PingDecision)
     interval_ms: u64 = 0,
 
-    /// Maximum number of results to store (0 = unlimited).
-    /// Results beyond this count are silently dropped.
-    max_results: u32 = 0,
-
     /// Per-ping RTT records, append-only.
     results: std.ArrayList(PingResult),
 };

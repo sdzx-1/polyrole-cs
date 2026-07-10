@@ -42,7 +42,6 @@ pub const ClientContext = struct {
     last_send_ms: u64 = 0,           // local timestamp, used for RTT
     remaining: u32 = 0,              // total pings (> 0)
     interval_ms: u64 = 0,            // sleep between pings
-    max_results: u32 = 0,            // 0 = unlimited, else cap
     results: std.ArrayList(PingResult),
 };
 
@@ -66,8 +65,7 @@ Pure echo — `process()` returns the `seq_num` stored by PingQuery's
 preprocess. No clock sampling, no processing.
 
 `preprocess()` computes `rtt_ms = now - last_send_ms` and appends a
-`PingResult` to `results` (subject to `max_results` cap).
-Returns `!void` — allocation failure.
+`PingResult` to `results`. Returns `!void` — allocation failure.
 
 ### PingDecision (client)
 
@@ -84,11 +82,10 @@ var client = ClientContext{
     .allocator = allocator,
     .remaining = 60,
     .interval_ms = 1000,
-    .max_results = 1000,
     .results = std.ArrayList(PingResult).empty,
 };
 defer client.results.deinit(client.allocator);
-var server = ServerContext{ .io = io };
+var server = ServerContext{};
 
 try Runner(PingQuery).symmetric_run(.client, &client, &channel, PingQuery);
 

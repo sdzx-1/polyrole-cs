@@ -41,7 +41,6 @@ pub const ClientContext = struct {
     last_send_ms: u64 = 0,           // 本地时间戳，用于 RTT 计算
     remaining: u32 = 0,              // 总 ping 次数（> 0）
     interval_ms: u64 = 0,            // ping 间隔
-    max_results: u32 = 0,            // 0 = 无限制
     results: std.ArrayList(PingResult),
 };
 
@@ -64,7 +63,7 @@ pub const ServerContext = struct {
 无需时钟采样，无需任何处理。
 
 `preprocess()` 计算 `rtt_ms = now - last_send_ms`，追加一条
-`PingResult` 到 `results`（受 `max_results` 限制）。返回 `!void`。
+`PingResult` 到 `results`。返回 `!void`。
 
 ### PingDecision (client)
 
@@ -81,11 +80,10 @@ var client = ClientContext{
     .allocator = allocator,
     .remaining = 60,
     .interval_ms = 1000,
-    .max_results = 1000,
     .results = std.ArrayList(PingResult).empty,
 };
 defer client.results.deinit(client.allocator);
-var server = ServerContext{ .io = io };
+var server = ServerContext{};
 
 try Runner(PingQuery).symmetric_run(.client, &client, &channel, PingQuery);
 
