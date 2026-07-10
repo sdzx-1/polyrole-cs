@@ -155,8 +155,10 @@ No `preprocess()` — server state, nothing for client to receive here.
    Window assignment is by **response arrival time** — a ping sent near a
    window boundary whose reply arrives in the next window is counted in
    the later window.
-3. If the window doesn't exist yet in `windows`, append a new `WindowMetrics`
-   with `start_ns = session_start_ns + index * window_duration_ns`.
+3. While `windows.items.len <= index`, append a new `WindowMetrics`
+   with `start_ns = session_start_ns + windows.items.len * window_duration_ns`.
+   This fills any gaps caused by index jumps (e.g. a very slow response
+   spanning several window boundaries).
 4. Accumulate `rtt_net` into that window's `rtt_sum_ns`, `rtt_count`,
    `rtt_min_ns`, `rtt_max_ns`.
 
@@ -343,3 +345,4 @@ the monitor protocol starts.
 | Socket-level timeout via SO_RCVTIMEO | Protocol layer has no place to insert timeouts (recv happens inside Runner, not in a process function). Socket timeout is the correct layer — transparent to the protocol, propagated by Runner |
 | `remaining > 0` enforced at call site | Protocol assumes at least one ping; zero-ping sessions are meaningless for a monitor |
 | No loss counter | Synchronous request-response means the client blocks waiting for each reply. A `recv` timeout IS the loss signal — there is no scenario where seq_num gaps appear. The caller detects loss by catching `error.WouldBlock` |
+| Gap-filling window append | `while windows.items.len <= index`而非单次 `append` — 大 RTT 可能一次跳跃多个窗口，必须填充中间的所有空位 |
