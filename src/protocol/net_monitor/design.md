@@ -31,8 +31,8 @@ Three fields per round-trip, none requiring cross-machine clock sync:
 
 | Field | Type | Filled by | Purpose |
 |-------|------|-----------|---------|
-| `seq_num` | `u32` | client, echoed by server | Ordering, loss detection |
-| `client_send_time` | `i64` | client, echoed by server | RTT = now - client_send_time (both on client clock) |
+| `seq_num` | `u32` | client, echoed by server | Ordering, diagnostic tracing |
+| `client_send_time` | `u64` | client, echoed by server | RTT = now - client_send_time (both on client clock) |
 | `server_dwell_ns` | `u64` | server | Relative duration server spent processing (own clock, short interval) |
 
 ```
@@ -44,17 +44,24 @@ RTT_net   = RTT_raw - server_dwell_ns   // strips server-side delay
 on the server's own monotonic clock. Over sub-millisecond intervals,
 clock drift is negligible. No absolute timestamps cross machine boundaries.
 
+`rtt_net` subtracts a server-clock duration from a client-clock duration.
+This is technically imprecise (clocks drift at different rates), but the
+error is bounded by `drift_ratio × dwell`. For typical dwell under 1ms
+and clock drift under 100ppm, the error is under 100ns — well below
+network jitter. The subtraction is therefore a useful approximation for
+stripping server-side processing delay from RTT measurements.
+
 ## Payload Design
 
 ```zig
 const PingPayload = struct {
     seq_num: u32,
-    client_send_time: i64,
+    client_send_time: u64,
 };
 
 const PongPayload = struct {
     seq_num: u32,
-    client_send_time: i64,
+    client_send_time: u64,
     server_dwell_ns: u64,
 };
 ```
@@ -69,12 +76,11 @@ don't need payload data. Metrics are accumulated in `ClientContext` during
 
 ```zig
 pub const WindowMetrics = struct {
-    start_ns: i64,         // first ping in this window (monotonic)
+    start_ns: u64,         // first ping in this window (monotonic)
     rtt_sum_ns: u64 = 0,
     rtt_count: u32 = 0,
     rtt_min_ns: u64 = math.maxInt(u64),
     rtt_max_ns: u64 = 0,
-    lost_count: u32 = 0,
 };
 
 pub const ClientContext = struct {
@@ -99,8 +105,10 @@ pub const ClientContext = struct {
     /// Window duration (e.g. 60_000_000_000 = 1 minute)
     window_duration_ns: u64,
 
-    /// Session start time (recorded on first PingQuery)
-    session_start_ns: i64,
+    /// Session start time (recorded on first PingQuery).
+    /// 0 means not started. Monotonic clocks start near 0 at boot but the
+    /// TLS handshake takes long enough that this sentinel is safe in practice.
+    session_start_ns: u64,
 
     /// Dynamic list of per-window metrics, append-only
     windows: std.ArrayList(WindowMetrics),
@@ -126,7 +134,7 @@ clients can share a single server without session management.
 ### PingQuery (client)
 
 `process()`:
-1. If `session_start_ns == 0`: record current monotonic time as `session_start_ns`.
+1. If `session_start_ns == 0`: record current monotonic `u64` time as `session_start_ns`.
 2. Record current monotonic time as `client_send_time`.
 3. Increment `seq_num`.
 4. Return `.to_server` with `PingPayload`.
@@ -221,8 +229,8 @@ try Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &tc, net_monitor.
 
 // ctx.windows.items now contains per-minute stats
 for (ctx.windows.items, 0..) |w, i| {
-    std.debug.print("window {d}: avg={d}ns min={d} max={d} count={d} lost={d}\n", .{
-        i, w.rtt_sum_ns / w.rtt_count, w.rtt_min_ns, w.rtt_max_ns, w.rtt_count, w.lost_count,
+    std.debug.print("window {d}: avg={d}ns min={d} max={d} count={d}\n", .{
+        i, w.rtt_sum_ns / w.rtt_count, w.rtt_min_ns, w.rtt_max_ns, w.rtt_count,
     });
 }
 ```
@@ -298,3 +306,4 @@ the monitor protocol starts.
 | ArrayList over pre-allocated slice | Dynamic growth avoids forcing the caller to guess how many windows they'll need upfront |
 | Socket-level timeout via SO_RCVTIMEO | Protocol layer has no place to insert timeouts (recv happens inside Runner, not in a process function). Socket timeout is the correct layer — transparent to the protocol, propagated by Runner |
 | `remaining > 0` enforced at call site | Protocol assumes at least one ping; zero-ping sessions are meaningless for a monitor |
+| No loss counter | Synchronous request-response means the client blocks waiting for each reply. A `recv` timeout IS the loss signal — there is no scenario where seq_num gaps appear. The caller detects loss by catching `error.WouldBlock` |
