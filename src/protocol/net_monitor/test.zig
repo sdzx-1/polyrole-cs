@@ -15,7 +15,7 @@ test "模拟：N 次 ping" {
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{ .io = testing.io };
+    var server: types.ServerContext = .{};
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
@@ -36,7 +36,7 @@ test "模拟：remaining=1 恰好产生一次 ping" {
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{ .io = testing.io };
+    var server: types.ServerContext = .{};
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
@@ -57,7 +57,7 @@ test "模拟：max_results 限制" {
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{ .io = testing.io };
+    var server: types.ServerContext = .{};
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
@@ -80,7 +80,7 @@ test "模拟：seq_num 单调递增" {
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{ .io = testing.io };
+    var server: types.ServerContext = .{};
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
@@ -101,15 +101,14 @@ test "模拟：结果字段完整性" {
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{ .io = testing.io };
+    var server: types.ServerContext = .{};
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
 
     for (client.results.items) |r| {
         try testing.expect(r.seq_num > 0);
-        try testing.expect(r.rtt_ms < 1000);      // simulate RTT should be near-zero
-        try testing.expect(r.server_dwell_ms < 1000); // dwell should be near-zero
+        try testing.expect(r.rtt_ms < 1000); // simulate RTT should be near-zero
     }
 }
 
@@ -124,7 +123,7 @@ test "模拟：服务端回显验证" {
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{ .io = testing.io };
+    var server: types.ServerContext = .{};
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
@@ -143,7 +142,7 @@ test "模拟：last_send_ms 已设置" {
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{ .io = testing.io };
+    var server: types.ServerContext = .{};
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
@@ -166,7 +165,7 @@ test "对称运行：通过 StreamChannel 通信" {
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{ .io = io };
+    var server: types.ServerContext = .{};
 
     const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
     var listener = try localhost.listen(io, .{});
@@ -215,7 +214,7 @@ test "RTT 值非负" {
         .results = std.ArrayList(types.PingResult).empty,
     };
     defer client.results.deinit(client.allocator);
-    var server: types.ServerContext = .{ .io = testing.io };
+    var server: types.ServerContext = .{};
 
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);

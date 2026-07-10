@@ -21,7 +21,7 @@ pub const PingQuery = union(enum) {
         return .{ .to_server = .{ .data = .{ .seq_num = ctx.seq_num } } };
     }
 
-    /// Server receives and stores the seq_num so PingResponse can echo it back.
+    /// Server stores seq_num so PingResponse can echo it back.
     pub fn preprocess(ctx: *types.ServerContext, result: @This()) void {
         ctx.last_seq_num = result.to_server.data.seq_num;
     }
@@ -35,26 +35,19 @@ pub const PingResponse = union(enum) {
     pub const info: NetMonitorInfo = .{ .agent = .server, .name = "PingResponse" };
 
     pub fn process(ctx: *types.ServerContext) @This() {
-        const t_arrival = types.monotonicMs(ctx.io);
-        const t_departure = types.monotonicMs(ctx.io);
-
-        return .{ .to_client = .{ .data = .{
-            .seq_num = ctx.last_seq_num,
-            .server_dwell_ms = t_departure - t_arrival,
-        } } };
+        return .{ .to_client = .{ .data = .{ .seq_num = ctx.last_seq_num } } };
     }
 
     pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
         const pong = result.to_client.data;
         const now = types.monotonicMs(ctx.io);
 
-        const rtt_ms = now -| ctx.last_send_ms -| pong.server_dwell_ms;
+        const rtt_ms = now -| ctx.last_send_ms;
 
         if (ctx.max_results == 0 or ctx.results.items.len < ctx.max_results) {
             try ctx.results.append(ctx.allocator, .{
                 .seq_num = pong.seq_num,
                 .rtt_ms = rtt_ms,
-                .server_dwell_ms = pong.server_dwell_ms,
             });
         }
     }

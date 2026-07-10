@@ -23,7 +23,7 @@ PingQuery ─(c)──▶ PingResponse ─(s)──▶ PingDecision ─(c)──
 
 ```zig
 pub const PingPayload = struct { seq_num: u64, };
-pub const PongPayload = struct { seq_num: u64, server_dwell_ms: u64, };
+pub const PongPayload = struct { seq_num: u64, };
 ```
 
 ## 上下文
@@ -32,7 +32,6 @@ pub const PongPayload = struct { seq_num: u64, server_dwell_ms: u64, };
 pub const PingResult = struct {
     seq_num: u64,
     rtt_ms: u64,
-    server_dwell_ms: u64,
 };
 
 pub const ClientContext = struct {
@@ -47,7 +46,6 @@ pub const ClientContext = struct {
 };
 
 pub const ServerContext = struct {
-    io: std.Io,
     last_seq_num: u64 = 0,
 };
 ```
@@ -62,11 +60,11 @@ pub const ServerContext = struct {
 
 ### PingResponse (server → client)
 
-`process()` 在响应前后各采样一次时钟，计算 `server_dwell_ms`。
+纯回显——`process()` 直接返回 PingQuery.preprocess 存储的 `seq_num`。
+无需时钟采样，无需任何处理。
 
-`preprocess()` 计算 `rtt_ms = now - last_send_ms - server_dwell_ms`，
-追加一条 `PingResult` 到 `results`（受 `max_results` 限制）。
-返回 `!void`——分配可能失败。
+`preprocess()` 计算 `rtt_ms = now - last_send_ms`，追加一条
+`PingResult` 到 `results`（受 `max_results` 限制）。返回 `!void`。
 
 ### PingDecision (client)
 

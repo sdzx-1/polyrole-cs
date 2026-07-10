@@ -24,7 +24,7 @@ PingQuery ─(c)──▶ PingResponse ─(s)──▶ PingDecision ─(c)──
 
 ```zig
 pub const PingPayload = struct { seq_num: u64, };
-pub const PongPayload = struct { seq_num: u64, server_dwell_ms: u64, };
+pub const PongPayload = struct { seq_num: u64, };
 ```
 
 ## Context
@@ -33,7 +33,6 @@ pub const PongPayload = struct { seq_num: u64, server_dwell_ms: u64, };
 pub const PingResult = struct {
     seq_num: u64,
     rtt_ms: u64,
-    server_dwell_ms: u64,
 };
 
 pub const ClientContext = struct {
@@ -48,7 +47,6 @@ pub const ClientContext = struct {
 };
 
 pub const ServerContext = struct {
-    io: std.Io,
     last_seq_num: u64 = 0,
 };
 ```
@@ -64,11 +62,11 @@ sends the ping.
 
 ### PingResponse (server → client)
 
-`process()` samples the clock before and after, computing
-`server_dwell_ms` as the difference.
+Pure echo — `process()` returns the `seq_num` stored by PingQuery's
+preprocess. No clock sampling, no processing.
 
-`preprocess()` computes `rtt_ms = now - last_send_ms - server_dwell_ms`,
-then appends a `PingResult` to `results` (subject to `max_results` cap).
+`preprocess()` computes `rtt_ms = now - last_send_ms` and appends a
+`PingResult` to `results` (subject to `max_results` cap).
 Returns `!void` — allocation failure.
 
 ### PingDecision (client)

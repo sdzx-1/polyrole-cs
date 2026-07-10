@@ -6,7 +6,6 @@ const Allocator = std.mem.Allocator;
 pub const PingResult = struct {
     seq_num: u64,
     rtt_ms: u64,
-    server_dwell_ms: u64,
 };
 
 /// Client-side protocol context.
@@ -38,11 +37,8 @@ pub const ClientContext = struct {
     results: std.ArrayList(PingResult),
 };
 
-/// Server-side protocol context — stateless across pings.
+/// Server-side protocol context — stateless echo, no IO needed.
 pub const ServerContext = struct {
-    /// IO interface for clock
-    io: Io,
-
     /// Last received seq_num (from PingQuery), echoed back in PingResponse
     last_seq_num: u64 = 0,
 };
@@ -55,8 +51,6 @@ pub const PingPayload = struct {
 
 pub const PongPayload = struct {
     seq_num: u64,
-    /// Server-side dwell time in milliseconds
-    server_dwell_ms: u64,
 };
 
 /// Returns the current monotonic timestamp in milliseconds.
