@@ -7,7 +7,10 @@ on polyrole-cs. The client sends periodic pings; the server echoes them back
 verbatim. RTT is computed entirely on the client side using a single clock
 — no cross-machine time synchronization required.
 
-Runs over an encrypted `TlsChannel` after a `simple_tls` handshake.
+**Transport-agnostic.** The protocol needs only a channel that implements
+`send(state_id, State, result)` and `recv(state_id, State) -> result`.
+Works over `StreamChannel` (raw TCP), `TlsChannel` (encrypted), or any
+custom transport implementing the same interface.
 
 ## State Machine
 
@@ -184,20 +187,35 @@ Caller must set `remaining > 0`.
 
 No `preprocess()` — server doesn't participate in this state.
 
-## Composition with simple_tls
+## Channel
+
+The protocol runs over any channel implementing the polyrole-cs send/recv
+interface:
+
+```
+Runner(net_monitor).symmetric_run(role, ctx, channel, PingQuery)
+```
+
+Minimal setup with `StreamChannel` (raw TCP):
 
 ```
 TCP stream
-  ├─ StreamChannel ─── TLS handshake (Runner(simple_tls).symmetric_run)
-  │   ClientHello → ServerHello → ClientFinished → Exit
-  ├─ StreamChannel.deinit()
-  └─ TlsChannel(write_key, read_key)
-       └─ Runner(net_monitor).symmetric_run
-            PingQuery ⇄ PingResponse ⇄ PingDecision → Exit
+  └─ StreamChannel ─── Runner(net_monitor).symmetric_run
+       PingQuery ⇄ PingResponse ⇄ PingDecision → Exit
 ```
 
-Same pattern as the existing TLS + app-protocol test in `runner.zig`.
-TlsChannel is passed as the `channel` parameter — contexts are pure state.
+Optionally layered over TLS:
+
+```
+TCP stream
+  ├─ StreamChannel ─── Runner(simple_tls).symmetric_run (handshake)
+  ├─ StreamChannel.deinit()
+  └─ TlsChannel ─── Runner(net_monitor).symmetric_run
+       PingQuery ⇄ PingResponse ⇄ PingDecision → Exit
+```
+
+The protocol makes no assumption about the underlying transport — encryption
+is a deployment choice, not a protocol concern.
 
 ## Protocol Parameters (caller-controlled)
 
@@ -265,10 +283,11 @@ while (total_remaining > 0) {
 }
 ```
 
-**After a timeout** (`error.WouldBlock`), the underlying TCP connection and
-TlsChannel are dead — the AEAD nonce counters have diverged, and reusing
-the same channel would produce `error.ReplayDetected`. The caller must
-reconnect and redo the TLS handshake from scratch.
+**After a timeout** (`error.WouldBlock`), the underlying connection and
+channel are dead. If the channel wraps a TLS session, the AEAD nonce
+counters have diverged and reusing the channel would produce
+`error.ReplayDetected`. The caller must reconnect and, if applicable,
+redo the TLS handshake from scratch.
 
 A robust retry loop:
 
@@ -278,13 +297,13 @@ const RetryStrategy = struct {
     backoff_ns: u64 = 5_000_000_000, // 5s between retries
 };
 
-fn monitorWithRetry(ctx: *ClientContext, tc: *TlsChannel, retry: RetryStrategy) !void {
+fn monitorWithRetry(ctx: *ClientContext, channel: anytype, retry: RetryStrategy) !void {
     var attempts: u32 = 0;
     while (attempts < retry.max_retries) : (attempts += 1) {
-        Runner(PingQuery).symmetric_run(.client, ctx, tc, PingQuery) catch |err| {
+        Runner(PingQuery).symmetric_run(.client, ctx, channel, PingQuery) catch |err| {
             if (err == error.WouldBlock) {
                 std.time.sleep(retry.backoff_ns);
-                try reconnectAndHandshake(ctx, tc); // new TLS session
+                try reconnect(ctx, channel); // new connection + optional TLS handshake
                 continue;
             }
             return err;
@@ -296,10 +315,10 @@ fn monitorWithRetry(ctx: *ClientContext, tc: *TlsChannel, retry: RetryStrategy) 
 ```
 
 Key invariants:
-- `TlsChannel` and TCP stream stay open across Runner calls — re-entry is
-  cheap, no TLS handshake overhead, *as long as the connection is alive*.
-- After `error.WouldBlock`, the TLS session is gone. A fresh handshake
-  resets both ends' AEAD counters to zero, making them consistent again.
+- Channel stays open across Runner calls — re-entry is cheap, *as long as
+  the connection is alive*.
+- After `error.WouldBlock`, the connection is gone. A fresh connection
+  (optionally with TLS handshake) resets both ends' state.
 - Each chunk resets `session_start_ns` and `windows`, so file content
   covers exactly one time slice.
 - Caller controls the file naming and format; protocol layer stays focused
@@ -307,13 +326,13 @@ Key invariants:
 
 ## Error Handling
 
-**Network failures** (connection reset, TLS decrypt failure) propagate as
-errors from `TlsChannel.send()` / `TlsChannel.recv()`, which the Runner
+**Network failures** (connection reset, decrypt failure) propagate as
+errors from `channel.send()` / `channel.recv()`, which the Runner
 propagates to its caller via `try`.
 
 **Timeouts** — the caller must set `SO_RCVTIMEO` on the underlying socket
 to `read_timeout_ns` before entering `symmetric_run()`. If the server
-fails to respond within this window, `TlsChannel.recv()` returns
+fails to respond within this window, `channel.recv()` returns
 `error.WouldBlock` and the Runner aborts. This is the primary mechanism
 for detecting server crashes and network partitions.
 
@@ -324,9 +343,9 @@ try Runner(PingQuery).symmetric_run(.client, &ctx, &tc, PingQuery);
 ```
 
 **No protocol-level errors** — the server never rejects a ping. No
-authentication/authorization at this layer. If access control is needed,
-it's handled by the TLS handshake (Ed25519 identity verification) before
-the monitor protocol starts.
+authentication/authorization at this layer. Access control, if needed,
+is handled by the transport layer (e.g. TLS with Ed25519 identity
+verification) before the monitor protocol starts.
 
 ## Design Decisions Summary
 
@@ -343,6 +362,7 @@ the monitor protocol starts.
 | Windowed aggregation | Per-minute `WindowMetrics` via `ArrayList` — caller inits, protocol appends, caller reads. No length limit |
 | ArrayList over pre-allocated slice | Dynamic growth avoids forcing the caller to guess how many windows they'll need upfront |
 | Socket-level timeout via SO_RCVTIMEO | Protocol layer has no place to insert timeouts (recv happens inside Runner, not in a process function). Socket timeout is the correct layer — transparent to the protocol, propagated by Runner |
+| Transport-agnostic | Protocol only requires send/recv interface — works over StreamChannel, TlsChannel, or any custom transport. Encryption is a deployment choice |
 | `remaining > 0` enforced at call site | Protocol assumes at least one ping; zero-ping sessions are meaningless for a monitor |
 | No loss counter | Synchronous request-response means the client blocks waiting for each reply. A `recv` timeout IS the loss signal — there is no scenario where seq_num gaps appear. The caller detects loss by catching `error.WouldBlock` |
 | Gap-filling window append | `while windows.items.len <= index`而非单次 `append` — 大 RTT 可能一次跳跃多个窗口，必须填充中间的所有空位 |

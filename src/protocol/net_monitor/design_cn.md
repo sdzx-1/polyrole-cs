@@ -6,7 +6,9 @@
 ping，服务端原样回显。RTT 完全在客户端单侧计算，使用同一时钟——不依赖
 跨机时间同步。
 
-在 `simple_tls` 握手之后运行于加密的 `TlsChannel` 之上。
+**传输无关。** 协议只需要一个实现了 `send(state_id, State, result)` 和
+`recv(state_id, State) -> result` 接口的 channel。可工作于 `StreamChannel`
+（原始 TCP）、`TlsChannel`（加密）或任何实现同一接口的自定义传输之上。
 
 ## 状态机
 
@@ -100,8 +102,8 @@ pub const ClientContext = struct {
     window_duration_ns: u64,
 
     /// 会话起始时刻（首次 PingQuery 时记录）。
-    /// 0 表示尚未开始。单调时钟在系统启动时从接近 0 开始，但 TLS
-    /// 握手耗时足够长，此哨兵值在实践中安全。
+    /// 0 表示尚未开始。单调时钟在系统启动时从接近 0 开始，但到
+    /// 监控协议启动时已经过了足够时间，此哨兵值在实践中安全。
     session_start_ns: u64,
 
     /// 每窗口指标的动态列表，仅追加
@@ -174,20 +176,33 @@ pub const PingDecision = union(enum) {
 
 无 `preprocess()`——服务端不参与此状态。
 
-## 与 simple_tls 的组合
+## Channel
+
+协议运行于任何实现 polyrole-cs send/recv 接口的 channel 之上：
+
+```
+Runner(net_monitor).symmetric_run(role, ctx, channel, PingQuery)
+```
+
+最小化配置——`StreamChannel`（原始 TCP）：
 
 ```
 TCP stream
-  ├─ StreamChannel ─── TLS 握手 (Runner(simple_tls).symmetric_run)
-  │   ClientHello → ServerHello → ClientFinished → Exit
-  ├─ StreamChannel.deinit()
-  └─ TlsChannel(write_key, read_key)
-       └─ Runner(net_monitor).symmetric_run
-            PingQuery ⇄ PingResponse ⇄ PingDecision → Exit
+  └─ StreamChannel ─── Runner(net_monitor).symmetric_run
+       PingQuery ⇄ PingResponse ⇄ PingDecision → Exit
 ```
 
-与 `runner.zig` 中已有的 TLS + 应用协议测试模式一致。`TlsChannel` 作为
-`channel` 参数传入——上下文是纯状态。
+可选叠加 TLS：
+
+```
+TCP stream
+  ├─ StreamChannel ─── Runner(simple_tls).symmetric_run（握手）
+  ├─ StreamChannel.deinit()
+  └─ TlsChannel ─── Runner(net_monitor).symmetric_run
+       PingQuery ⇄ PingResponse ⇄ PingDecision → Exit
+```
+
+协议不对底层传输做任何假设——加密是部署选择，而非协议关注点。
 
 ## 协议参数（调用方控制）
 
@@ -199,7 +214,7 @@ TCP stream
 | 间隔 | `ClientContext.interval_ns` | ping 之间纳秒数（如 `1_000_000_000` = 1 秒） |
 | 读取超时 | `ClientContext.read_timeout_ns` | socket recv 超时；以 `error.WouldBlock` 传播 |
 | 窗口宽度 | `ClientContext.window_duration_ns` | 每窗口宽度（> 0，如 `60_000_000_000` = 1 分钟） |
-| 窗口列表 | `ClientContext.windows` | 动态 `ArrayList(WindowMetrics)`，调用方在 `run()` 前初始化，之后读取 |
+| 窗口列表 | `ClientContext.windows` | 动态 `ArrayList(WindowMetrics)`，调用方在 `symmetric_run()` 前初始化，之后读取 |
 | 分配器 | `ClientContext.allocator` | 用于 `windows` 列表扩容 |
 | 时钟源 | `ServerContext.clock` | 使用哪个单调时钟 |
 
@@ -220,7 +235,7 @@ var ctx: ClientContext = .{
     .seq_num = 0,
 };
 defer ctx.windows.deinit();
-try Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &tc, net_monitor.PingQuery);
+try Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &channel, net_monitor.PingQuery);
 
 // ctx.windows.items 现在包含每分钟统计数据
 for (ctx.windows.items, 0..) |w, i| {
@@ -233,8 +248,8 @@ for (ctx.windows.items, 0..) |w, i| {
 
 ### 每 N 分钟将窗口数据保存到文件
 
-协议本身不感知持久化。周期性保存通过在同一 `TlsChannel` 上将长会话拆分为
-连续的短运行来实现——只要连接保持健康，无需重新握手：
+协议本身不感知持久化。周期性保存通过在同一 channel 上将长会话拆分为
+连续的短运行来实现——只要连接保持健康，无需重建：
 
 ```zig
 while (total_remaining > 0) {
@@ -244,7 +259,7 @@ while (total_remaining > 0) {
     ctx.session_start_ns = 0;
     ctx.seq_num = 0;
 
-    try Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &tc, net_monitor.PingQuery);
+    try Runner(net_monitor.PingQuery).symmetric_run(.client, &ctx, &channel, net_monitor.PingQuery);
 
     // 保存此块到文件
     try saveWindowFile("monitor_10min.json", ctx.windows.items);
@@ -253,9 +268,9 @@ while (total_remaining > 0) {
 }
 ```
 
-**超时后**（`error.WouldBlock`），底层 TCP 连接和 TlsChannel 已死——
-AEAD nonce 计数器已发散，复用同一 channel 会产生 `error.ReplayDetected`。
-调用方必须重新连接并重做 TLS 握手。
+**超时后**（`error.WouldBlock`），底层连接和 channel 已死。如果 channel
+封装了 TLS 会话，AEAD nonce 计数器已发散，复用同一 channel 会产生
+`error.ReplayDetected`。调用方必须重新连接，并在需要时重做 TLS 握手。
 
 健壮的重试循环：
 
@@ -265,13 +280,13 @@ const RetryStrategy = struct {
     backoff_ns: u64 = 5_000_000_000, // 重试间隔 5 秒
 };
 
-fn monitorWithRetry(ctx: *ClientContext, tc: *TlsChannel, retry: RetryStrategy) !void {
+fn monitorWithRetry(ctx: *ClientContext, channel: anytype, retry: RetryStrategy) !void {
     var attempts: u32 = 0;
     while (attempts < retry.max_retries) : (attempts += 1) {
-        Runner(PingQuery).symmetric_run(.client, ctx, tc, PingQuery) catch |err| {
+        Runner(PingQuery).symmetric_run(.client, ctx, channel, PingQuery) catch |err| {
             if (err == error.WouldBlock) {
                 std.time.sleep(retry.backoff_ns);
-                try reconnectAndHandshake(ctx, tc); // 新建 TLS 会话
+                try reconnect(ctx, channel); // 新建连接 + 可选 TLS 握手
                 continue;
             }
             return err;
@@ -283,32 +298,31 @@ fn monitorWithRetry(ctx: *ClientContext, tc: *TlsChannel, retry: RetryStrategy) 
 ```
 
 关键不变量：
-- `TlsChannel` 和 TCP stream 在 Runner 多次调用间保持打开——重入开销很小，
-  无 TLS 握手开销，*前提是连接存活*。
-- `error.WouldBlock` 之后，TLS 会话已死。重新握手将两端 AEAD 计数器重置
-  为零，恢复一致性。
+- Channel 在 Runner 多次调用间保持打开——重入开销很小，*前提是连接存活*。
+- `error.WouldBlock` 之后，连接已死。重新连接（可选 TLS 握手）将两端
+  状态重置。
 - 每块重置 `session_start_ns` 和 `windows`，因此文件内容恰好覆盖一个时间片。
 - 调用方控制文件命名和格式；协议层专注于测量。
 
 ## 错误处理
 
-**网络故障**（连接重置、TLS 解密失败）以错误形式从
-`TlsChannel.send()` / `TlsChannel.recv()` 传播，Runner 通过 `try` 将其
-传播给调用方。
+**网络故障**（连接重置、解密失败）以错误形式从 `channel.send()` /
+`channel.recv()` 传播，Runner 通过 `try` 将其传播给调用方。
 
 **超时**——调用方必须在进入 `symmetric_run()` 前对底层 socket 设置
 `SO_RCVTIMEO` 为 `read_timeout_ns`。如果服务端在此窗口内未响应，
-`TlsChannel.recv()` 返回 `error.WouldBlock`，Runner 中止。这是检测
+`channel.recv()` 返回 `error.WouldBlock`，Runner 中止。这是检测
 服务端崩溃和网络分区的主要机制。
 
 ```zig
 stream.socket.setRecvTimeout(read_timeout_ns) catch {};
-try Runner(PingQuery).symmetric_run(.client, &ctx, &tc, PingQuery);
+try Runner(PingQuery).symmetric_run(.client, &ctx, &channel, PingQuery);
 // error.WouldBlock → 服务端不可达；调用方重试或告警
 ```
 
 **无协议层错误**——服务端永远不会拒绝 ping。此层不做认证/授权。
-如果需要访问控制，由监控协议启动前的 TLS 握手（Ed25519 身份验证）处理。
+访问控制（如需要）由传输层处理（如 TLS 配合 Ed25519 身份验证），
+在监控协议启动前完成。
 
 ## 设计决策汇总
 
@@ -325,6 +339,7 @@ try Runner(PingQuery).symmetric_run(.client, &ctx, &tc, PingQuery);
 | 窗口化聚合 | 通过 `ArrayList` 实现每窗口 `WindowMetrics`——调用方初始化，协议追加，调用方读取。无长度限制 |
 | ArrayList 而非预分配切片 | 动态增长避免了调用方需要提前猜测需要多少窗口 |
 | 通过 SO_RCVTIMEO 实现 socket 级超时 | 协议层无处插入超时（recv 发生在 Runner 内部而非 process 函数中）。socket 超时是正确的层级——对协议透明，由 Runner 传播 |
+| 传输无关 | 协议仅需 send/recv 接口——可工作于 StreamChannel、TlsChannel 或任何自定义传输。加密是部署选择 |
 | `remaining > 0` 在调用点强制 | 协议假定至少一次 ping；零次 ping 会话对监控无意义 |
 | 无丢包计数器 | 同步请求-响应意味着客户端阻塞等待每次回复。`recv` 超时本身就是丢包信号——不存在 seq_num 跳空的场景。调用方通过捕获 `error.WouldBlock` 检测丢包 |
 | 填空式窗口追加 | `while windows.items.len <= index` 而非单次 `append`——大 RTT 可能一次跳跃多个窗口，必须填充中间的所有空位 |
