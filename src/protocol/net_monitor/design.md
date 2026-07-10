@@ -26,8 +26,8 @@ decision. `PingResponse` is a pure echo.
 ## Payload
 
 ```zig
-pub const PingPayload = struct { seq_num: u64, _pad: [48]u8 = [_]u8{0} ** 48, };
-pub const PongPayload = struct { seq_num: u64, _pad: [48]u8 = [_]u8{0} ** 48, };
+pub const PingPayload = struct { seq_num: u64, };
+pub const PongPayload = struct { seq_num: u64, };
 ```
 
 ## Context
