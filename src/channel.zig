@@ -102,6 +102,12 @@ pub const TlsChannel = struct {
     }
 
     pub fn send(self: *@This(), state_id: anytype, _: type, val: anytype) !void {
+        // Atomically advance counter before encryption so nonce is never reused,
+        // even if a later flush fails and the caller retries.
+        const this_counter = self.write_counter;
+        std.debug.assert(this_counter < std.math.maxInt(u64));
+        self.write_counter += 1;
+
         // Encode protocol message after 2-byte length prefix
         const buf = self.encode_buf[2..];
         var writer = Io.Writer.fixed(buf);
@@ -112,8 +118,7 @@ pub const TlsChannel = struct {
         std.mem.writeInt(u16, self.encode_buf[0..2], @intCast(msg.len), .big);
         const plaintext = self.encode_buf[0 .. 2 + msg.len];
 
-        // Build nonce from counter (don't commit yet)
-        const this_counter = self.write_counter;
+        // Build nonce from the already-committed counter
         var nonce: [24]u8 = [_]u8{0} ** 24;
         std.mem.writeInt(u64, nonce[0..8], this_counter, .big);
 
@@ -129,10 +134,6 @@ pub const TlsChannel = struct {
         try sw.writeInt(u16, @intCast(ct.len), .big);
         try sw.writeAll(ct);
         try sw.flush();
-
-        // Only commit counter after successful write
-        std.debug.assert(this_counter < std.math.maxInt(u64));
-        self.write_counter = this_counter + 1;
     }
 
     pub fn recv(self: *@This(), state_id: anytype, T: type) !T {

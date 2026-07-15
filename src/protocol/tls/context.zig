@@ -54,6 +54,16 @@ pub const ClientContext = struct {
             .read_key = undefined,
         };
     }
+
+    /// Zero sensitive key material. Call after the handshake completes
+    /// and keys have been copied to TlsChannel (if used).
+    pub fn deinit(self: *ClientContext) void {
+        @memset(&self.ephemeral_sk, 0);
+        @memset(&self.shared_secret, 0);
+        @memset(&self.handshake_key, 0);
+        @memset(&self.write_key, 0);
+        @memset(&self.read_key, 0);
+    }
 };
 
 pub const ServerContext = struct {
@@ -107,6 +117,16 @@ pub const ServerContext = struct {
             .read_key = undefined,
             .write_key = undefined,
         };
+    }
+
+    /// Zero sensitive key material. Call after the handshake completes
+    /// and keys have been copied to TlsChannel (if used).
+    pub fn deinit(self: *ServerContext) void {
+        @memset(&self.ephemeral_sk, 0);
+        @memset(&self.shared_secret, 0);
+        @memset(&self.handshake_key, 0);
+        @memset(&self.write_key, 0);
+        @memset(&self.read_key, 0);
     }
 };
 

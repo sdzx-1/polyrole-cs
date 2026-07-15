@@ -276,6 +276,9 @@ test "tls channel: symmetric_run over encrypted channel" {
             try tc.init(allocator, &sc, tls_ctx.write_key, tls_ctx.read_key, 512);
             defer tc.deinit(allocator);
 
+            // Keys copied to TlsChannel — zero the handshake context
+            tls_ctx.deinit();
+
             try R_pp.symmetric_run(.client, counter, &tc, P.A);
         }
     };
@@ -302,6 +305,9 @@ test "tls channel: symmetric_run over encrypted channel" {
     var tc: TlsChannel = undefined;
     try tc.init(allocator, &sc, tls_ctx.write_key, tls_ctx.read_key, 512);
     defer tc.deinit(allocator);
+
+    // Keys copied to TlsChannel — zero the handshake context
+    tls_ctx.deinit();
 
     try R_pp.symmetric_run(.server, &server_counter, &tc, P.A);
 

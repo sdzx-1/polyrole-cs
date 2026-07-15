@@ -19,6 +19,9 @@ test "simulate handshake only" {
 
     const R = Runner(tls.ClientHello);
     try R.simulate(&client, &server, tls.ClientHello);
+
+    client.deinit();
+    server.deinit();
 }
 
 // 通过 TCP 网络通道运行完整握手：验证编解码 + 网络传输
@@ -50,6 +53,7 @@ test "symmetric run handshake" {
             defer ch.deinit(allocator);
 
             try R.symmetric_run(.client, ctx, &ch, tls.ClientHello);
+            ctx.deinit();
         }
     };
 
@@ -64,6 +68,7 @@ test "symmetric run handshake" {
     defer ch.deinit(allocator);
 
     try R.symmetric_run(.server, &server, &ch, tls.ClientHello);
+    server.deinit();
 }
 
 // 篡改服务端签名：客户端验证 ServerHello 签名时应返回 SignatureInvalid
@@ -158,6 +163,9 @@ test "simulate multiple sessions with same contexts" {
     try R.simulate(&client, &server, tls.ClientHello);
 
     try testing.expect(!std.mem.eql(u8, &key1, &client.write_key));
+
+    client.deinit();
+    server.deinit();
 }
 
 // 篡改客户端 MAC：客户端签名正确但 HMAC 不匹配，应返回 HmacInvalid
@@ -272,4 +280,9 @@ test "simulate: two handshakes with different keypairs produce different keys" {
 
     try testing.expect(!std.mem.eql(u8, &c1.write_key, &c2.write_key));
     try testing.expect(!std.mem.eql(u8, &s1.write_key, &s2.write_key));
+
+    c1.deinit();
+    s1.deinit();
+    c2.deinit();
+    s2.deinit();
 }
