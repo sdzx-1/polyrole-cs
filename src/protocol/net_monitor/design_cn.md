@@ -34,16 +34,16 @@ pub const PongPayload = struct { seq_num: u64, };
 pub const PingResult = struct {
     seq_num: u64,
     rtt_ms: u64,
-    timestamp: std.Io.Timestamp,
+    timestamp: zio.Timestamp,
 };
 
 pub const ClientContext = struct {
-    io: std.Io,
     allocator: std.mem.Allocator,
     seq_num: u64 = 0,
     last_send_ms: u64 = 0,           // 本地时间戳，用于 RTT 计算
     remaining: u32 = 0,              // 总 ping 次数（> 0）
     interval_ms: u64 = 0,            // ping 间隔
+    file: ?zio.File = null,          // 可选 CSV 输出文件
     results: std.ArrayList(PingResult),
 };
 
@@ -75,7 +75,6 @@ pub const ServerContext = struct {
 
 ```zig
 var client = ClientContext{
-    .io = io,
     .allocator = allocator,
     .remaining = 60,
     .interval_ms = 1000,
@@ -84,7 +83,7 @@ var client = ClientContext{
 defer client.deinit();
 var server = ServerContext{};
 
-try Runner(PingQuery).symmetric_run(.client, &client, &channel, PingQuery);
+try Runner(PingQuery).symmetric_run(.client, &client, &channel, PingQuery, null);
 
 for (client.results.items) |r| {
     std.debug.print("[{d}] rtt={d}ms dwell={d}ms\n",
@@ -105,6 +104,6 @@ for (client.results.items) |r| {
 | 本地 RTT 计算 | `client_send_time` 不经过网络——payload 更小，无冗余 |
 | 毫秒单位 | 网络 RTT 是毫秒级别 |
 | 每条记录独立 | 简单——调用方按需分组 |
-| Io 接口 | 通过 `Io.Timestamp` / `Io.sleep` 可移植 |
+| zio 原生 API | 通过 `zio.Timestamp` / `zio.sleep` 可移植 |
 | 无 panic | 错误通过 Runner 传播 |
 | 2 状态机 | PingDecision 并入 PingQuery——sleep 在 send 之前，避免 Nagle |

@@ -36,16 +36,16 @@ pub const PongPayload = struct { seq_num: u64, };
 pub const PingResult = struct {
     seq_num: u64,
     rtt_ms: u64,
-    timestamp: std.Io.Timestamp,
+    timestamp: zio.Timestamp,
 };
 
 pub const ClientContext = struct {
-    io: std.Io,
     allocator: std.mem.Allocator,
     seq_num: u64 = 0,
     last_send_ms: u64 = 0,           // local timestamp, used for RTT
     remaining: u32 = 0,              // total pings (> 0)
     interval_ms: u64 = 0,            // sleep between pings
+    file: ?zio.File = null,          // optional CSV output
     results: std.ArrayList(PingResult),
 };
 
@@ -78,7 +78,6 @@ preprocess.
 
 ```zig
 var client = ClientContext{
-    .io = io,
     .allocator = allocator,
     .remaining = 60,
     .interval_ms = 1000,
@@ -87,7 +86,7 @@ var client = ClientContext{
 defer client.deinit();
 var server = ServerContext{};
 
-try Runner(PingQuery).symmetric_run(.client, &client, &channel, PingQuery);
+try Runner(PingQuery).symmetric_run(.client, &client, &channel, PingQuery, null);
 
 for (client.results.items) |r| {
     std.debug.print("[{d}] rtt={d}ms\n", .{ r.seq_num, r.rtt_ms });
@@ -106,6 +105,6 @@ Runner detects at compile time and uses `try`.
 | Stateless server | Scales to arbitrary concurrent clients |
 | Millisecond units | Network RTT is ms-scale; ns adds noise |
 | Per-ping records | Simpler than windowed aggregation — caller groups as needed |
-| Io interface | Portable clock and sleep via `Io.Timestamp` / `Io.sleep` |
+| zio native | Portable clock and sleep via `zio.Timestamp` / `zio.sleep` |
 | No panics | Errors propagate through Runner |
 | 2-state machine | Merged PingDecision into PingQuery — sleep before send avoids Nagle |

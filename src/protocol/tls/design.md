@@ -58,8 +58,8 @@ violations abort the protocol immediately via error return.
 | `ephemeral_pk` | `[32]u8` | Client's ephemeral X25519 public key |
 
 **process (client):**
-1. Generate random `client_nonce` (24 bytes) via `Io.randomSecure`.
-2. Generate ephemeral X25519 keypair via `crypto.dh.X25519.KeyPair.generate(io)`.
+1. Generate random `client_nonce` (24 bytes) via `zio.randomSecure`.
+2. Generate ephemeral X25519 keypair via `generateX25519Keypair()`.
 3. Store `own_nonce`, `ephemeral_sk`, `own_ephemeral_pk` in context.
 4. Return `.to_server` variant.
 
@@ -187,7 +187,6 @@ Phase 2 — Expand (each key gets its own info label):
 
 ```zig
 pub const ClientContext = struct {
-    io: std.Io,                              // CSPRNG
     id_keypair: crypto.sign.Ed25519.KeyPair, // own identity
     peer_id_public: Ed25519.PublicKey,       // server identity
     ephemeral_sk: [32]u8,                    // own X25519 secret
@@ -204,7 +203,6 @@ pub const ClientContext = struct {
 };
 
 pub const ServerContext = struct {
-    io: std.Io,                              // CSPRNG
     id_keypair: crypto.sign.Ed25519.KeyPair, // own identity
     peer_id_public: Ed25519.PublicKey,       // client identity
     ephemeral_sk: [32]u8,                    // own X25519 secret
@@ -284,6 +282,6 @@ The nonce embeds a monotonic u64 counter for replay/reordering protection.
 - `std.crypto.auth.hmac.sha2.HmacSha256` — HMAC for Finished messages
 - `std.crypto.hash.sha2.Sha256` — transcript hashing and HKDF
 - `std.crypto.timing_safe` — constant-time MAC comparison
-- `std.Io.randomSecure` — CSPRNG via kernel entropy
+- `zio.randomSecure` — CSPRNG via kernel entropy
 - `polyrole_cs` — state machine framework
 - `polyrole_cs.channel.TlsChannel` — encrypted data transport

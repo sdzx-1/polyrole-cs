@@ -49,7 +49,7 @@ ClientHello ──(client)──▶ ServerHello ──(server)──▶ ClientFi
 | **HMAC-SHA256** | Finished 消息认证 |
 | **SHA256** | Transcript 链式哈希 |
 | **HKDF-SHA256** | 从 `shared_secret` 派生独立密钥 |
-| **CSPRNG** (`Io.randomSecure`) | 生成随机 nonce 和临时密钥 |
+| **CSPRNG** (`zio.randomSecure`) | 生成随机 nonce 和临时密钥 |
 
 ---
 
@@ -65,10 +65,10 @@ Client 在 `process()` 中执行：
 
 ```zig
 // 1. 生成随机 nonce
-const nonce = try randomBytes(ctx.io, 24);
+const nonce = try randomBytes(24);
 
 // 2. 生成临时 X25519 密钥对
-const kp = generateX25519Keypair(ctx.io);
+const kp = try generateX25519Keypair();
 
 // 3. 保存到 Context（后续步骤需要）
 ctx.own_nonce = nonce;
@@ -113,8 +113,8 @@ Server 完成 ECDH 计算、签名和 MAC，是最关键的一步。
 
 ```zig
 // 1. 生成 Server 的随机 nonce 和临时密钥
-const nonce = try randomBytes(ctx.io, 24);
-const kp = generateX25519Keypair(ctx.io);
+const nonce = try randomBytes(24);
+const kp = try generateX25519Keypair();
 
 // 2. ECDH：计算共享密钥
 const shared_secret = crypto.dh.X25519.scalarmult(
@@ -418,11 +418,11 @@ mac_c = HMAC(hk, "client_fin" || t4)
 // ctx.read_key  = [32]u8 (接收方向密钥)
 
 var tc: TlsChannel = undefined;
-try tc.init(io, allocator, stream, ctx.write_key, ctx.read_key, 512);
+try tc.init(allocator, &sc, ctx.write_key, ctx.read_key, 512);
 defer tc.deinit(allocator);
 
 // 通过 symmetric_run 驱动后续协议
-try R.symmetric_run(.client, &app_ctx, &tc, AppProtocol.Start);
+try R.symmetric_run(.client, &app_ctx, &tc, AppProtocol.Start, null);
 ```
 
 `TlsChannel` 的详细设计见 `src/channel.zig` 文档注释。核心机制：
