@@ -1,12 +1,11 @@
 const std = @import("std");
-const Io = std.Io;
+const zio = @import("zio");
 const root = @import("root.zig");
 const StateMap = root.StateMap;
 const Role = root.Role;
 const Data = root.Data;
 const ProtocolInfo = root.ProtocolInfo;
 const Exit = root.Exit;
-const net = Io.net;
 
 fn returnsError(comptime fun: anytype) bool {
     const ret = @typeInfo(@TypeOf(fun)).@"fn".return_type.?;
@@ -188,40 +187,42 @@ test "simulate" {
 }
 test "symmetric run" {
     const testing = std.testing;
-    const io = testing.io;
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
     const allocator = testing.allocator;
     const P = CreateTestProtocol("p2", Exit);
     const R = Runner(P.A);
     var client_context: i32 = 0;
     var server_context: i32 = 0;
 
-    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
-    var server = try localhost.listen(io, .{});
-    defer server.deinit(io);
+    const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try localhost.listen(.{});
+    defer server.close();
 
     const StreamChannel = root.channel.StreamChannel;
 
     const S = struct {
-        fn clientFn(server_address: net.IpAddress, ctx: *i32) !void {
-            var stream = try server_address.connect(io, .{ .mode = .stream });
-            defer stream.close(io);
+        fn clientFn(server_address: zio.net.Address, ctx: *i32) !void {
+            var stream = try server_address.connect(.{});
+            defer stream.close();
 
             var stream_channel: StreamChannel = undefined;
-            try stream_channel.init(io, allocator, stream, 100, 100);
+            try stream_channel.init(allocator, stream, 100, 100);
             defer stream_channel.deinit(allocator);
 
             try R.symmetric_run(.client, ctx, &stream_channel, P.A);
         }
     };
 
-    var client_task = try io.concurrent(S.clientFn, .{ server.socket.address, &client_context });
-    defer client_task.cancel(io) catch {};
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(S.clientFn, .{ server.socket.address, &client_context });
 
-    var stream = try server.accept(io);
-    defer stream.close(io);
+    var stream = try server.accept(.{});
+    defer stream.close();
 
     var stream_channel: StreamChannel = undefined;
-    try stream_channel.init(io, allocator, stream, 100, 100);
+    try stream_channel.init(allocator, stream, 100, 100);
     defer stream_channel.deinit(allocator);
 
     try R.symmetric_run(.server, &server_context, &stream_channel, P.A);
@@ -231,7 +232,8 @@ test "symmetric run" {
 
 test "tls channel: symmetric_run over encrypted channel" {
     const testing = std.testing;
-    const io = testing.io;
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
     const allocator = testing.allocator;
     const crypto = std.crypto;
     const tls = @import("protocol/tls.zig");
@@ -246,28 +248,28 @@ test "tls channel: symmetric_run over encrypted channel" {
     const R_pp = Runner(P.A);
     const R_tls = Runner(tls.ClientHello);
 
-    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
-    var listener = try localhost.listen(io, .{});
-    defer listener.deinit(io);
+    const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try localhost.listen(.{});
+    defer listener.close();
 
     var client_counter: i32 = 0;
     var server_counter: i32 = 0;
 
     const ClientTask = struct {
         fn run(
-            addr: net.IpAddress,
+            addr: zio.net.Address,
             kp: crypto.sign.Ed25519.KeyPair,
             peer_pk: crypto.sign.Ed25519.PublicKey,
             counter: *i32,
         ) !void {
-            var stream = try addr.connect(io, .{ .mode = .stream });
-            defer stream.close(io);
+            var stream = try addr.connect(.{});
+            defer stream.close();
 
             // Phase 1: TLS handshake
-            var tls_ctx = tls.ClientContext.init(io, kp, peer_pk);
+            var tls_ctx = tls.ClientContext.init(testing.io, kp, peer_pk);
 
             var sc: StreamChannel = undefined;
-            try sc.init(io, allocator, stream, 256, 256);
+            try sc.init(allocator, stream, 256, 256);
             defer sc.deinit(allocator);
             try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello);
 
@@ -283,21 +285,22 @@ test "tls channel: symmetric_run over encrypted channel" {
         }
     };
 
-    var client_task = try io.concurrent(ClientTask.run, .{
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(ClientTask.run, .{
         listener.socket.address,
         kp_c,
         kp_s.public_key,
         &client_counter,
     });
-    defer client_task.cancel(io) catch {};
 
-    var stream = try listener.accept(io);
-    defer stream.close(io);
+    var stream = try listener.accept(.{});
+    defer stream.close();
 
     // Phase 1: TLS handshake
-    var tls_ctx = tls.ServerContext.init(io, kp_s, kp_c.public_key);
+    var tls_ctx = tls.ServerContext.init(testing.io, kp_s, kp_c.public_key);
     var sc: StreamChannel = undefined;
-    try sc.init(io, allocator, stream, 256, 256);
+    try sc.init(allocator, stream, 256, 256);
     defer sc.deinit(allocator);
     try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello);
 

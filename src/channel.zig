@@ -1,8 +1,9 @@
 const std = @import("std");
+const Io = std.Io;
 const codec = @import("codec.zig");
 const crypto = std.crypto;
-const Io = std.Io;
-const Stream = Io.net.Stream;
+const zio = @import("zio");
+const Stream = zio.net.Stream;
 
 ///stream channel
 pub const StreamChannel = struct {
@@ -14,9 +15,8 @@ pub const StreamChannel = struct {
 
     pub fn init(
         self: *@This(),
-        io: Io,
         gpa: std.mem.Allocator,
-        stream: Io.net.Stream,
+        stream: zio.net.Stream,
         r_size: usize,
         w_size: usize,
     ) !void {
@@ -25,8 +25,8 @@ pub const StreamChannel = struct {
         const wbuff = try gpa.alloc(u8, w_size);
         self.rbuff = rbuff;
         self.wbuff = wbuff;
-        self.stream_reader = stream.reader(io, rbuff);
-        self.stream_writer = stream.writer(io, wbuff);
+        self.stream_reader = stream.reader(rbuff);
+        self.stream_writer = stream.writer(wbuff);
     }
 
     pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("zio");
 const polyrole = @import("../../root.zig");
 const Runner = polyrole.runner.Runner;
 const nm = @import("root.zig");
@@ -43,12 +44,12 @@ test "模拟：基本流程" {
 
 test "对称运行：通过 StreamChannel 通信" {
     const testing = std.testing;
-    const io = testing.io;
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
     const allocator = testing.allocator;
-    const net = std.Io.net;
 
     var client: types.ClientContext = .{
-        .io = io,
+        .io = testing.io,
         .allocator = allocator,
         .remaining = 3,
         .interval_ms = 0,
@@ -57,34 +58,35 @@ test "对称运行：通过 StreamChannel 通信" {
     defer client.deinit();
     var server: types.ServerContext = .{};
 
-    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
-    var listener = try localhost.listen(io, .{});
-    defer listener.deinit(io);
+    const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try localhost.listen(.{});
+    defer listener.close();
 
     const StreamChannel = polyrole.channel.StreamChannel;
     const R = Runner(nm.PingQuery);
 
     const C = struct {
-        fn run(addr: net.IpAddress, ctx: *types.ClientContext) !void {
-            var stream = try addr.connect(io, .{ .mode = .stream });
-            defer stream.close(io);
+        fn run(addr: zio.net.Address, ctx: *types.ClientContext) !void {
+            var stream = try addr.connect(.{});
+            defer stream.close();
 
             var ch: StreamChannel = undefined;
-            try ch.init(io, allocator, stream, 128, 128);
+            try ch.init(allocator, stream, 128, 128);
             defer ch.deinit(allocator);
 
             try R.symmetric_run(.client, ctx, &ch, nm.PingQuery);
         }
     };
 
-    var client_task = try io.concurrent(C.run, .{ listener.socket.address, &client });
-    defer client_task.cancel(io) catch {};
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(C.run, .{ listener.socket.address, &client });
 
-    var stream = try listener.accept(io);
-    defer stream.close(io);
+    var stream = try listener.accept(.{});
+    defer stream.close();
 
     var ch: StreamChannel = undefined;
-    try ch.init(io, allocator, stream, 128, 128);
+    try ch.init(allocator, stream, 128, 128);
     defer ch.deinit(allocator);
 
     try R.symmetric_run(.server, &server, &ch, nm.PingQuery);

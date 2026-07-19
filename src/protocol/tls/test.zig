@@ -1,5 +1,6 @@
 const std = @import("std");
 const crypto = std.crypto;
+const zio = @import("zio");
 const polyrole = @import("../../root.zig");
 const Runner = polyrole.runner.Runner;
 const tls = @import("root.zig");
@@ -27,29 +28,29 @@ test "simulate handshake only" {
 // 通过 TCP 网络通道运行完整握手：验证编解码 + 网络传输
 test "symmetric run handshake" {
     const testing = std.testing;
-    const io = testing.io;
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
     const allocator = testing.allocator;
-    const net = std.Io.net;
 
     const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
     var client = types.ClientContext.init(testing.io, kp_c, kp_s.public_key);
     var server = types.ServerContext.init(testing.io, kp_s, kp_c.public_key);
 
-    const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
-    var listener = try localhost.listen(io, .{});
-    defer listener.deinit(io);
+    const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try localhost.listen(.{});
+    defer listener.close();
 
     const StreamChannel = polyrole.channel.StreamChannel;
     const R = Runner(tls.ClientHello);
 
     const S = struct {
-        fn clientFn(address: net.IpAddress, ctx: *types.ClientContext) !void {
-            var stream = try address.connect(io, .{ .mode = .stream });
-            defer stream.close(io);
+        fn clientFn(address: zio.net.Address, ctx: *types.ClientContext) !void {
+            var stream = try address.connect(.{});
+            defer stream.close();
 
             var ch: StreamChannel = undefined;
-            try ch.init(io, allocator, stream, 256, 256);
+            try ch.init(allocator, stream, 256, 256);
             defer ch.deinit(allocator);
 
             try R.symmetric_run(.client, ctx, &ch, tls.ClientHello);
@@ -57,14 +58,15 @@ test "symmetric run handshake" {
         }
     };
 
-    var client_task = try io.concurrent(S.clientFn, .{ listener.socket.address, &client });
-    defer client_task.cancel(io) catch {};
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(S.clientFn, .{ listener.socket.address, &client });
 
-    var stream = try listener.accept(io);
-    defer stream.close(io);
+    var stream = try listener.accept(.{});
+    defer stream.close();
 
     var ch: StreamChannel = undefined;
-    try ch.init(io, allocator, stream, 256, 256);
+    try ch.init(allocator, stream, 256, 256);
     defer ch.deinit(allocator);
 
     try R.symmetric_run(.server, &server, &ch, tls.ClientHello);
