@@ -38,8 +38,6 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
                 try codec.encode(&writer, state_id, val);
                 const data = buf[0..writer.end];
 
-                self.mux.write_lock.lockUncancelable();
-                defer self.mux.write_lock.unlock();
                 const sw = &self.mux.stream_writer.interface;
                 try sw.writeByte(self.protocol_id);
                 try sw.writeInt(u16, @intCast(data.len), .big);
