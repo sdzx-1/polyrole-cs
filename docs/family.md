@@ -1,42 +1,28 @@
 # 协议族 (Protocol Family) 设计
 
-## 1. 问题
+## 1. 概述
 
-单协议模型：一个 TCP 连接跑一个协议（`StreamChannel` + `Runner(State)`）。
+单协议模型每连接跑一个协议，浪费端口资源。协议族让多个协议共享一个 TCP 连接，消息按协议 ID 多路复用。
 
-```
-TCP → StreamChannel → Runner(PingQuery).symmetric_run(...)
-```
-
-跑多个协议时，最简单的办法是每个协议独占一个 TCP 连接：
-
-```
-TCP₁ → StreamChannel₁ → Runner(A).symmetric_run(...)
-TCP₂ → StreamChannel₂ → Runner(B).symmetric_run(...)
-```
-
-**问题**：浪费端口资源。客户端需要 N 个连接，服务端需要 N 倍的 accept/fd。
-
-## 2. 方案
-
-多个协议**共享一个 TCP 连接**，消息按协议 ID 多路复用。对标单协议的两层架构：
+对标单协议的两层架构：
 
 ```
 单协议:                          协议族:
 
 runner.zig                        family_runner.zig
   Runner(State)                     FamilyRunner(.{A, B, C})
-  驱动单个状态机                    管理多协议并发生命周期
+  驱动单个状态机                    管理多协议并发
   ↑ 不关心底层传输                   ↑ 不关心底层传输
   ↓                                 ↓
 channel.zig                        family_mux_channel.zig
   StreamChannel                      MultiplexChannel(N)
-  send/recv                          SubChannel.send/recv
 ```
 
-`FamilyRunner` 只管协议调度（spawn fiber、管理 Exit）；`MultiplexChannel` 只管传输（TCP 共享、消息路由）。
+`FamilyRunner` 管协议调度，`MultiplexChannel` 管传输。
 
-## 3. Wire 格式
+## 2. Wire 格式
+
+每条消息前缀协议 ID 和长度：
 
 ```
 ┌──────────────┬──────────────────┬─────────────────────────┐
@@ -45,129 +31,149 @@ channel.zig                        family_mux_channel.zig
 └──────────────┴──────────────────┴─────────────────────────┘
 ```
 
-`payload` 是现有 `codec.encode()` 的输出（`state_id + tag + data`），完全不动。
+`payload` 是现有 `codec.encode()` 的输出，完全不动。
 
-发送时由 `MultiplexChannel` 自动前缀 `protocol_id` 和 `payload_len`，协议代码无感知。
-
-## 4. MultiplexChannel（传输层）
+## 3. MultiplexChannel —— 传输层
 
 ```
-                      ┌────────────────────────────────────────┐
-                      │          MultiplexChannel(N)           │
-                      │                                        │
- TCP ◀──── read ──── │  Reader Fiber (独立 zio fiber)          │
-                      │  循环: read id → read len → read data  │
-                      │  → alloc.dupe → sub[id].recv_ch.send   │
-                      │                                        │
- TCP ──── write ──── │  SubChannel.send() 直接写 TCP           │
-                      │  + zio.Mutex 串行化                     │
-                      │                                        │
-                      │  SubChannel[0] ── symmetric_run(A)     │
-                      │  SubChannel[1] ── symmetric_run(B)     │
-                      └────────────────────────────────────────┘
+                      ┌──────────────────────────────────────┐
+                      │       MultiplexChannel(N)             │
+                      │                                       │
+ TCP ◀── read ────── │  Reader Fiber (独立 zio fiber)         │
+                      │  循环: takeByte → takeInt(len)        │
+                      │  → take(data) → alloc → recv_ch.send  │
+                      │                                       │
+ TCP ── write ────── │  SubChannel.send() 直接写 + write_lock │
+                      │                                       │
+                      │  SubChannel[0].recv() ← recv_ch       │
+                      │  SubChannel[1].recv() ← recv_ch       │
+                      └──────────────────────────────────────┘
 ```
 
-### 设计决策
+### 3.1 架构决策
 
 | 决策 | 理由 |
 |------|------|
-| 无 Writer Fiber | send() 直接写 TCP + 锁。省掉一个 fiber，避免多 channel select 复杂度 |
-| Reader Fiber 存在 | 必须有一个地方解析 protocol_id 并路由到正确队列 |
-| `zio.Channel([]const u8)` | 内建阻塞/唤醒 + cancel 支持 |
-| stack 编码 buffer | send 先编码到栈上 buf，拿到 len，再写 wire header + data |
+| **Reader fiber 独立** | 单一入口从 TCP 读，解析 `protocol_id` 后路由到正确队列。协议代码不接触 TCP |
+| **send 直接写 + 锁** | 不需要 writer fiber。每个 `SubChannel.send()` 框架 `[id][len][data]` 后直接写 TCP，`write_lock` 串行化 |
+| **recv 从 `zio.Channel` 阻塞读** | `zio.Channel([]const u8)` 内建阻塞/唤醒。reader fiber 写，协议 fiber 读 |
+| **无界路由和缓冲** | 不再需要 `SubChannel.recv()` 之间的消息转发——所有消息由 reader fiber 统一分发 |
 
-### 内存模型
+### 3.2 内存模型
+
+Reader fiber 从 TCP 读到数据后，`allocator.dupe()` 复制到堆上，通过 `recv_ch.send()` 将所有权转移给协议 fiber。协议 fiber 在 `recv()` 中 `receive()` 后 `free`。
 
 ```
-Reader Fiber:    alloc.dupe → channel.send(slice)
-Protocol Fiber:  channel.receive() → codec.decode → allocator.free
+Reader Fiber:       alloc.dupe() → channel.send(slice)
+Protocol Fiber:     channel.receive() → codec.decode → allocator.free()
 ```
 
-每个消息在堆上短暂存在一次——reader 分配，protocol 释放。
+每条消息在堆上短暂存在一次——reader 分配，protocol 释放。
 
-### SubChannel 接口
+### 3.3 生命周期
 
-与 `StreamChannel` 完全一致：
+**init**: 分配读写 buffer，初始化所有 SubChannel 的 `recv_ch`，spawn reader fiber。
+
+**deinit**（顺序严格）:
+1. `shutdown(.receive)` — 发 EOF 信号唤醒 reader fiber 的 `takeByte()`
+2. `reader_handle.join()` — 等待 reader fiber 退出
+3. 关闭所有 `recv_ch`，通知等待中的协议 fiber
+4. `stream.close()` — 关闭 TCP
+5. `free(rbuff)`, `free(wbuff)`
+
+第 1 步是关键——`takeByte()` 阻塞在 TCP 读上，`shutdown(.receive)` 让读端收到 EOF 后返回错误，reader fiber 退出循环。
+
+### 3.4 SubChannel 接口
+
+与 `StreamChannel` 签名完全一致，`symmetric_run` 零改动：
 
 ```zig
-pub fn send(self: *SubChannel, state_id: anytype, _: type, val: anytype) !void
-pub fn recv(self: *SubChannel, state_id: anytype, T: type) !T
+pub fn send(self, state_id: anytype, _: type, val: anytype) !void
+pub fn recv(self, state_id: anytype, T: type) !T
 ```
 
-`symmetric_run` 零改动。
+`send` 内部：`codec.encode` 编码消息 → 前缀 `[protocol_id:u8][len:u16]` → `write_lock` 锁 → 写 TCP → `flush` → 解锁。
 
-### 生命周期
+`recv` 内部：`recv_ch.receive()` 阻塞取数据 → `Io.Reader.fixed` → `codec.decode` → `allocator.free`。
 
-- `init(allocator, stream)` — 创建 SubChannel 数组 + spawn Reader Fiber
-- `subChannel(id)` — 返回 `*SubChannel`
-- 协议 Exit → 对应 SubChannel 标记 closed → Reader 跳过该 ID 的路由
-- 全部 SubChannel closed → Reader Fiber 退出 → `deinit()` 回收
-
-## 5. FamilyRunner（调度层）
+## 4. FamilyRunner —— 调度层
 
 ```zig
 pub fn FamilyRunner(comptime states: anytype) type {
-    // states = .{ ProtocolA.State, ProtocolB.State, ... }
+    // states = .{ ProtoA.State, ProtoB.State, ... }
     return struct {
-        pub fn run(
-            allocator: std.mem.Allocator,
-            comptime role: Role,
-            contexts: anytype,
-            mux: *MultiplexChannel(states.len),
-            recv_timeout_ms: ?u64,
-        ) !void { ... }
+        pub fn initServer(mux, contexts, recv_timeout_ms) !void { ... }
+        pub fn start(mux, comptime id, ctx, recv_timeout_ms) !void { ... }
     };
 }
 ```
 
-**职责**：
-- 为每个子协议创建 fiber（通过 `zio.Group.spawn`）
-- 传递 `SubChannel` 给各协议的 `symmetric_run`
-- 某协议 Exit → 关闭对应 SubChannel
-- 全部 Exit → `run()` 返回
+### 4.1 Server 端：initServer
 
-**不管的事**：TCP、wire 格式、消息路由——这些全是 `MultiplexChannel` 的。
+预启动所有协议的服务端 handler。每个 handler 在独立 fiber 中运行 `symmetric_run(.server, ...)`。Handler 的第一步是 `recv()` —— 阻塞在 `recv_ch.receive()` 上，等待客户端发来首帧。
 
-## 6. 与单协议 Runner 的对比
+```
+initServer(&mux, .{&ctx_a, &ctx_b}, timeout)
+  ├─ spawn: symmetric_run(.server, &ctx_a, subChannel[0])
+  └─ spawn: symmetric_run(.server, &ctx_b, subChannel[1])
+```
+
+所有 handler 立即返回（非阻塞），调用方可以继续做其他事情。
+
+### 4.2 Client 端：start
+
+阻塞调用——在主调 fiber 中运行 `symmetric_run(.client, ctx, subChannel[id], ...)`，直到协议完成或出错。
+
+```zig
+try Fr.start(&mux, 0, &client_ctx, null);   // 运行协议 0
+try Fr.start(&mux, 1, &client_ctx2, 5000);   // 运行协议 1，5s 超时
+```
+
+### 4.3 并发模型
+
+`start()` 在主调 fiber 中阻塞执行。要同时跑多个客户端协议，用 `zio.Group.spawn`：
+
+```zig
+var g: zio.Group = .init;
+defer g.cancel();
+try g.spawn(Fr.start, .{&mux, 0, &ctx_a, null});
+try g.spawn(Fr.start, .{&mux, 1, &ctx_b, null});
+```
+
+## 5. 与 Runner 的对比
 
 | | Runner(State) | FamilyRunner(.{A, B, C}) |
 |---|---|---|
-| 驱动对象 | 单个状态机 | 多个状态机（并发） |
-| Channel 类型 | `StreamChannel` / `TlsChannel` | `MultiplexChannel.subChannel(id)` |
-| 并发模型 | 同步循环 | zio fiber 并发 |
-| send/recv | 独占 TCP | 共享 TCP（SubChannel 代理） |
-| 退出 | Exit 状态 → 返回 | 所有协议 Exit → 返回 |
+| 驱动对象 | 单个状态机 | 多个状态机 |
+| Channel 类型 | `StreamChannel` | `MultiplexChannel.subChannel(id)` |
+| 并发模型 | 同步循环 | zio fiber |
+| send/recv | 独占 TCP | 共享 TCP，reader fiber 路由 |
+| 退出 | Exit 状态 → 返回 | 协议 Exit → handler fiber 退出 |
 
-## 7. API 示例
+## 6. API 示例
 
 ```zig
 const Mux = MultiplexChannel(2);
-var mux = try Mux.init(allocator, tcp_stream);
-defer mux.deinit();
-
 const Fr = FamilyRunner(.{ ProtocolA.State, ProtocolB.State });
 
-// 服务端
-try Fr.run(.server, .{ &ctx_a, &ctx_b }, &mux, null);
+// ── Server ──
+var mux: Mux = undefined;
+try mux.init(allocator, tcp_stream, 256, 256);
+defer mux.deinit();
+try Fr.initServer(&mux, .{ &srv_ctx_a, &srv_ctx_b }, null);
 
-// 客户端
-try Fr.run(.client, .{ &ctx_a, &ctx_b }, &mux, null);
+// ── Client ──
+try Fr.start(&mux, 0, &cli_ctx_a, 5000);
 ```
 
-内部自动为 ProtocolA 和 ProtocolB 各 spawn 一个 fiber，共享同一 TCP。
-
-## 8. 文件结构
+## 7. 文件结构
 
 ```
 src/
-├── family_mux_channel.zig    ← 传输层：MultiplexChannel(N)
-├── family_runner.zig         ← 调度层：FamilyRunner(states) + 测试
-├── root.zig                  ← pub const + comptime test import
+├── family_mux_channel.zig    ← 传输层：MultiplexChannel + reader fiber
+├── family_runner.zig         ← 调度层：FamilyRunner + 测试
+├── root.zig                  ← pub const 导出
 └── runner.zig                ← 不动
 docs/
 └── family.md                 ← 本文档
 ```
-
-## 9. 测试
-
-在 `family_runner.zig` 中，两个 `CreateTestProtocol` 在一个 `MultiplexChannel(2)` 上并发运行，验证消息不串扰。
