@@ -245,6 +245,45 @@ test "symmetric run" {
     try testing.expectEqual(server_context, 10);
 }
 
+test "symmetric_run: recv timeout" {
+    const testing = std.testing;
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const allocator = testing.allocator;
+
+    const P = CreateTestProtocol("timeout", Exit);
+    const R = Runner(P.A);
+    const StreamChannel = root.channel.StreamChannel;
+
+    const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try localhost.listen(.{});
+    defer listener.close();
+
+    // Client connects but sends nothing — server recv should timeout
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(struct {
+        fn run(addr: zio.net.Address) !void {
+            var stream = try addr.connect(.{});
+            defer stream.close();
+            // Hold the connection open forever, never send a protocol message
+            try zio.sleep(zio.Duration.fromSeconds(60));
+        }
+    }.run, .{listener.socket.address});
+
+    var stream = try listener.accept(.{});
+    defer stream.close();
+
+    var ctx: i32 = 0;
+    var ch: StreamChannel = undefined;
+    try ch.init(allocator, stream, 128, 128);
+    defer ch.deinit(allocator);
+
+    // P.A is client role. Server recvs first, client never sends → timeout
+    // zio's reader layer converts fiber Canceled to ReadFailed
+    try testing.expectError(error.ReadFailed, R.symmetric_run(.server, &ctx, &ch, P.A, 100));
+}
+
 test "tls channel: symmetric_run over encrypted channel" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
