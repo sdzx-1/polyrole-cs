@@ -131,13 +131,16 @@ pub fn Runner(
                             try channel.send(state_id, State, res);
                             break :blk res;
                         } else {
-                            var timeout: zio.AutoCancel = .init;
-                            defer timeout.clear();
-                            if (recv_timeout_ms) |ms| {
-                                timeout.set(zio.Timeout.fromMilliseconds(ms));
-                            }
-                            const res = try channel.recv(state_id, State);
-                            timeout.clear();
+                            const res =
+                                blkres: {
+                                    var timeout: zio.AutoCancel = .init;
+                                    defer timeout.clear();
+                                    if (recv_timeout_ms) |ms| {
+                                        timeout.set(zio.Timeout.fromMilliseconds(ms));
+                                    }
+                                    break :blkres try channel.recv(state_id, State);
+                                };
+
                             if (@hasDecl(State, "preprocess")) {
                                 const preprocess = State.preprocess;
                                 if (comptime returnsError(preprocess)) try preprocess(ctx, res) else preprocess(ctx, res);
@@ -154,7 +157,6 @@ pub fn Runner(
                 },
             }
         }
-
     };
 }
 
