@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("zio");
 const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
@@ -17,10 +18,10 @@ pub const PingQuery = union(enum) {
 
     pub fn process(ctx: *types.ClientContext) !@This() {
         if (ctx.remaining == 0) return .close;
-        if (ctx.seq_num > 0) try types.sleepMs(ctx.io, ctx.interval_ms);
+        if (ctx.seq_num > 0) try types.sleepMs(ctx.interval_ms);
         ctx.remaining -= 1;
 
-        const now = types.monotonicMs(ctx.io);
+        const now = types.monotonicMs();
         ctx.last_send_ms = now;
         ctx.seq_num += 1;
 
@@ -49,8 +50,8 @@ pub const PingResponse = union(enum) {
 
     pub fn preprocess(ctx: *types.ClientContext, result: @This()) !void {
         const pong = result.to_client.data;
-        const now_ms = types.monotonicMs(ctx.io);
-        const now_ts = std.Io.Timestamp.now(ctx.io, .real);
+        const now_ms = types.monotonicMs();
+        const now_ts = zio.Timestamp.now(.real);
 
         const rtt_ms = now_ms -| ctx.last_send_ms;
 
@@ -59,7 +60,5 @@ pub const PingResponse = union(enum) {
             .rtt_ms = rtt_ms,
             .timestamp = now_ts,
         });
-
-        if (ctx.results.items.len >= 30) try ctx.flushResults();
     }
 };

@@ -2,8 +2,6 @@ const std = @import("std");
 const crypto = std.crypto;
 
 pub const ClientContext = struct {
-    /// Io interface for CSPRNG
-    io: std.Io,
     /// Own Ed25519 identity keypair
     id_keypair: crypto.sign.Ed25519.KeyPair,
     /// Server's Ed25519 identity public key
@@ -36,9 +34,8 @@ pub const ClientContext = struct {
     /// Derived application key (for TlsChannel read)
     read_key: [32]u8,
 
-    pub fn init(io: std.Io, id_keypair: crypto.sign.Ed25519.KeyPair, peer_id_public: crypto.sign.Ed25519.PublicKey) ClientContext {
+    pub fn init(id_keypair: crypto.sign.Ed25519.KeyPair, peer_id_public: crypto.sign.Ed25519.PublicKey) ClientContext {
         return .{
-            .io = io,
             .id_keypair = id_keypair,
             .peer_id_public = peer_id_public,
             .ephemeral_sk = undefined,
@@ -67,8 +64,6 @@ pub const ClientContext = struct {
 };
 
 pub const ServerContext = struct {
-    /// Io interface for CSPRNG
-    io: std.Io,
     /// Own Ed25519 identity keypair
     id_keypair: crypto.sign.Ed25519.KeyPair,
     /// Client's Ed25519 identity public key
@@ -100,9 +95,8 @@ pub const ServerContext = struct {
     /// Derived application key (for TlsChannel write)
     write_key: [32]u8,
 
-    pub fn init(io: std.Io, id_keypair: crypto.sign.Ed25519.KeyPair, peer_id_public: crypto.sign.Ed25519.PublicKey) ServerContext {
+    pub fn init(id_keypair: crypto.sign.Ed25519.KeyPair, peer_id_public: crypto.sign.Ed25519.PublicKey) ServerContext {
         return .{
-            .io = io,
             .id_keypair = id_keypair,
             .peer_id_public = peer_id_public,
             .ephemeral_sk = undefined,

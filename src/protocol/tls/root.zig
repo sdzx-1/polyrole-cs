@@ -1,5 +1,6 @@
 const std = @import("std");
 const crypto = std.crypto;
+const zio = @import("zio");
 const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
@@ -50,14 +51,16 @@ fn sha256(parts: anytype) [32]u8 {
     return out;
 }
 
-fn randomBytes(io: std.Io, comptime n: usize) ![n]u8 {
+fn randomBytes(comptime n: usize) ![n]u8 {
     var buf: [n]u8 = undefined;
-    try io.randomSecure(&buf);
+    try zio.randomSecure(&buf);
     return buf;
 }
 
-fn generateX25519Keypair(io: std.Io) crypto.dh.X25519.KeyPair {
-    return crypto.dh.X25519.KeyPair.generate(io);
+fn generateX25519Keypair() !crypto.dh.X25519.KeyPair {
+    var seed: [crypto.dh.X25519.seed_length]u8 = undefined;
+    try zio.randomSecure(&seed);
+    return try crypto.dh.X25519.KeyPair.generateDeterministic(seed);
 }
 
 // ─────────────────── Step 1: ClientHello ───────────────────
@@ -68,8 +71,8 @@ pub const ClientHello = union(enum) {
     pub const info: TlsInfo = .{ .agent = .client, .name = "ClientHello" };
 
     pub fn process(ctx: *types.ClientContext) !@This() {
-        const nonce = try randomBytes(ctx.io, 24);
-        const kp = generateX25519Keypair(ctx.io);
+        const nonce = try randomBytes(24);
+        const kp = try generateX25519Keypair();
 
         ctx.own_nonce = nonce;
         ctx.ephemeral_sk = kp.secret_key;
@@ -99,8 +102,8 @@ pub const ServerHello = union(enum) {
     pub const info: TlsInfo = .{ .agent = .server, .name = "ServerHello" };
 
     pub fn process(ctx: *types.ServerContext) !@This() {
-        const nonce = try randomBytes(ctx.io, 24);
-        const kp = generateX25519Keypair(ctx.io);
+        const nonce = try randomBytes(24);
+        const kp = try generateX25519Keypair();
 
         const shared_secret = crypto.dh.X25519.scalarmult(kp.secret_key, ctx.peer_ephemeral_pk) catch
             return error.DhFailed;

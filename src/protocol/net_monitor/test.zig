@@ -7,11 +7,7 @@ const types = @import("context.zig");
 
 test "模拟：基本流程" {
     const testing = std.testing;
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-    const io = rt.io();
     var client: types.ClientContext = .{
-        .io = io,
         .allocator = testing.allocator,
         .remaining = 5,
         .interval_ms = 0,
@@ -49,11 +45,9 @@ test "对称运行：通过 StreamChannel 通信" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
     defer rt.deinit();
-    const io = rt.io();
     const allocator = testing.allocator;
 
     var client: types.ClientContext = .{
-        .io = io,
         .allocator = allocator,
         .remaining = 3,
         .interval_ms = 0,
