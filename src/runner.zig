@@ -234,12 +234,13 @@ test "tls channel: symmetric_run over encrypted channel" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
     defer rt.deinit();
+    const io = rt.io();
     const allocator = testing.allocator;
     const crypto = std.crypto;
     const tls = @import("protocol/tls.zig");
 
-    const kp_c = crypto.sign.Ed25519.KeyPair.generate(testing.io);
-    const kp_s = crypto.sign.Ed25519.KeyPair.generate(testing.io);
+    const kp_c = crypto.sign.Ed25519.KeyPair.generate(io);
+    const kp_s = crypto.sign.Ed25519.KeyPair.generate(io);
 
     const StreamChannel = root.channel.StreamChannel;
     const TlsChannel = root.channel.TlsChannel;
@@ -257,6 +258,7 @@ test "tls channel: symmetric_run over encrypted channel" {
 
     const ClientTask = struct {
         fn run(
+            io_: std.Io,
             addr: zio.net.Address,
             kp: crypto.sign.Ed25519.KeyPair,
             peer_pk: crypto.sign.Ed25519.PublicKey,
@@ -266,7 +268,7 @@ test "tls channel: symmetric_run over encrypted channel" {
             defer stream.close();
 
             // Phase 1: TLS handshake
-            var tls_ctx = tls.ClientContext.init(testing.io, kp, peer_pk);
+            var tls_ctx = tls.ClientContext.init(io_, kp, peer_pk);
 
             var sc: StreamChannel = undefined;
             try sc.init(allocator, stream, 256, 256);
@@ -288,6 +290,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     var group: zio.Group = .init;
     defer group.cancel();
     try group.spawn(ClientTask.run, .{
+        io,
         listener.socket.address,
         kp_c,
         kp_s.public_key,
@@ -298,7 +301,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     defer stream.close();
 
     // Phase 1: TLS handshake
-    var tls_ctx = tls.ServerContext.init(testing.io, kp_s, kp_c.public_key);
+    var tls_ctx = tls.ServerContext.init(io, kp_s, kp_c.public_key);
     var sc: StreamChannel = undefined;
     try sc.init(allocator, stream, 256, 256);
     defer sc.deinit(allocator);
