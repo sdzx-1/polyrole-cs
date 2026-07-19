@@ -283,6 +283,7 @@ test "symmetric_run: recv timeout" {
     // P.A is client role. Server recvs first, client never sends → timeout
     // zio's reader layer converts fiber Canceled to ReadFailed
     try testing.expectError(error.ReadFailed, R.symmetric_run(.server, &ctx, &ch, P.A, 100));
+    try testing.expectEqual(error.Canceled, ch.stream_reader.err.?);
 }
 
 test "tls channel: symmetric_run over encrypted channel" {
