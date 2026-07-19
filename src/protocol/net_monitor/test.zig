@@ -72,7 +72,7 @@ test "对称运行：通过 StreamChannel 通信" {
             try ch.init(allocator, stream, 128, 128);
             defer ch.deinit(allocator);
 
-            try R.symmetric_run(.client, ctx, &ch, nm.PingQuery);
+            try R.symmetric_run(.client, ctx, &ch, nm.PingQuery, null);
         }
     };
 
@@ -87,7 +87,7 @@ test "对称运行：通过 StreamChannel 通信" {
     try ch.init(allocator, stream, 128, 128);
     defer ch.deinit(allocator);
 
-    try R.symmetric_run(.server, &server, &ch, nm.PingQuery);
+    try R.symmetric_run(.server, &server, &ch, nm.PingQuery, null);
 
     try testing.expectEqual(@as(u64, 3), client.seq_num);
     try testing.expectEqual(@as(usize, 3), client.results.items.len);

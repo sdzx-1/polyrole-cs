@@ -104,11 +104,18 @@ pub fn Runner(
         ///
         /// The `channel` must implement `send(state_id, State, result)`
         /// and `recv(state_id, State) -> result`.
+        ///
+        /// If `recv_timeout_ms` is set, each `channel.recv()` call is guarded
+        /// by a fresh zio AutoCancel timer. If the recv blocks longer than the
+        /// timeout, the fiber is cancelled and `error.Canceled` propagates up.
+        /// The timer is cleared after every recv (success or failure), so the
+        /// next iteration starts with a clean slate.
         pub fn symmetric_run(
             comptime role: Role,
             ctx: if (role == .client) *Client else *Server,
             channel: anytype,
             start: type,
+            recv_timeout_ms: ?u64,
         ) !void {
             const start_id = idFromState(start);
             @setEvalBranchQuota(10_000_000);
@@ -124,7 +131,13 @@ pub fn Runner(
                             try channel.send(state_id, State, res);
                             break :blk res;
                         } else {
+                            var timeout: zio.AutoCancel = .init;
+                            defer timeout.clear();
+                            if (recv_timeout_ms) |ms| {
+                                timeout.set(zio.Timeout.fromMilliseconds(ms));
+                            }
                             const res = try channel.recv(state_id, State);
+                            timeout.clear();
                             if (@hasDecl(State, "preprocess")) {
                                 const preprocess = State.preprocess;
                                 if (comptime returnsError(preprocess)) try preprocess(ctx, res) else preprocess(ctx, res);
@@ -210,7 +223,7 @@ test "symmetric run" {
             try stream_channel.init(allocator, stream, 100, 100);
             defer stream_channel.deinit(allocator);
 
-            try R.symmetric_run(.client, ctx, &stream_channel, P.A);
+            try R.symmetric_run(.client, ctx, &stream_channel, P.A, null);
         }
     };
 
@@ -225,7 +238,7 @@ test "symmetric run" {
     try stream_channel.init(allocator, stream, 100, 100);
     defer stream_channel.deinit(allocator);
 
-    try R.symmetric_run(.server, &server_context, &stream_channel, P.A);
+    try R.symmetric_run(.server, &server_context, &stream_channel, P.A, null);
 
     try testing.expectEqual(server_context, 10);
 }
@@ -274,7 +287,7 @@ test "tls channel: symmetric_run over encrypted channel" {
             var sc: StreamChannel = undefined;
             try sc.init(allocator, stream, 256, 256);
             defer sc.deinit(allocator);
-            try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello);
+            try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello, null);
 
             // Phase 2: encrypted protocol — reuse sc
             var tc: TlsChannel = undefined;
@@ -284,7 +297,7 @@ test "tls channel: symmetric_run over encrypted channel" {
             // Keys copied to TlsChannel — zero the handshake context
             tls_ctx.deinit();
 
-            try R_pp.symmetric_run(.client, counter, &tc, P.A);
+            try R_pp.symmetric_run(.client, counter, &tc, P.A, null);
         }
     };
 
@@ -305,7 +318,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     var sc: StreamChannel = undefined;
     try sc.init(allocator, stream, 256, 256);
     defer sc.deinit(allocator);
-    try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello);
+    try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello, null);
 
     // Phase 2: encrypted protocol — reuse sc
     var tc: TlsChannel = undefined;
@@ -315,7 +328,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     // Keys copied to TlsChannel — zero the handshake context
     tls_ctx.deinit();
 
-    try R_pp.symmetric_run(.server, &server_counter, &tc, P.A);
+    try R_pp.symmetric_run(.server, &server_counter, &tc, P.A, null);
 
     try testing.expectEqual(server_counter, 10);
 }

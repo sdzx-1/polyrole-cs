@@ -64,7 +64,7 @@ test "symmetric run handshake" {
             try ch.init(allocator, stream, 256, 256);
             defer ch.deinit(allocator);
 
-            try R.symmetric_run(.client, ctx, &ch, tls.ClientHello);
+            try R.symmetric_run(.client, ctx, &ch, tls.ClientHello, null);
             ctx.deinit();
         }
     };
@@ -80,7 +80,7 @@ test "symmetric run handshake" {
     try ch.init(allocator, stream, 256, 256);
     defer ch.deinit(allocator);
 
-    try R.symmetric_run(.server, &server, &ch, tls.ClientHello);
+    try R.symmetric_run(.server, &server, &ch, tls.ClientHello, null);
     server.deinit();
 }
 
