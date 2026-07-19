@@ -4,6 +4,7 @@ const codec = @import("codec.zig");
 const zio = @import("zio");
 
 pub const max_message_size = 1024;
+const channel_capacity = 8;
 
 pub fn MultiplexChannel(comptime protocol_count: u8) type {
     return struct {
@@ -17,20 +18,15 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
         stream_writer: zio.net.Stream.Writer,
 
         write_lock: zio.Mutex,
-        read_lock: zio.Mutex,
+        reader_handle: zio.JoinHandle(anyerror!void),
 
         sub_channels: [protocol_count]SubChannel,
-
-        pub const Frame = struct {
-            id: u8,
-            data: []const u8,
-        };
 
         pub const SubChannel = struct {
             mux: *Self,
             protocol_id: u8,
-            buf: std.ArrayList([]const u8) = .empty,
-            closed: bool = false,
+            recv_ch: zio.Channel([]const u8) = undefined,
+            recv_buf: [channel_capacity][]const u8 = @splat(undefined),
 
             pub fn send(self: *SubChannel, state_id: anytype, _: type, val: anytype) !void {
                 var buf: [max_message_size]u8 = undefined;
@@ -48,50 +44,14 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
             }
 
             pub fn recv(self: *SubChannel, state_id: anytype, T: type) !T {
-                while (true) {
-                    if (self.buf.items.len > 0) {
-                        const data = self.buf.orderedRemove(0);
-                        defer self.mux.allocator.free(data);
-                        var reader = Io.Reader.fixed(data);
-                        return codec.decode(&reader, state_id, T);
-                    }
-                    const frame = try self.mux.readFrame();
-                    if (frame.id == self.protocol_id) {
-                        defer self.mux.allocator.free(frame.data);
-                        var reader = Io.Reader.fixed(frame.data);
-                        return codec.decode(&reader, state_id, T);
-                    }
-                    const target = &self.mux.sub_channels[frame.id];
-                    target.buf.append(self.mux.allocator, frame.data) catch {
-                        self.mux.allocator.free(frame.data);
-                    };
-                }
-            }
-
-            pub fn push(self: *SubChannel, data: []const u8) !void {
-                try self.buf.append(self.mux.allocator, data);
-            }
-
-            pub fn deinit(self: *SubChannel) void {
-                for (self.buf.items) |item| self.mux.allocator.free(item);
-                self.buf.deinit(self.mux.allocator);
+                const data = self.recv_ch.receive() catch |err| {
+                    return err;
+                };
+                defer self.mux.allocator.free(data);
+                var reader = Io.Reader.fixed(data);
+                return codec.decode(&reader, state_id, T);
             }
         };
-
-        /// Read one complete frame from TCP. Caller owns the returned data.
-        pub fn readFrame(self: *Self) !Frame {
-            self.read_lock.lockUncancelable();
-            defer self.read_lock.unlock();
-            const sr = &self.stream_reader.interface;
-            const id = sr.takeByte() catch |err| {
-                for (&self.sub_channels) |*sc| sc.closed = true;
-                return err;
-            };
-            const len = try sr.takeInt(u16, .big);
-            const raw = try sr.take(len);
-            const data = try self.allocator.dupe(u8, raw);
-            return .{ .id = id, .data = data };
-        }
 
         pub fn init(
             self: *Self,
@@ -113,18 +73,20 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
             self.stream_reader = stream.reader(rbuff);
             self.stream_writer = stream.writer(wbuff);
             self.write_lock = .{};
-            self.read_lock = .{};
 
             for (&self.sub_channels, 0..) |*sc, i| {
-                sc.* = .{
-                    .mux = self,
-                    .protocol_id = @intCast(i),
-                };
+                sc.* = .{ .mux = self, .protocol_id = @intCast(i) };
+                sc.recv_ch = zio.Channel([]const u8).init(&sc.recv_buf);
             }
+
+            self.reader_handle = try zio.spawn(Self.readerLoop, .{self});
         }
 
         pub fn deinit(self: *Self) void {
-            for (&self.sub_channels) |*sc| sc.deinit();
+            // Signal EOF to wake up the reader fiber
+            self.stream.socket.shutdown(.receive) catch {};
+            self.reader_handle.join() catch {};
+            for (&self.sub_channels) |*sc| sc.recv_ch.close(.immediate);
             self.stream.close();
             self.allocator.free(self.rbuff);
             self.allocator.free(self.wbuff);
@@ -132,6 +94,33 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
 
         pub fn subChannel(self: *Self, id: u8) *SubChannel {
             return &self.sub_channels[id];
+        }
+
+        fn readerLoop(self: *Self) anyerror!void {
+            const sr = &self.stream_reader.interface;
+            while (true) {
+                const id = sr.takeByte() catch {
+                    for (&self.sub_channels) |*sc| sc.recv_ch.close(.immediate);
+                    return;
+                };
+                const len = sr.takeInt(u16, .big) catch {
+                    for (&self.sub_channels) |*sc| sc.recv_ch.close(.immediate);
+                    return;
+                };
+                const raw = sr.take(len) catch {
+                    for (&self.sub_channels) |*sc| sc.recv_ch.close(.immediate);
+                    return;
+                };
+                if (id >= protocol_count) continue;
+                const copy = self.allocator.dupe(u8, raw) catch {
+                    self.sub_channels[id].recv_ch.close(.immediate);
+                    continue;
+                };
+                self.sub_channels[id].recv_ch.send(copy) catch |err| {
+                    self.allocator.free(copy);
+                    if (err == error.ChannelClosed) continue;
+                };
+            }
         }
     };
 }
