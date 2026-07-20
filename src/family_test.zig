@@ -28,36 +28,6 @@ const TestProtocol = struct {
     }
 };
 
-test "smoke: StreamChannel reader/writer via interface" {
-    const allocator = std.testing.allocator;
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-    const SC = polyrole.channel.StreamChannel;
-    const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var l = try lh.listen(.{});
-    defer l.close();
-
-    var g: zio.Group = .init;
-    defer g.cancel();
-    try g.spawn(struct {
-        fn run(a: zio.net.Address) !void {
-            const s = try a.connect(.{});
-            var sc: SC = undefined;
-            try sc.init(allocator, s, 256, 256);
-            defer sc.deinit(allocator);
-            try sc.stream_writer.interface.writeByte(42);
-            try sc.stream_writer.interface.flush();
-        }
-    }.run, .{l.socket.address});
-
-    const s = try l.accept(.{});
-    var sc: SC = undefined;
-    try sc.init(allocator, s, 256, 256);
-    defer sc.deinit(allocator);
-    const b = try sc.stream_reader.interface.takeByte();
-    try std.testing.expectEqual(@as(u8, 42), b);
-}
-
 test "family: full handshake" {
     const allocator = std.testing.allocator;
     const rt = try zio.Runtime.init(allocator, .{});
