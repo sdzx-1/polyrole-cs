@@ -1,10 +1,10 @@
 const std = @import("std");
 const zio = @import("zio");
-const polyrole = @import("root.zig");
+const polyrole = @import("../../root.zig");
 const Mux = polyrole.family_mux_channel.MultiplexChannel;
-const init = @import("protocol/chat/init.zig");
-const chat_mod = @import("protocol/chat/chat.zig");
-const push = @import("protocol/chat/push.zig");
+const init = @import("init.zig");
+const chat_mod = @import("chat.zig");
+const push = @import("push.zig");
 
 test "chat: three users send and receive" {
     const allocator = std.testing.allocator;
