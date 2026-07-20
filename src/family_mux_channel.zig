@@ -34,6 +34,11 @@ pub fn MultiplexChannel(
         write_ch: zio.Channel(WriteMsg),
         write_ch_buf: [channel_capacity]WriteMsg = @splat(undefined),
 
+        /// Heap-allocated scratch for AEAD encryption (only when encrypted=true).
+        enc_buf: if (encrypted) []u8 else void = if (encrypted) undefined else {},
+        /// Heap-allocated scratch for AEAD decryption (only when encrypted=true).
+        dec_buf: if (encrypted) []u8 else void = if (encrypted) undefined else {},
+
         sub_channels: [protocol_count]SubChannel,
 
         pub const SubChannel = struct {
@@ -79,6 +84,13 @@ pub fn MultiplexChannel(
             self.write_key = [_]u8{0} ** 32;
             self.read_key = [_]u8{0} ** 32;
 
+            if (encrypted) {
+                self.enc_buf = try allocator.alloc(u8, max_message_size + 3 + 16);
+                errdefer allocator.free(self.enc_buf);
+                self.dec_buf = try allocator.alloc(u8, max_message_size + 3 + 16);
+                errdefer allocator.free(self.dec_buf);
+            }
+
             self.reader_handle = try zio.spawn(Self.readerLoop, .{self});
             self.writer_handle = try zio.spawn(Self.writerLoop, .{self});
         }
@@ -96,6 +108,10 @@ pub fn MultiplexChannel(
             self.stream.socket.shutdown(.receive) catch {};
             self.reader_handle.join() catch {};
             self.stream.close();
+            if (encrypted) {
+                self.allocator.free(self.enc_buf);
+                self.allocator.free(self.dec_buf);
+            }
         }
 
         pub fn subChannel(self: *Self, id: u8) *SubChannel {
@@ -168,14 +184,14 @@ pub fn MultiplexChannel(
             var nonce: [24]u8 = [_]u8{0} ** 24;
             std.mem.writeInt(u64, nonce[0..8], this_counter, .big);
 
-            var frame: [max_message_size + 3]u8 = undefined;
+            const frame = self.enc_buf[0 .. max_message_size + 3];
             frame[0] = msg.protocol_id;
             std.mem.writeInt(u16, frame[1..3], @intCast(msg.data.len), .big);
             @memcpy(frame[3..][0..msg.data.len], msg.data);
             const plaintext = frame[0 .. 3 + msg.data.len];
 
-            var combined: [max_message_size + 3 + 16]u8 = undefined;
-            crypto.nacl.SecretBox.seal(combined[0 .. plaintext.len + 16], plaintext, nonce, self.write_key);
+            const combined = self.enc_buf[0 .. plaintext.len + 16];
+            crypto.nacl.SecretBox.seal(combined, plaintext, nonce, self.write_key);
             const ct = combined[16..][0..plaintext.len];
 
             try self.writer.writeAll(&nonce);
@@ -196,12 +212,12 @@ pub fn MultiplexChannel(
             if (ct_len < 3) return error.MessageTooLarge;
             const ct = try self.reader.take(ct_len);
 
-            var combined: [max_message_size + 3 + 16]u8 = undefined;
+            const combined = self.dec_buf[0 .. ct_len + 16];
             @memcpy(combined[0..16], tag);
             @memcpy(combined[16..][0..ct_len], ct);
 
-            var plain: [max_message_size + 3]u8 = undefined;
-            crypto.nacl.SecretBox.open(plain[0..ct_len], combined[0 .. ct_len + 16], nonce, self.read_key) catch return error.DecryptFailed;
+            const plain = self.dec_buf[0..ct_len];
+            crypto.nacl.SecretBox.open(plain, combined[0 .. ct_len + 16], nonce, self.read_key) catch return error.DecryptFailed;
 
             const counter = std.mem.readInt(u64, nonce[0..8], .big);
             if (counter != self.read_counter) return error.ReplayDetected;
