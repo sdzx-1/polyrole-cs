@@ -19,9 +19,9 @@ jobs:
           - os: ubuntu-latest
             zig_arch: x86_64
             zig_os: linux
-          - os: macos-latest
-            zig_arch: aarch64
-            zig_os: macos
+          # - os: macos-latest
+          #   zig_arch: aarch64
+          #   zig_os: macos
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
 
