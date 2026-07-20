@@ -52,10 +52,11 @@ pub const Say = union(enum) {
         switch (result) {
             .send => |d| {
                 const text = d.data.text[0..d.data.text_len];
-                const dup = ctx.gpa.dupe(u8, text) catch return;
+                const from_dup = ctx.gpa.dupe(u8, ctx.username) catch return;
+                const text_dup = ctx.gpa.dupe(u8, text) catch return;
                 ctx.messages.append(ctx.gpa, .{
-                    .from = ctx.username,
-                    .text = dup,
+                    .from = from_dup,
+                    .text = text_dup,
                 }) catch {};
             },
             .quit => {},

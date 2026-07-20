@@ -20,9 +20,21 @@ test "chat: init + chat + push over Mux(3)" {
     var users = std.StringHashMap(void).init(allocator);
     defer users.deinit();
     var client_recv: std.ArrayList(push.Message) = .empty;
-    defer client_recv.deinit(allocator);
+    defer {
+        for (client_recv.items) |m| {
+            allocator.free(m.from);
+            allocator.free(m.text);
+        }
+        client_recv.deinit(allocator);
+    }
     var server_chat_msgs: std.ArrayList(chat_mod.Message) = .empty;
-    defer server_chat_msgs.deinit(allocator);
+    defer {
+        for (server_chat_msgs.items) |m| {
+            allocator.free(m.from);
+            allocator.free(m.text);
+        }
+        server_chat_msgs.deinit(allocator);
+    }
 
     // Client: init → chat(send msg) → push(receive broadcast)
     var h = try zio.spawn(struct {
