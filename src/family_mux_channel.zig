@@ -60,7 +60,12 @@ pub fn MultiplexChannel(
 
             pub fn recv(self: *SubChannel, state_id: anytype, T: type) !T {
                 if (self.last_recv_data) |old| self.mux.allocator.free(old);
-                const data = self.rb.receive() catch |err| return err;
+                const data = self.rb.receive() catch |err| {
+                    // receive failed — last_recv_data was already freed above,
+                    // but deinit would free it again. Clear now to prevent double-free.
+                    self.last_recv_data = null;
+                    return err;
+                };
                 self.last_recv_data = data;
                 var r = Io.Reader.fixed(data);
                 return codec.decode(&r, state_id, T);
