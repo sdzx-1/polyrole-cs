@@ -21,25 +21,48 @@ test "chat: three users send and receive" {
     defer users.deinit();
     var all_msgs: std.ArrayList(chat_mod.Message) = .empty;
     defer {
-        for (all_msgs.items) |m| { allocator.free(m.from); allocator.free(m.text); }
+        for (all_msgs.items) |m| {
+            allocator.free(m.from);
+            allocator.free(m.text);
+        }
         all_msgs.deinit(allocator);
     }
     var recv0: std.ArrayList(push.Message) = .empty;
-    defer { for (recv0.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv0.deinit(allocator); }
+    defer {
+        for (recv0.items) |m| {
+            allocator.free(m.from);
+            allocator.free(m.text);
+        }
+        recv0.deinit(allocator);
+    }
     var recv1: std.ArrayList(push.Message) = .empty;
-    defer { for (recv1.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv1.deinit(allocator); }
+    defer {
+        for (recv1.items) |m| {
+            allocator.free(m.from);
+            allocator.free(m.text);
+        }
+        recv1.deinit(allocator);
+    }
     var recv2: std.ArrayList(push.Message) = .empty;
-    defer { for (recv2.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv2.deinit(allocator); }
+    defer {
+        for (recv2.items) |m| {
+            allocator.free(m.from);
+            allocator.free(m.text);
+        }
+        recv2.deinit(allocator);
+    }
 
     const names = [_][]const u8{ "alice", "bob", "charlie" };
-    const msgs  = [_][]const u8{ "hello", "hi there", "hey" };
+    const msgs = [_][]const u8{ "hello", "hi there", "hey" };
     const recvs = [_]*std.ArrayList(push.Message){ &recv0, &recv1, &recv2 };
 
     // ── Client fibers: each does connect → init → chat → push ──────────
     var ch0 = try zio.spawn(struct {
         fn run(
-            n: []const u8, m_: []const u8,
-            a: zio.net.Address, r: *std.ArrayList(push.Message),
+            n: []const u8,
+            m_: []const u8,
+            a: zio.net.Address,
+            r: *std.ArrayList(push.Message),
         ) !void {
             const s = try a.connect(.{});
             var sc: SC = undefined;
