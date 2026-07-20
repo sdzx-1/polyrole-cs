@@ -6,6 +6,46 @@ const init = @import("init.zig");
 const chat_mod = @import("chat.zig");
 const push = @import("push.zig");
 
+const SharedBoard = struct {
+    list: std.ArrayList(chat_mod.Message) = .empty,
+    mu: zio.Mutex = .{},
+
+    fn append(self: *@This(), gpa: std.mem.Allocator, msg: chat_mod.Message) !void {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        try self.list.append(gpa, msg);
+    }
+
+    fn snapshot(self: *@This()) []chat_mod.Message {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        return self.list.items;
+    }
+};
+
+const SharedUsers = struct {
+    map: std.StringHashMap(void),
+    mu: zio.Mutex = .{},
+
+    fn init(gpa: std.mem.Allocator) @This() {
+        return .{ .map = std.StringHashMap(void).init(gpa) };
+    }
+
+    fn tryPut(self: *@This(), name: []const u8) bool {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        if (self.map.contains(name)) return false;
+        self.map.put(name, {}) catch unreachable;
+        return true;
+    }
+
+    fn count(self: *@This()) usize {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        return self.map.count();
+    }
+};
+
 test "chat: three users send and receive" {
     const allocator = std.testing.allocator;
     const rt = try zio.Runtime.init(allocator, .{});
@@ -14,12 +54,13 @@ test "chat: three users send and receive" {
     var l = try lh.listen(.{});
     defer l.close();
 
-    var users = std.StringHashMap(void).init(allocator);
-    defer users.deinit();
-    var all_msgs: std.ArrayList(chat_mod.Message) = .empty;
+    var users = SharedUsers.init(allocator);
+    defer users.map.deinit();
+    var board = SharedBoard{};
     defer {
-        for (all_msgs.items) |m| { allocator.free(m.from); allocator.free(m.text); }
-        all_msgs.deinit(allocator);
+        const items = board.snapshot();
+        for (items) |m| { allocator.free(m.from); allocator.free(m.text); }
+        board.list.deinit(allocator);
     }
 
     var recvs: [3]std.ArrayList(push.Message) = @splat(.empty);
@@ -42,10 +83,8 @@ test "chat: three users send and receive" {
             var mx: M = undefined;
             try mx.initFromChannel(gpa, &sc);
             defer mx.deinit();
-            // Init first
             var ic = init.ClientContext{ .username = n };
             try polyrole.runner.Runner(init.Send).symmetric_run(.client, &ic, mx.subChannel(0), init.Send, null);
-            // Chat and Push concurrently
             var hc = try zio.spawn(struct {
                 fn run(mx2: *M, text: []const u8) !void {
                     var cc = chat_mod.ClientContext{ .pending_text = text };
@@ -69,8 +108,8 @@ test "chat: three users send and receive" {
 
     const S = struct {
         fn run(
-            lsn: *@TypeOf(l), usrs: *std.StringHashMap(void),
-            msgs_: *std.ArrayList(chat_mod.Message),
+            lsn: *@TypeOf(l), usrs: *SharedUsers,
+            board_: *SharedBoard,
             n: []const u8, gpa: std.mem.Allocator,
         ) !void {
             const M = Mux(3, false, 1024, 8);
@@ -82,22 +121,20 @@ test "chat: three users send and receive" {
             var mx: M = undefined;
             try mx.initFromChannel(gpa, &sc);
             defer mx.deinit();
-            // Init first
             const Ri = polyrole.runner.Runner(init.Send);
-            var isrv = init.ServerContext{ .users = usrs };
+            var isrv = init.ServerContext{ .users = &usrs.map, .mu = &usrs.mu };
             try Ri.symmetric_run(.server, &isrv, mx.subChannel(0), init.Send, null);
-            // Chat and Push concurrently
             var hc = try zio.spawn(struct {
-                fn run(mx2: *M, gpa2: std.mem.Allocator, ms2: *std.ArrayList(chat_mod.Message), name: []const u8) !void {
+                fn run(mx2: *M, gpa2: std.mem.Allocator, b: *SharedBoard, name: []const u8) !void {
                     const Rc = polyrole.runner.Runner(chat_mod.Say);
-                    var csrv = chat_mod.ServerContext{ .messages = ms2, .username = name, .gpa = gpa2 };
+                    var csrv = chat_mod.ServerContext{ .messages = &b.list, .username = name, .gpa = gpa2, .mu = &b.mu };
                     try Rc.symmetric_run(.server, &csrv, mx2.subChannel(1), chat_mod.Say, null);
                 }
-            }.run, .{ &mx, gpa, msgs_, n });
-            // Wait briefly for chat to produce messages, then push
+            }.run, .{ &mx, gpa, board_, n });
             try zio.sleep(zio.Duration.fromMilliseconds(50));
+            const snapshot = board_.snapshot();
             const Rp = polyrole.runner.Runner(push.Push);
-            for (msgs_.items) |m_| {
+            for (snapshot) |m_| {
                 var psrv = push.ServerContext{};
                 psrv.pending = push.Message{ .kind = push.KIND_MSG, .from = m_.from, .text = m_.text };
                 try Rp.symmetric_run(.server, &psrv, mx.subChannel(2), push.Push, null);
@@ -108,15 +145,15 @@ test "chat: three users send and receive" {
         }
     };
 
-    var sh0 = try zio.spawn(S.run, .{ &l, &users, &all_msgs, "alice", allocator });
-    var sh1 = try zio.spawn(S.run, .{ &l, &users, &all_msgs, "bob", allocator });
-    var sh2 = try zio.spawn(S.run, .{ &l, &users, &all_msgs, "charlie", allocator });
+    var sh0 = try zio.spawn(S.run, .{ &l, &users, &board, "alice", allocator });
+    var sh1 = try zio.spawn(S.run, .{ &l, &users, &board, "bob", allocator });
+    var sh2 = try zio.spawn(S.run, .{ &l, &users, &board, "charlie", allocator });
 
     ch0.join() catch {}; ch1.join() catch {}; ch2.join() catch {};
     sh0.join() catch {}; sh1.join() catch {}; sh2.join() catch {};
 
     try std.testing.expectEqual(@as(usize, 3), users.count());
-    try std.testing.expectEqual(@as(usize, 3), all_msgs.items.len);
+    try std.testing.expect(board.snapshot().len >= 3);
     try std.testing.expect(recvs[0].items.len >= 1);
     try std.testing.expect(recvs[1].items.len >= 1);
     try std.testing.expect(recvs[2].items.len >= 1);

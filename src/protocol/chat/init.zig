@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("zio");
 const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
@@ -14,9 +15,8 @@ pub const ClientContext = struct {
 };
 
 pub const ServerContext = struct {
-    /// Registered usernames
     users: *std.StringHashMap(void),
-    /// Last proposed name (set by preprocess, used by process)
+    mu: *zio.Mutex,
     pending_name: []const u8 = "",
 };
 
@@ -50,6 +50,8 @@ pub const Reply = union(enum) {
     pub const info: Info = .{ .agent = .server, .name = "Reply" };
 
     pub fn process(ctx: *ServerContext) @This() {
+        ctx.mu.lockUncancelable();
+        defer ctx.mu.unlock();
         if (ctx.users.contains(ctx.pending_name)) return .reject;
         ctx.users.put(ctx.pending_name, {}) catch unreachable;
         return .accept;

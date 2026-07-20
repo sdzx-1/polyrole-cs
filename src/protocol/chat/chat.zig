@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("zio");
 const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
@@ -14,6 +15,7 @@ pub const ClientContext = struct {
 pub const ServerContext = struct {
     gpa: std.mem.Allocator,
     messages: *std.ArrayList(Message),
+    mu: *zio.Mutex,
     username: []const u8 = "",
 };
 
@@ -46,6 +48,8 @@ pub const Say = union(enum) {
             .send => |d| {
                 const from_dup = ctx.gpa.dupe(u8, ctx.username) catch return;
                 const text_dup = ctx.gpa.dupe(u8, d.data.text) catch return;
+                ctx.mu.lockUncancelable();
+                defer ctx.mu.unlock();
                 ctx.messages.append(ctx.gpa, .{ .from = from_dup, .text = text_dup }) catch {};
             },
             .quit => {},
