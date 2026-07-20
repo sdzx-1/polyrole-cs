@@ -44,6 +44,7 @@ test "smoke: StreamChannel reader/writer via interface" {
             const s = try a.connect(.{});
             var sc: SC = undefined;
             try sc.init(allocator, s, 256, 256);
+            defer sc.deinit(allocator);
             try sc.stream_writer.interface.writeByte(42);
             try sc.stream_writer.interface.flush();
         }
@@ -296,6 +297,7 @@ test "family: TLS + encrypted Mux + two protocols concurrent" {
     const s = try l.accept(.{});
     var sc: SC = undefined;
     try sc.init(allocator, s, 256, 256);
+    defer sc.deinit(allocator);
 
     var tls_ctx = tls.ServerContext.init(kp_s, kp_c.public_key);
     try Rtls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello, null);
