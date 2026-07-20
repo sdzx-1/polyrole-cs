@@ -8,12 +8,11 @@ pub const Info = ProtocolInfo("push", ClientContext, ServerContext);
 
 pub const ClientContext = struct {
     gpa: std.mem.Allocator,
-    received: *std.ArrayList(Message),
+    recv: *std.ArrayList(Message),
 };
 
 pub const ServerContext = struct {
-    pending: ?Message = null,
-    kick: bool = false,
+    msg: Message,
 };
 
 pub const Message = struct {
@@ -26,14 +25,10 @@ pub const Kind = u8;
 pub const KIND_MSG: u8 = 1;
 pub const KIND_JOIN: u8 = 2;
 pub const KIND_LEAVE: u8 = 3;
-pub const KIND_KICK: u8 = 4;
 
-pub const ItemPayload = struct {
-    kind: u8,
-    from: []const u8,
-    text: []const u8,
-};
+pub const ItemPayload = struct { kind: u8, from: []const u8, text: []const u8 };
 
+/// Server pushes one message, client acks.
 pub const Push = union(enum) {
     item: Data(ItemPayload, Ack),
     kick: Data(void, Exit),
@@ -41,24 +36,15 @@ pub const Push = union(enum) {
     pub const info: Info = .{ .agent = .server, .name = "Push" };
 
     pub fn process(ctx: *ServerContext) @This() {
-        if (ctx.kick) return .kick;
-        if (ctx.pending) |msg| {
-            ctx.pending = null;
-            return .{ .item = .{ .data = .{ .kind = msg.kind, .from = msg.from, .text = msg.text } } };
-        }
-        return .kick;
+        return .{ .item = .{ .data = .{ .kind = ctx.msg.kind, .from = ctx.msg.from, .text = ctx.msg.text } } };
     }
 
     pub fn preprocess(ctx: *ClientContext, result: @This()) void {
         switch (result) {
             .item => |d| {
-                const from_dup = ctx.gpa.dupe(u8, d.data.from) catch return;
-                const text_dup = ctx.gpa.dupe(u8, d.data.text) catch return;
-                ctx.received.append(ctx.gpa, .{
-                    .kind = d.data.kind,
-                    .from = from_dup,
-                    .text = text_dup,
-                }) catch {};
+                const from = ctx.gpa.dupe(u8, d.data.from) catch return;
+                const text = ctx.gpa.dupe(u8, d.data.text) catch return;
+                ctx.recv.append(ctx.gpa, .{ .kind = d.data.kind, .from = from, .text = text }) catch {};
             },
             .kick => {},
         }
@@ -66,7 +52,7 @@ pub const Push = union(enum) {
 };
 
 pub const Ack = union(enum) {
-    ok: Data(void, Push),
+    ok: Data(void, Exit),
 
     pub const info: Info = .{ .agent = .client, .name = "Ack" };
 

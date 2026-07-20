@@ -8,26 +8,21 @@ const Exit = polyrole.Exit;
 pub const Info = ProtocolInfo("chat", ClientContext, ServerContext);
 
 pub const ClientContext = struct {
-    pending_text: ?[]const u8 = null,
-    done: bool = false,
+    text: []const u8,
 };
 
 pub const ServerContext = struct {
     gpa: std.mem.Allocator,
-    messages: *std.ArrayList(Message),
+    board: *std.ArrayList(Message),
     mu: *zio.Mutex,
-    username: []const u8 = "",
+    username: []const u8,
 };
 
-pub const Message = struct {
-    from: []const u8,
-    text: []const u8,
-};
+pub const Message = struct { from: []const u8, text: []const u8 };
 
-pub const MsgPayload = struct {
-    text: []const u8,
-};
+pub const MsgPayload = struct { text: []const u8 };
 
+/// Client says one message, server acks.
 pub const Say = union(enum) {
     send: Data(MsgPayload, Ack),
     quit: Data(void, Exit),
@@ -35,23 +30,17 @@ pub const Say = union(enum) {
     pub const info: Info = .{ .agent = .client, .name = "Say" };
 
     pub fn process(ctx: *ClientContext) @This() {
-        if (ctx.done) return .quit;
-        if (ctx.pending_text) |text| {
-            ctx.pending_text = null;
-            return .{ .send = .{ .data = .{ .text = text } } };
-        }
-        return .quit;
+        return .{ .send = .{ .data = .{ .text = ctx.text } } };
     }
 
     pub fn preprocess(ctx: *ServerContext, result: @This()) void {
         switch (result) {
             .send => |d| {
-                const from_dup = ctx.gpa.dupe(u8, ctx.username) catch return;
-                const text_dup = ctx.gpa.dupe(u8, d.data.text) catch return;
+                const from = ctx.gpa.dupe(u8, ctx.username) catch return;
+                const text = ctx.gpa.dupe(u8, d.data.text) catch return;
                 ctx.mu.lockUncancelable();
                 defer ctx.mu.unlock();
-                ctx.messages.ensureUnusedCapacity(ctx.gpa, 1) catch return;
-                ctx.messages.appendAssumeCapacity(.{ .from = from_dup, .text = text_dup });
+                ctx.board.append(ctx.gpa, .{ .from = from, .text = text }) catch {};
             },
             .quit => {},
         }
@@ -59,7 +48,7 @@ pub const Say = union(enum) {
 };
 
 pub const Ack = union(enum) {
-    ok: Data(void, Say),
+    ok: Data(void, Exit),
 
     pub const info: Info = .{ .agent = .server, .name = "Ack" };
 

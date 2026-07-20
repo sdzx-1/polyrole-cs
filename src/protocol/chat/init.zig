@@ -8,9 +8,7 @@ const Exit = polyrole.Exit;
 pub const Info = ProtocolInfo("init", ClientContext, ServerContext);
 
 pub const ClientContext = struct {
-    /// Client's chosen username
-    username: []const u8 = "",
-    /// Server accepted the name
+    username: []const u8,
     accepted: bool = false,
 };
 
@@ -20,9 +18,7 @@ pub const ServerContext = struct {
     pending_name: []const u8 = "",
 };
 
-pub const NamePayload = struct {
-    name: []const u8,
-};
+pub const NamePayload = struct { name: []const u8 };
 
 pub const Send = union(enum) {
     propose: Data(NamePayload, Reply),
@@ -45,7 +41,7 @@ pub const Send = union(enum) {
 
 pub const Reply = union(enum) {
     accept: Data(void, Exit),
-    reject: Data(void, Send),
+    reject: Data(void, Exit),
 
     pub const info: Info = .{ .agent = .server, .name = "Reply" };
 
