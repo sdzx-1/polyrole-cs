@@ -47,6 +47,8 @@ pub fn MultiplexChannel(
             send_buf: []u8,
             rb: zio.Channel([]const u8) = undefined,
             rb_buf: [channel_capacity][]const u8 = @splat(undefined),
+            /// Freed on next recv — ensures slices from codec.decode remain valid.
+            last_recv_data: ?[]const u8 = null,
 
             pub fn send(self: *SubChannel, state_id: anytype, _: type, val: anytype) !void {
                 var w = Io.Writer.fixed(self.send_buf);
@@ -57,8 +59,9 @@ pub fn MultiplexChannel(
             }
 
             pub fn recv(self: *SubChannel, state_id: anytype, T: type) !T {
+                if (self.last_recv_data) |old| self.mux.allocator.free(old);
                 const data = self.rb.receive() catch |err| return err;
-                defer self.mux.allocator.free(data);
+                self.last_recv_data = data;
                 var r = Io.Reader.fixed(data);
                 return codec.decode(&r, state_id, T);
             }
@@ -110,6 +113,7 @@ pub fn MultiplexChannel(
             for (&self.sub_channels) |*sub| {
                 sub.rb.close(.immediate);
                 self.allocator.free(sub.send_buf);
+                if (sub.last_recv_data) |old| self.allocator.free(old);
             }
             self.stream.socket.shutdown(.receive) catch {};
             self.reader_handle.join() catch {};
