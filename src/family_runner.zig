@@ -42,17 +42,14 @@ test "smoke: StreamChannel reader/writer via interface" {
     try g.spawn(struct {
         fn run(a: zio.net.Address) !void {
             const s = try a.connect(.{});
-            defer s.close();
             var sc: SC = undefined;
             try sc.init(allocator, s, 256, 256);
-            defer sc.deinit(allocator);
             try sc.stream_writer.interface.writeByte(42);
             try sc.stream_writer.interface.flush();
         }
     }.run, .{l.socket.address});
 
     const s = try l.accept(.{});
-    defer s.close();
     var sc: SC = undefined;
     try sc.init(allocator, s, 256, 256);
     defer sc.deinit(allocator);
@@ -82,13 +79,9 @@ test "family: full handshake" {
             const s = try a.connect(.{});
             var sc: SC = undefined;
             try sc.init(allocator, s, 256, 256);
-            defer sc.deinit(allocator);
             var m: M = undefined;
             try m.initFromChannel(allocator, &sc);
             defer m.deinit();
-            // Shutdown wakes reader fiber before close
-            defer s.socket.shutdown(.receive) catch {};
-            defer s.close();
             try R.symmetric_run(.client, ctx, m.subChannel(0), P1.A, null);
         }
     }.run, .{l.socket.address, &cli_ctx});
@@ -100,8 +93,6 @@ test "family: full handshake" {
     var m: M = undefined;
     try m.initFromChannel(allocator, &sc);
     defer m.deinit();
-    defer s.socket.shutdown(.receive) catch {};
-    defer s.close();
     _ = try zio.spawn(struct {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R.symmetric_run(.server, ctx, ch, P1.A, null);
@@ -137,13 +128,9 @@ test "family: two protocols concurrent" {
             const s = try a.connect(.{});
             var sc: SC = undefined;
             try sc.init(allocator, s, 256, 256);
-            defer sc.deinit(allocator);
             var m: M = undefined;
             try m.initFromChannel(allocator, &sc);
             defer m.deinit();
-            // Shutdown wakes reader fiber before close
-            defer s.socket.shutdown(.receive) catch {};
-            defer s.close();
             var h1 = try zio.spawn(struct {
                 fn run(mx: *M, ch: *M.SubChannel, ctx: *i32) anyerror!void {
                     _ = mx;
@@ -168,8 +155,6 @@ test "family: two protocols concurrent" {
     var m: M = undefined;
     try m.initFromChannel(allocator, &sc);
     defer m.deinit();
-    defer s.socket.shutdown(.receive) catch {};
-    defer s.close();
     _ = try zio.spawn(struct {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R1.symmetric_run(.server, ctx, ch, P1.A, null);
@@ -221,6 +206,7 @@ test "family: TLS + encrypted Mux + two protocols concurrent" {
             const s = try a.connect(.{});
             var sc: SC = undefined;
             try sc.init(allocator, s, 256, 256);
+            defer sc.deinit(allocator);
 
             var tls_ctx = tls.ClientContext.init(kp, pk);
             try Rtls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello, null);
@@ -228,9 +214,6 @@ test "family: TLS + encrypted Mux + two protocols concurrent" {
             var m: M = undefined;
             try m.initFromChannel(allocator, &sc);
             defer m.deinit();
-            // Shutdown wakes reader fiber before close
-            defer s.socket.shutdown(.receive) catch {};
-            defer s.close();
             m.setKeys(tls_ctx.write_key, tls_ctx.read_key);
             tls_ctx.deinit();
 
@@ -261,8 +244,6 @@ test "family: TLS + encrypted Mux + two protocols concurrent" {
     var m: M = undefined;
     try m.initFromChannel(allocator, &sc);
     defer m.deinit();
-    defer s.socket.shutdown(.receive) catch {};
-    defer s.close();
     m.setKeys(tls_ctx.read_key, tls_ctx.write_key);
     tls_ctx.deinit();
 

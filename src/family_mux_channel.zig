@@ -17,6 +17,7 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
         };
 
         allocator: std.mem.Allocator,
+        stream: zio.net.Stream,
         writer: *std.Io.Writer,
         reader: *std.Io.Reader,
 
@@ -63,6 +64,7 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
             channel: anytype,
         ) !void {
             self.allocator = allocator;
+            self.stream = channel.stream;
             self.writer = &channel.stream_writer.interface;
             self.reader = &channel.stream_reader.interface;
 
@@ -89,7 +91,9 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
             self.write_ch.close(.immediate);
             self.writer_handle.join() catch {};
             for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
+            self.stream.socket.shutdown(.receive) catch {};
             self.reader_handle.join() catch {};
+            self.stream.close();
         }
 
         pub fn subChannel(self: *Self, id: u8) *SubChannel {
