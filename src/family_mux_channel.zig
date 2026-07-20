@@ -48,8 +48,9 @@ pub fn MultiplexChannel(
             rb_buf: [channel_capacity][]const u8 = @splat(undefined),
 
             pub fn send(self: *SubChannel, state_id: anytype, _: type, val: anytype) !void {
-                var buf: [max_message_size]u8 = undefined;
-                var w = Io.Writer.fixed(&buf);
+                const buf = try self.mux.allocator.alloc(u8, max_message_size);
+                defer self.mux.allocator.free(buf);
+                var w = Io.Writer.fixed(buf);
                 try codec.encode(&w, state_id, val);
                 const copy = try self.mux.allocator.dupe(u8, buf[0..w.end]);
                 errdefer self.mux.allocator.free(copy);
