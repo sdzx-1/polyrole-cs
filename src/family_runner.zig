@@ -3,44 +3,6 @@ const zio = @import("zio");
 const polyrole = @import("root.zig");
 const Mux = @import("family_mux_channel.zig").MultiplexChannel;
 
-pub fn FamilyRunner(comptime states: anytype) type {
-    return struct {
-        const N = states.len;
-        const MuxType = Mux(N);
-
-        pub fn initServer(
-            mux: *MuxType,
-            contexts: anytype,
-            recv_timeout_ms: ?u64,
-        ) !void {
-            inline for (states, 0..) |State, i| {
-                const Wrapper = struct {
-                    fn run(
-                        ctx_: @TypeOf(contexts[i]),
-                        ch_: *MuxType.SubChannel,
-                        timeout_: ?u64,
-                    ) anyerror!void {
-                        const R = polyrole.runner.Runner(State);
-                        R.symmetric_run(.server, ctx_, ch_, State, timeout_) catch |e| return e;
-                    }
-                };
-                _ = try zio.spawn(Wrapper.run, .{ contexts[i], mux.subChannel(@intCast(i)), recv_timeout_ms });
-            }
-        }
-
-        pub fn start(
-            mux: *MuxType,
-            comptime id: u8,
-            ctx: anytype,
-            recv_timeout_ms: ?u64,
-        ) !void {
-            const State = states[id];
-            const R = polyrole.runner.Runner(State);
-            try R.symmetric_run(.client, ctx, mux.subChannel(id), State, recv_timeout_ms);
-        }
-    };
-}
-
 // ── tests ─────────────────────────────────────────────────────────────────
 
 const TestProtocol = struct {
@@ -66,12 +28,12 @@ const TestProtocol = struct {
     }
 };
 
-test "family: full handshake with reader fiber" {
+test "family: full handshake" {
     const allocator = std.testing.allocator;
     const rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
     const P1 = TestProtocol.make("p1", polyrole.Exit);
-    const Fr = FamilyRunner(.{P1.A});
+    const R = polyrole.runner.Runner(P1.A);
     const M = Mux(1);
     const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var l = try lh.listen(.{});
@@ -80,6 +42,7 @@ test "family: full handshake with reader fiber" {
     var srv_ctx: i32 = 0;
     var cli_ctx: i32 = 0;
 
+    // Client fiber
     var g: zio.Group = .init;
     defer g.cancel();
     try g.spawn(struct {
@@ -88,16 +51,20 @@ test "family: full handshake with reader fiber" {
             var m: M = undefined;
             try m.init(allocator, s, 256, 256);
             defer m.deinit();
-            try Fr.start(&m, 0, ctx, null);
+            try R.symmetric_run(.client, ctx, m.subChannel(0), P1.A, null);
         }
     }.run, .{l.socket.address, &cli_ctx});
 
+    // Server
     const s = try l.accept(.{});
     var m: M = undefined;
     try m.init(allocator, s, 256, 256);
     defer m.deinit();
-    try Fr.initServer(&m, .{&srv_ctx}, null);
-
+    _ = try zio.spawn(struct {
+        fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
+            try R.symmetric_run(.server, ctx, ch, P1.A, null);
+        }
+    }.run, .{m.subChannel(0), &srv_ctx});
     try zio.sleep(zio.Duration.fromMilliseconds(500));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx);
 }
@@ -108,7 +75,8 @@ test "family: two protocols concurrent" {
     defer rt.deinit();
     const P1 = TestProtocol.make("p1", polyrole.Exit);
     const P2 = TestProtocol.make("p2", polyrole.Exit);
-    const Fr = FamilyRunner(.{ P1.A, P2.A });
+    const R1 = polyrole.runner.Runner(P1.A);
+    const R2 = polyrole.runner.Runner(P2.A);
     const M = Mux(2);
     const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var l = try lh.listen(.{});
@@ -128,19 +96,18 @@ test "family: two protocols concurrent" {
             var m: M = undefined;
             try m.init(allocator, s, 256, 256);
             defer m.deinit();
-            // Run P1 and P2 as concurrent fibers
-            const W1 = struct {
-                fn run(mx: *M, ctx: *i32) anyerror!void {
-                    try Fr.start(mx, 0, ctx, null);
+            var h1 = try zio.spawn(struct {
+                fn run(mx: *M, ch: *M.SubChannel, ctx: *i32) anyerror!void {
+                    _ = mx;
+                    try R1.symmetric_run(.client, ctx, ch, P1.A, null);
                 }
-            };
-            const W2 = struct {
-                fn run(mx: *M, ctx: *i32) anyerror!void {
-                    try Fr.start(mx, 1, ctx, null);
+            }.run, .{ &m, m.subChannel(0), c1 });
+            var h2 = try zio.spawn(struct {
+                fn run(mx: *M, ch: *M.SubChannel, ctx: *i32) anyerror!void {
+                    _ = mx;
+                    try R2.symmetric_run(.client, ctx, ch, P2.A, null);
                 }
-            };
-            var h1 = try zio.spawn(W1.run, .{ &m, c1 });
-            var h2 = try zio.spawn(W2.run, .{ &m, c2 });
+            }.run, .{ &m, m.subChannel(1), c2 });
             h1.join() catch {};
             h2.join() catch {};
         }
@@ -151,8 +118,16 @@ test "family: two protocols concurrent" {
     var m: M = undefined;
     try m.init(allocator, s, 256, 256);
     defer m.deinit();
-    try Fr.initServer(&m, .{ &srv_ctx1, &srv_ctx2 }, null);
-
+    _ = try zio.spawn(struct {
+        fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
+            try R1.symmetric_run(.server, ctx, ch, P1.A, null);
+        }
+    }.run, .{m.subChannel(0), &srv_ctx1});
+    _ = try zio.spawn(struct {
+        fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
+            try R2.symmetric_run(.server, ctx, ch, P2.A, null);
+        }
+    }.run, .{m.subChannel(1), &srv_ctx2});
     try zio.sleep(zio.Duration.fromMilliseconds(500));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
     try std.testing.expectEqual(@as(i32, 3), srv_ctx2);
