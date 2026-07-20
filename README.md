@@ -108,12 +108,12 @@ try R.simulate(&client, &server, A);
 ```zig
 // Server 端
 var ch: StreamChannel = undefined;
-try ch.init(io, allocator, stream, 256, 256);
+try ch.init(allocator, stream, 256, 256);
 defer ch.deinit(allocator);
-try R.symmetric_run(.server, &server_ctx, &ch, A);
+try R.symmetric_run(.server, &server_ctx, &ch, A, null);
 
 // Client 端（并发任务中）
-try R.symmetric_run(.client, &client_ctx, &ch, A);
+try R.symmetric_run(.client, &client_ctx, &ch, A, null);
 ```
 
 ---
@@ -124,17 +124,18 @@ try R.symmetric_run(.client, &client_ctx, &ch, A);
 |------|------|------|
 | `runner` | `src/runner.zig` | 状态机驱动：`simulate()`、`symmetric_run()` |
 | `channel` | `src/channel.zig` | 通道抽象：`StreamChannel`（明文 TCP）、`TlsChannel`（AEAD 加密） |
+| `family_mux_channel` | `src/family_mux_channel.zig` | 协议族传输层：`MultiplexChannel(N)` 多协议共享 TCP + AEAD 加密 |
 | `codec` | `src/codec.zig` | 二进制编解码：状态 ID + tag + payload |
 | `Graph` | `src/Graph.zig` | DOT 格式状态图生成 |
 | `tls` | `src/protocol/tls/` | 简化 TLS 1.3 握手协议（示例） |
 
 ### Channel
 
-**StreamChannel** — 明文 TCP 通道，包装 `Io.net.Stream`：
+**StreamChannel** — 明文 TCP 通道：
 
 ```zig
 var ch: StreamChannel = undefined;
-try ch.init(io, allocator, stream, read_buf_size, write_buf_size);
+try ch.init(allocator, stream, read_buf_size, write_buf_size);
 defer ch.deinit(allocator);
 ```
 
@@ -142,12 +143,39 @@ defer ch.deinit(allocator);
 
 ```zig
 var tc: TlsChannel = undefined;
-try tc.init(io, allocator, stream, write_key, read_key, 512);
+try tc.init(allocator, &sc, write_key, read_key, 512);
 defer tc.deinit(allocator);
 ```
 
 每条消息 wire format：`nonce(24) || tag(16) || ct_len(2 BE) || ciphertext`，
 nonce 内嵌单调 u64 计数器，提供防重放和防乱序保护。
+
+**MultiplexChannel** — 协议族传输层，多协议共享一条 TCP 连接 + 可选 AEAD 加密：
+
+```zig
+const Mux = MultiplexChannel(2);
+var m: Mux = undefined;
+try m.initFromChannel(allocator, &sc);
+defer m.deinit();
+
+// 启用加密（TLS 握手后）
+m.setKeys(tls_ctx.write_key, tls_ctx.read_key);
+
+// 每个协议获得一个 SubChannel，接口与 StreamChannel 一致
+const ch_a = m.subChannel(0);
+const ch_b = m.subChannel(1);
+
+// 并发运行
+var h1 = try zio.spawn(Runner(ProtoA.State).symmetric_run,
+    .{.client, &ctx_a, ch_a, ProtoA.State, null});
+var h2 = try zio.spawn(Runner(ProtoB.State).symmetric_run,
+    .{.client, &ctx_b, ch_b, ProtoB.State, null});
+```
+
+内部使用两个独立 fiber（Reader + Writer）+ 有界 MVar 队列。Wire format：
+`[protocol_id: u8][payload_len: u16 BE][payload]`。加密模式下整帧经 XSalsa20-Poly1305 AEAD 保护。
+
+详见 `docs/family.md`。
 
 ### Codec
 
@@ -212,8 +240,8 @@ const tls = polyrole.tls;
 
 // client_kp / server_pk 为 Client 持有的密钥对和 Server 公钥
 // server_kp / client_pk 为 Server 持有的密钥对和 Client 公钥
-var client_ctx = tls.ClientContext.init(io, client_kp, server_pk);
-var server_ctx = tls.ServerContext.init(io, server_kp, client_pk);
+var client_ctx = tls.ClientContext.init(client_kp, server_pk);
+var server_ctx = tls.ServerContext.init(server_kp, client_pk);
 
 const R = polyrole.runner.Runner(tls.ClientHello);
 try R.simulate(&client_ctx, &server_ctx, tls.ClientHello);
