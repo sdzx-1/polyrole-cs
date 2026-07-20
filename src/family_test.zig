@@ -107,24 +107,33 @@ test "family: recv timeout" {
     const rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
     const P1 = TestProtocol.make("p1", polyrole.Exit);
-    const R = polyrole.runner.Runner(P1.A);
+    const P2 = TestProtocol.make("p2", polyrole.Exit);
+    const R1 = polyrole.runner.Runner(P1.A);
+    const R2 = polyrole.runner.Runner(P2.A);
     const SC = polyrole.channel.StreamChannel;
-    const M = Mux(1, false);
+    const M = Mux(2, false);
     const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var l = try lh.listen(.{});
     defer l.close();
 
-    var srv_ctx: i32 = 0;
+    var srv_ctx1: i32 = 0;
+    var srv_ctx2: i32 = 0;
 
-    // Client connects but never sends — server recv should timeout
+    // Client: P1 sends normally, P2 never sends
     var g: zio.Group = .init;
     defer g.cancel();
     try g.spawn(struct {
         fn run(a: zio.net.Address) !void {
             const s = try a.connect(.{});
-            // Hold connection open, never send
-            try zio.sleep(zio.Duration.fromSeconds(60));
-            s.close();
+            var sc: SC = undefined;
+            try sc.init(allocator, s, 256, 256);
+            defer sc.deinit(allocator);
+            var m: M = undefined;
+            try m.initFromChannel(allocator, &sc);
+            defer m.deinit();
+            // P1: run normally
+            var c1: i32 = 0;
+            try R1.symmetric_run(.client, &c1, m.subChannel(0), P1.A, null);
         }
     }.run, .{l.socket.address});
 
@@ -136,8 +145,18 @@ test "family: recv timeout" {
     try m.initFromChannel(allocator, &sc);
     defer m.deinit();
 
-    const err = R.symmetric_run(.server, &srv_ctx, m.subChannel(0), P1.A, 100);
+    _ = try zio.spawn(struct {
+        fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
+            try R1.symmetric_run(.server, ctx, ch, P1.A, null);
+        }
+    }.run, .{m.subChannel(0), &srv_ctx1});
+
+    // P2: server recvs with 100ms timeout, client never sends
+    const err = R2.symmetric_run(.server, &srv_ctx2, m.subChannel(1), P2.A, 100);
     try std.testing.expectError(error.Canceled, err);
+
+    try zio.sleep(zio.Duration.fromMilliseconds(300));
+    try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
 }
 
 test "family: two protocols concurrent" {
