@@ -11,7 +11,7 @@
 ```
 单协议:                          协议族:
 
-runner.zig                        family_runner.zig
+runner.zig                        family_test.zig
   Runner(State)                     FamilyRunner(.{A, B, C})
   驱动单个状态机                    管理多协议并发
   ↑ 不关心底层传输                   ↑ 不关心底层传输
@@ -205,7 +205,7 @@ test "family: two protocols concurrent" {
 ```
 src/
 ├── family_mux_channel.zig    ← 传输层：MultiplexChannel + Reader/Writer Fiber
-├── family_runner.zig         ← 调度层：FamilyRunner + 2 个测试
+├── family_test.zig         ← 调度层：FamilyRunner + 2 个测试
 ├── root.zig                  ← pub const 导出
 └── runner.zig                ← 不动
 docs/

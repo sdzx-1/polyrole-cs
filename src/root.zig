@@ -5,7 +5,7 @@ pub const codec = @import("codec.zig");
 pub const channel = @import("channel.zig");
 pub const runner = @import("runner.zig");
 pub const family_mux_channel = @import("family_mux_channel.zig");
-pub const family_runner = @import("family_runner.zig");
+pub const family_test = @import("family_test.zig");
 pub const tls = @import("protocol/tls.zig");
 pub const net_monitor = @import("protocol/net_monitor.zig");
 
@@ -214,7 +214,7 @@ pub const StateMap = struct {
 
 comptime {
     _ = @import("runner.zig");
-    _ = @import("family_runner.zig");
+    _ = @import("family_test.zig");
     _ = @import("protocol/tls/test.zig");
     _ = @import("protocol/net_monitor/test.zig");
 }
