@@ -134,6 +134,8 @@ test "family: recv timeout" {
             // P1: run normally
             var c1: i32 = 0;
             try R1.symmetric_run(.client, &c1, m.subChannel(0), P1.A, null);
+            // Keep connection alive for P2 timeout
+            try zio.sleep(zio.Duration.fromSeconds(1));
         }
     }.run, .{l.socket.address});
 
