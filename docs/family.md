@@ -205,7 +205,7 @@ test "family: two protocols concurrent" {
 ```
 src/
 ├── family_mux_channel.zig    ← 传输层：MultiplexChannel + Reader/Writer Fiber
-├── family_test.zig         ← 调度层：FamilyRunner + 2 个测试
+├── family_test.zig         ← 测试
 ├── root.zig                  ← pub const 导出
 └── runner.zig                ← 不动
 docs/
