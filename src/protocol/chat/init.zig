@@ -5,27 +5,23 @@ const ProtocolInfo = polyrole.ProtocolInfo;
 const Exit = polyrole.Exit;
 
 pub const Info = ProtocolInfo("init", ClientContext, ServerContext);
-pub const MaxNameLen = 32;
 
 pub const ClientContext = struct {
-    /// Client's chosen username, set before symmetric_run
-    username: [MaxNameLen]u8 = undefined,
-    name_len: usize = 0,
+    /// Client's chosen username
+    username: []const u8 = "",
     /// Server accepted the name
     accepted: bool = false,
 };
 
 pub const ServerContext = struct {
-    /// Registered usernames (borrowed pointer)
+    /// Registered usernames
     users: *std.StringHashMap(void),
     /// Last proposed name (set by preprocess, used by process)
-    pending_name: [MaxNameLen]u8 = undefined,
-    pending_len: usize = 0,
+    pending_name: []const u8 = "",
 };
 
 pub const NamePayload = struct {
-    name: [MaxNameLen]u8,
-    name_len: usize,
+    name: []const u8,
 };
 
 pub const Send = union(enum) {
@@ -35,16 +31,13 @@ pub const Send = union(enum) {
     pub const info: Info = .{ .agent = .client, .name = "Send" };
 
     pub fn process(ctx: *ClientContext) @This() {
-        if (ctx.name_len == 0) return .quit;
-        return .{ .propose = .{ .data = .{ .name = ctx.username, .name_len = ctx.name_len } } };
+        if (ctx.username.len == 0) return .quit;
+        return .{ .propose = .{ .data = .{ .name = ctx.username } } };
     }
 
     pub fn preprocess(ctx: *ServerContext, result: @This()) void {
         switch (result) {
-            .propose => |d| {
-                ctx.pending_name = d.data.name;
-                ctx.pending_len = d.data.name_len;
-            },
+            .propose => |d| ctx.pending_name = d.data.name,
             .quit => {},
         }
     }
@@ -57,9 +50,8 @@ pub const Reply = union(enum) {
     pub const info: Info = .{ .agent = .server, .name = "Reply" };
 
     pub fn process(ctx: *ServerContext) @This() {
-        const name = ctx.pending_name[0..ctx.pending_len];
-        if (ctx.users.contains(name)) return .reject;
-        ctx.users.put(name, {}) catch unreachable;
+        if (ctx.users.contains(ctx.pending_name)) return .reject;
+        ctx.users.put(ctx.pending_name, {}) catch unreachable;
         return .accept;
     }
 

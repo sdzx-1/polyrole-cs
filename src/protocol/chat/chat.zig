@@ -5,12 +5,9 @@ const ProtocolInfo = polyrole.ProtocolInfo;
 const Exit = polyrole.Exit;
 
 pub const Info = ProtocolInfo("chat", ClientContext, ServerContext);
-pub const MaxTextLen = 256;
 
 pub const ClientContext = struct {
-    /// Next message text to send
     pending_text: ?[]const u8 = null,
-    /// Set to true to exit the chat loop
     done: bool = false,
 };
 
@@ -26,8 +23,7 @@ pub const Message = struct {
 };
 
 pub const MsgPayload = struct {
-    text: [MaxTextLen]u8,
-    text_len: usize,
+    text: []const u8,
 };
 
 pub const Say = union(enum) {
@@ -39,11 +35,8 @@ pub const Say = union(enum) {
     pub fn process(ctx: *ClientContext) @This() {
         if (ctx.done) return .quit;
         if (ctx.pending_text) |text| {
-            var buf: [MaxTextLen]u8 = undefined;
-            const copy_len = @min(text.len, MaxTextLen);
-            @memcpy(buf[0..copy_len], text[0..copy_len]);
             ctx.pending_text = null;
-            return .{ .send = .{ .data = .{ .text = buf, .text_len = copy_len } } };
+            return .{ .send = .{ .data = .{ .text = text } } };
         }
         return .quit;
     }
@@ -51,13 +44,9 @@ pub const Say = union(enum) {
     pub fn preprocess(ctx: *ServerContext, result: @This()) void {
         switch (result) {
             .send => |d| {
-                const text = d.data.text[0..d.data.text_len];
                 const from_dup = ctx.gpa.dupe(u8, ctx.username) catch return;
-                const text_dup = ctx.gpa.dupe(u8, text) catch return;
-                ctx.messages.append(ctx.gpa, .{
-                    .from = from_dup,
-                    .text = text_dup,
-                }) catch {};
+                const text_dup = ctx.gpa.dupe(u8, d.data.text) catch return;
+                ctx.messages.append(ctx.gpa, .{ .from = from_dup, .text = text_dup }) catch {};
             },
             .quit => {},
         }

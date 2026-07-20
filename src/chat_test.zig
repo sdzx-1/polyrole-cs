@@ -52,10 +52,7 @@ test "chat: init + chat + push over Mux(3)" {
 
             // Init
             const Ri = polyrole.runner.Runner(init.Send);
-            var ictx = init.ClientContext{};
-            const name = "alice";
-            @memcpy(ictx.username[0..name.len], name);
-            ictx.name_len = name.len;
+            var ictx = init.ClientContext{ .username = "alice" };
             try Ri.symmetric_run(.client, &ictx, m.subChannel(0), init.Send, null);
             try std.testing.expect(ictx.accepted);
 
