@@ -42,12 +42,24 @@ test "chat: three users send and receive" {
             var mx: M = undefined;
             try mx.initFromChannel(gpa, &sc);
             defer mx.deinit();
+            // Init first
             var ic = init.ClientContext{ .username = n };
             try polyrole.runner.Runner(init.Send).symmetric_run(.client, &ic, mx.subChannel(0), init.Send, null);
-            var cc = chat_mod.ClientContext{ .pending_text = m_ };
-            try polyrole.runner.Runner(chat_mod.Say).symmetric_run(.client, &cc, mx.subChannel(1), chat_mod.Say, null);
-            var pc = push.ClientContext{ .received = r, .gpa = gpa };
-            try polyrole.runner.Runner(push.Push).symmetric_run(.client, &pc, mx.subChannel(2), push.Push, null);
+            // Chat and Push concurrently
+            var hc = try zio.spawn(struct {
+                fn run(mx2: *M, text: []const u8) !void {
+                    var cc = chat_mod.ClientContext{ .pending_text = text };
+                    try polyrole.runner.Runner(chat_mod.Say).symmetric_run(.client, &cc, mx2.subChannel(1), chat_mod.Say, null);
+                }
+            }.run, .{ &mx, m_ });
+            var hp = try zio.spawn(struct {
+                fn run(mx2: *M, gpa2: std.mem.Allocator, recv: *std.ArrayList(push.Message)) !void {
+                    var pc = push.ClientContext{ .received = recv, .gpa = gpa2 };
+                    try polyrole.runner.Runner(push.Push).symmetric_run(.client, &pc, mx2.subChannel(2), push.Push, null);
+                }
+            }.run, .{ &mx, gpa, r });
+            hc.join() catch {};
+            hp.join() catch {};
         }
     };
 
@@ -70,12 +82,20 @@ test "chat: three users send and receive" {
             var mx: M = undefined;
             try mx.initFromChannel(gpa, &sc);
             defer mx.deinit();
+            // Init first
             const Ri = polyrole.runner.Runner(init.Send);
             var isrv = init.ServerContext{ .users = usrs };
             try Ri.symmetric_run(.server, &isrv, mx.subChannel(0), init.Send, null);
-            const Rc = polyrole.runner.Runner(chat_mod.Say);
-            var csrv = chat_mod.ServerContext{ .messages = msgs_, .username = n, .gpa = gpa };
-            try Rc.symmetric_run(.server, &csrv, mx.subChannel(1), chat_mod.Say, null);
+            // Chat and Push concurrently
+            var hc = try zio.spawn(struct {
+                fn run(mx2: *M, gpa2: std.mem.Allocator, ms2: *std.ArrayList(chat_mod.Message), name: []const u8) !void {
+                    const Rc = polyrole.runner.Runner(chat_mod.Say);
+                    var csrv = chat_mod.ServerContext{ .messages = ms2, .username = name, .gpa = gpa2 };
+                    try Rc.symmetric_run(.server, &csrv, mx2.subChannel(1), chat_mod.Say, null);
+                }
+            }.run, .{ &mx, gpa, msgs_, n });
+            // Wait briefly for chat to produce messages, then push
+            try zio.sleep(zio.Duration.fromMilliseconds(50));
             const Rp = polyrole.runner.Runner(push.Push);
             for (msgs_.items) |m_| {
                 var psrv = push.ServerContext{};
@@ -84,6 +104,7 @@ test "chat: three users send and receive" {
             }
             var psrv = push.ServerContext{ .kick = true };
             Rp.symmetric_run(.server, &psrv, mx.subChannel(2), push.Push, null) catch {};
+            hc.join() catch {};
         }
     };
 
