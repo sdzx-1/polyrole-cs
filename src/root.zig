@@ -216,4 +216,5 @@ comptime {
     _ = @import("family_test.zig");
     _ = @import("protocol/tls/test.zig");
     _ = @import("protocol/net_monitor/test.zig");
+    _ = @import("chat_test.zig");
 }
