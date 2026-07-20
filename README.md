@@ -150,30 +150,62 @@ defer tc.deinit(allocator);
 每条消息 wire format：`nonce(24) || tag(16) || ct_len(2 BE) || ciphertext`，
 nonce 内嵌单调 u64 计数器，提供防重放和防乱序保护。
 
-**MultiplexChannel** — 协议族传输层，多协议共享一条 TCP 连接 + 可选 AEAD 加密：
+**MultiplexChannel** — 协议族传输层，多协议共享一条 TCP 连接。编译期参数：
 
 ```zig
-const Mux = MultiplexChannel(2);
+pub fn MultiplexChannel(comptime protocol_count: u8, comptime encrypted: bool) type
+```
+
+`encrypted = false` 为明文模式，`true` 启用 XSalsa20-Poly1305 AEAD 加密。
+
+**架构**：内部两个独立 fiber + 有界 MVar 队列：
+
+```
+  Reader Fiber [R]               Writer Fiber [W]
+  TCP → readFrame               write_ch.receive()
+  → 解析 protocol_id            → 组帧 [id][len][data]
+  → rb.send()                    → TCP write + flush
+       ↓                              ↑
+  SubChannel[0].rb           SubChannel[0].send()
+  SubChannel[1].rb           SubChannel[1].send()
+```
+
+SubChannel 接口与 `StreamChannel` 完全一致（`send`/`recv`），`symmetric_run` 零改动。
+
+**明文 wire format**：`[protocol_id: u8][payload_len: u16 BE][payload]`
+
+**加密 wire format**：`[nonce:24][tag:16][ct_len: u16 BE][ciphertext]`，nonce 内嵌单调 u64 计数器防重放。
+
+**SubChannel.recv 超时**：`symmetric_run(..., 100)` → AutoCancel 100ms → `error.Canceled`。
+
+**完整示例** — TLS 握手 → 加密 Mux → 双协议并发：
+
+```zig
+const Mux = MultiplexChannel(2, true);
+const SC = polyrole.channel.StreamChannel;
+var sc: SC = undefined;
+try sc.init(allocator, stream, 256, 256);
+defer sc.deinit(allocator);
+
+// 1. TLS 握手
+var tls_ctx = tls.ClientContext.init(kp, peer_pk);
+try Runner(tls.ClientHello).symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello, null);
+
+// 2. 创建加密 Mux，传入 TLS 派生密钥
 var m: Mux = undefined;
 try m.initFromChannel(allocator, &sc);
 defer m.deinit();
-
-// 启用加密（TLS 握手后）
 m.setKeys(tls_ctx.write_key, tls_ctx.read_key);
+tls_ctx.deinit();
 
-// 每个协议获得一个 SubChannel，接口与 StreamChannel 一致
-const ch_a = m.subChannel(0);
-const ch_b = m.subChannel(1);
-
-// 并发运行
-var h1 = try zio.spawn(Runner(ProtoA.State).symmetric_run,
-    .{.client, &ctx_a, ch_a, ProtoA.State, null});
-var h2 = try zio.spawn(Runner(ProtoB.State).symmetric_run,
-    .{.client, &ctx_b, ch_b, ProtoB.State, null});
+// 3. 双协议并发
+var h1 = try zio.spawn(Runner(P1.State).symmetric_run,
+    .{.client, &ctx1, m.subChannel(0), P1.State, null});
+var h2 = try zio.spawn(Runner(P2.State).symmetric_run,
+    .{.client, &ctx2, m.subChannel(1), P2.State, null});
+h1.join() catch {};
+h2.join() catch {};
 ```
-
-内部使用两个独立 fiber（Reader + Writer）+ 有界 MVar 队列。Wire format：
-`[protocol_id: u8][payload_len: u16 BE][payload]`。加密模式下整帧经 XSalsa20-Poly1305 AEAD 保护。
 
 详见 `docs/family.md`。
 
