@@ -7,7 +7,7 @@ const zio = @import("zio");
 pub const max_message_size = 1024;
 const channel_capacity = 8;
 
-pub fn MultiplexChannel(comptime protocol_count: u8) type {
+pub fn MultiplexChannel(comptime protocol_count: u8, comptime encrypted: bool) type {
     return struct {
         const Self = @This();
 
@@ -24,7 +24,6 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
         reader_handle: zio.JoinHandle(anyerror!void),
         writer_handle: zio.JoinHandle(anyerror!void),
 
-        /// AEAD keys. Zero = plaintext.
         write_key: [32]u8 = [_]u8{0} ** 32,
         read_key: [32]u8 = [_]u8{0} ** 32,
         write_counter: u64 = 0,
@@ -83,6 +82,7 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
         }
 
         pub fn setKeys(self: *Self, write_key: [32]u8, read_key: [32]u8) void {
+            if (comptime !encrypted) @compileError("setKeys requires encrypted=true");
             self.write_key = write_key;
             self.read_key = read_key;
         }
@@ -104,12 +104,12 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
             while (true) {
                 const msg = self.write_ch.receive() catch break;
                 defer self.allocator.free(msg.data);
-                if (isZero(&self.write_key)) {
+                if (comptime encrypted) {
+                    try writeEncrypted(self, msg);
+                } else {
                     try self.writer.writeByte(msg.protocol_id);
                     try self.writer.writeInt(u16, @intCast(msg.data.len), .big);
                     try self.writer.writeAll(msg.data);
-                } else {
-                    try writeEncrypted(self, msg);
                 }
                 try self.writer.flush();
             }
@@ -117,7 +117,23 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
 
         fn readerLoop(self: *Self) anyerror!void {
             while (true) {
-                if (isZero(&self.read_key)) {
+                if (comptime encrypted) {
+                    const frame = readEncrypted(self) catch |err| {
+                        if (err == error.EndOfStream) {
+                            for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
+                            return;
+                        }
+                        return err;
+                    };
+                    if (frame.id >= protocol_count) {
+                        self.allocator.free(frame.data);
+                        continue;
+                    }
+                    self.sub_channels[frame.id].rb.send(frame.data) catch |err| {
+                        self.allocator.free(frame.data);
+                        if (err == error.ChannelClosed) continue;
+                    };
+                } else {
                     const id = self.reader.takeByte() catch {
                         for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
                         return;
@@ -139,31 +155,10 @@ pub fn MultiplexChannel(comptime protocol_count: u8) type {
                         self.allocator.free(copy);
                         if (err == error.ChannelClosed) continue;
                     };
-                } else {
-                    const frame = readEncrypted(self) catch |err| {
-                        if (err == error.EndOfStream) {
-                            for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
-                            return;
-                        }
-                        return err;
-                    };
-                    if (frame.id >= protocol_count) {
-                        self.allocator.free(frame.data);
-                        continue;
-                    }
-                    self.sub_channels[frame.id].rb.send(frame.data) catch |err| {
-                        self.allocator.free(frame.data);
-                        if (err == error.ChannelClosed) continue;
-                    };
                 }
             }
         }
     };
-}
-
-fn isZero(key: *const [32]u8) bool {
-    for (key) |b| if (b != 0) return false;
-    return true;
 }
 
 fn writeEncrypted(self: anytype, msg: anytype) !void {
