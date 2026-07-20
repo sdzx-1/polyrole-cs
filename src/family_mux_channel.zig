@@ -44,15 +44,14 @@ pub fn MultiplexChannel(
         pub const SubChannel = struct {
             mux: *Self,
             protocol_id: u8,
+            send_buf: []u8,
             rb: zio.Channel([]const u8) = undefined,
             rb_buf: [channel_capacity][]const u8 = @splat(undefined),
 
             pub fn send(self: *SubChannel, state_id: anytype, _: type, val: anytype) !void {
-                const buf = try self.mux.allocator.alloc(u8, max_message_size);
-                defer self.mux.allocator.free(buf);
-                var w = Io.Writer.fixed(buf);
+                var w = Io.Writer.fixed(self.send_buf);
                 try codec.encode(&w, state_id, val);
-                const copy = try self.mux.allocator.dupe(u8, buf[0..w.end]);
+                const copy = try self.mux.allocator.dupe(u8, self.send_buf[0..w.end]);
                 errdefer self.mux.allocator.free(copy);
                 try self.mux.write_ch.send(.{ .protocol_id = self.protocol_id, .data = copy });
             }
@@ -78,7 +77,10 @@ pub fn MultiplexChannel(
             self.write_ch = zio.Channel(WriteMsg).init(&self.write_ch_buf);
 
             for (&self.sub_channels, 0..) |*sub, i| {
-                sub.* = .{ .mux = self, .protocol_id = @intCast(i) };
+                sub.mux = self;
+                sub.protocol_id = @intCast(i);
+                sub.send_buf = try allocator.alloc(u8, max_message_size);
+                errdefer allocator.free(sub.send_buf);
                 sub.rb = zio.Channel([]const u8).init(&sub.rb_buf);
             }
 
@@ -105,7 +107,10 @@ pub fn MultiplexChannel(
         pub fn deinit(self: *Self) void {
             self.write_ch.close(.immediate);
             self.writer_handle.join() catch {};
-            for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
+            for (&self.sub_channels) |*sub| {
+                sub.rb.close(.immediate);
+                self.allocator.free(sub.send_buf);
+            }
             self.stream.socket.shutdown(.receive) catch {};
             self.reader_handle.join() catch {};
             self.stream.close();
