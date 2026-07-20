@@ -84,6 +84,7 @@ pub fn MultiplexChannel(
                 sub.protocol_id = @intCast(i);
                 sub.send_buf = try allocator.alloc(u8, max_message_size);
                 errdefer allocator.free(sub.send_buf);
+                sub.last_recv_data = null;
                 sub.rb = zio.Channel([]const u8).init(&sub.rb_buf);
             }
 

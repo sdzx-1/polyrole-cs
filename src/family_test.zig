@@ -63,13 +63,14 @@ test "family: full handshake" {
     var m: M = undefined;
     try m.initFromChannel(allocator, &sc);
     defer m.deinit();
-    _ = try zio.spawn(struct {
+    var sh = try zio.spawn(struct {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R.symmetric_run(.server, ctx, ch, P1.A, null);
         }
     }.run, .{m.subChannel(0), &srv_ctx});
     try zio.sleep(zio.Duration.fromMilliseconds(500));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx);
+    sh.join() catch {};
     h.join() catch {};
 }
 
@@ -118,7 +119,7 @@ test "family: recv timeout" {
     try m.initFromChannel(allocator, &sc);
     defer m.deinit();
 
-    _ = try zio.spawn(struct {
+    var sh = try zio.spawn(struct {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R1.symmetric_run(.server, ctx, ch, P1.A, null);
         }
@@ -130,6 +131,7 @@ test "family: recv timeout" {
 
     try zio.sleep(zio.Duration.fromMilliseconds(300));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
+    sh.join() catch {};
 }
 
 test "family: two protocols concurrent" {
@@ -184,12 +186,12 @@ test "family: two protocols concurrent" {
     var m: M = undefined;
     try m.initFromChannel(allocator, &sc);
     defer m.deinit();
-    _ = try zio.spawn(struct {
+    var sh1 = try zio.spawn(struct {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R1.symmetric_run(.server, ctx, ch, P1.A, null);
         }
     }.run, .{m.subChannel(0), &srv_ctx1});
-    _ = try zio.spawn(struct {
+    var sh2 = try zio.spawn(struct {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R2.symmetric_run(.server, ctx, ch, P2.A, null);
         }
@@ -197,6 +199,8 @@ test "family: two protocols concurrent" {
     try zio.sleep(zio.Duration.fromMilliseconds(500));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
     try std.testing.expectEqual(@as(i32, 3), srv_ctx2);
+    sh1.join() catch {};
+    sh2.join() catch {};
     h.join() catch {};
 }
 
@@ -276,12 +280,12 @@ test "family: TLS + encrypted Mux + two protocols concurrent" {
     m.setKeys(tls_ctx.write_key, tls_ctx.read_key);
     tls_ctx.deinit();
 
-    _ = try zio.spawn(struct {
+    var sh1 = try zio.spawn(struct {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R1.symmetric_run(.server, ctx, ch, P1.A, null);
         }
     }.run, .{m.subChannel(0), &srv_ctx1});
-    _ = try zio.spawn(struct {
+    var sh2 = try zio.spawn(struct {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R2.symmetric_run(.server, ctx, ch, P2.A, null);
         }
@@ -289,5 +293,7 @@ test "family: TLS + encrypted Mux + two protocols concurrent" {
     try zio.sleep(zio.Duration.fromMilliseconds(500));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
     try std.testing.expectEqual(@as(i32, 3), srv_ctx2);
+    sh1.join() catch {};
+    sh2.join() catch {};
     h.join() catch {};
 }
