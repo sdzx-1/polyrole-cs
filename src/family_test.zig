@@ -102,6 +102,44 @@ test "family: full handshake" {
     try std.testing.expectEqual(@as(i32, 3), srv_ctx);
 }
 
+test "family: recv timeout" {
+    const allocator = std.testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const P1 = TestProtocol.make("p1", polyrole.Exit);
+    const R = polyrole.runner.Runner(P1.A);
+    const SC = polyrole.channel.StreamChannel;
+    const M = Mux(1);
+    const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var l = try lh.listen(.{});
+    defer l.close();
+
+    var srv_ctx: i32 = 0;
+
+    // Client connects but never sends — server recv should timeout
+    var g: zio.Group = .init;
+    defer g.cancel();
+    try g.spawn(struct {
+        fn run(a: zio.net.Address) !void {
+            const s = try a.connect(.{});
+            // Hold connection open, never send
+            try zio.sleep(zio.Duration.fromSeconds(60));
+            s.close();
+        }
+    }.run, .{l.socket.address});
+
+    const s = try l.accept(.{});
+    var sc: SC = undefined;
+    try sc.init(allocator, s, 256, 256);
+    defer sc.deinit(allocator);
+    var m: M = undefined;
+    try m.initFromChannel(allocator, &sc);
+    defer m.deinit();
+
+    const err = R.symmetric_run(.server, &srv_ctx, m.subChannel(0), P1.A, 100);
+    try std.testing.expectError(error.Canceled, err);
+}
+
 test "family: two protocols concurrent" {
     const allocator = std.testing.allocator;
     const rt = try zio.Runtime.init(allocator, .{});
