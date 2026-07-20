@@ -35,7 +35,7 @@ test "family: full handshake" {
     const P1 = TestProtocol.make("p1", polyrole.Exit);
     const R = polyrole.runner.Runner(P1.A);
     const SC = polyrole.channel.StreamChannel;
-    const M = Mux(1, false);
+    const M = Mux(1, false, 1024, 8);
     const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var l = try lh.listen(.{});
     defer l.close();
@@ -82,7 +82,7 @@ test "family: recv timeout" {
     const R1 = polyrole.runner.Runner(P1.A);
     const R2 = polyrole.runner.Runner(P2.A);
     const SC = polyrole.channel.StreamChannel;
-    const M = Mux(2, false);
+    const M = Mux(2, false, 1024, 8);
     const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var l = try lh.listen(.{});
     defer l.close();
@@ -141,7 +141,7 @@ test "family: two protocols concurrent" {
     const R1 = polyrole.runner.Runner(P1.A);
     const R2 = polyrole.runner.Runner(P2.A);
     const SC = polyrole.channel.StreamChannel;
-    const M = Mux(2, false);
+    const M = Mux(2, false, 1024, 8);
     const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var l = try lh.listen(.{});
     defer l.close();
@@ -212,7 +212,7 @@ test "family: TLS + encrypted Mux + two protocols concurrent" {
     const R2 = polyrole.runner.Runner(P2.A);
     const Rtls = polyrole.runner.Runner(tls.ClientHello);
     const SC = polyrole.channel.StreamChannel;
-    const M = Mux(2, true);
+    const M = Mux(2, true, 1024, 8);
 
     var seed: [crypto.sign.Ed25519.KeyPair.seed_length]u8 = undefined;
     try zio.randomSecure(&seed);

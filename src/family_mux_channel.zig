@@ -4,10 +4,12 @@ const codec = @import("codec.zig");
 const crypto = std.crypto;
 const zio = @import("zio");
 
-pub const max_message_size = 1024;
-const channel_capacity = 8;
-
-pub fn MultiplexChannel(comptime protocol_count: u8, comptime encrypted: bool) type {
+pub fn MultiplexChannel(
+    comptime protocol_count: u8,
+    comptime encrypted: bool,
+    comptime max_message_size: usize,
+    comptime channel_capacity: u8,
+) type {
     return struct {
         const Self = @This();
 
@@ -158,57 +160,57 @@ pub fn MultiplexChannel(comptime protocol_count: u8, comptime encrypted: bool) t
                 }
             }
         }
+
+        fn writeEncrypted(self: *Self, msg: WriteMsg) !void {
+            const this_counter = self.write_counter;
+            self.write_counter += 1;
+
+            var nonce: [24]u8 = [_]u8{0} ** 24;
+            std.mem.writeInt(u64, nonce[0..8], this_counter, .big);
+
+            var frame: [max_message_size + 3]u8 = undefined;
+            frame[0] = msg.protocol_id;
+            std.mem.writeInt(u16, frame[1..3], @intCast(msg.data.len), .big);
+            @memcpy(frame[3..][0..msg.data.len], msg.data);
+            const plaintext = frame[0 .. 3 + msg.data.len];
+
+            var combined: [max_message_size + 3 + 16]u8 = undefined;
+            crypto.nacl.SecretBox.seal(combined[0 .. plaintext.len + 16], plaintext, nonce, self.write_key);
+            const ct = combined[16..][0..plaintext.len];
+
+            try self.writer.writeAll(&nonce);
+            try self.writer.writeAll(combined[0..16]);
+            try self.writer.writeInt(u16, @intCast(ct.len), .big);
+            try self.writer.writeAll(ct);
+        }
+
+        const DecryptedFrame = struct {
+            id: u8,
+            data: []const u8,
+        };
+
+        fn readEncrypted(self: *Self) !DecryptedFrame {
+            const nonce = (try self.reader.take(24))[0..24].*;
+            const tag = try self.reader.take(16);
+            const ct_len = try self.reader.takeInt(u16, .big);
+            if (ct_len < 3) return error.MessageTooLarge;
+            const ct = try self.reader.take(ct_len);
+
+            var combined: [max_message_size + 3 + 16]u8 = undefined;
+            @memcpy(combined[0..16], tag);
+            @memcpy(combined[16..][0..ct_len], ct);
+
+            var plain: [max_message_size + 3]u8 = undefined;
+            crypto.nacl.SecretBox.open(plain[0..ct_len], combined[0 .. ct_len + 16], nonce, self.read_key) catch return error.DecryptFailed;
+
+            const counter = std.mem.readInt(u64, nonce[0..8], .big);
+            if (counter != self.read_counter) return error.ReplayDetected;
+            self.read_counter += 1;
+
+            const id = plain[0];
+            const payload_len = std.mem.readInt(u16, plain[1..3], .big);
+            const copy = try self.allocator.dupe(u8, plain[3..][0..payload_len]);
+            return .{ .id = id, .data = copy };
+        }
     };
-}
-
-fn writeEncrypted(self: anytype, msg: anytype) !void {
-    const this_counter = self.write_counter;
-    self.write_counter += 1;
-
-    var nonce: [24]u8 = [_]u8{0} ** 24;
-    std.mem.writeInt(u64, nonce[0..8], this_counter, .big);
-
-    var frame: [max_message_size + 3]u8 = undefined;
-    frame[0] = msg.protocol_id;
-    std.mem.writeInt(u16, frame[1..3], @intCast(msg.data.len), .big);
-    @memcpy(frame[3..][0..msg.data.len], msg.data);
-    const plaintext = frame[0 .. 3 + msg.data.len];
-
-    var combined: [max_message_size + 3 + 16]u8 = undefined;
-    crypto.nacl.SecretBox.seal(combined[0 .. plaintext.len + 16], plaintext, nonce, self.write_key);
-    const ct = combined[16..][0..plaintext.len];
-
-    try self.writer.writeAll(&nonce);
-    try self.writer.writeAll(combined[0..16]);
-    try self.writer.writeInt(u16, @intCast(ct.len), .big);
-    try self.writer.writeAll(ct);
-}
-
-const DecryptedFrame = struct {
-    id: u8,
-    data: []const u8,
-};
-
-fn readEncrypted(self: anytype) !DecryptedFrame {
-    const nonce = (try self.reader.take(24))[0..24].*;
-    const tag = try self.reader.take(16);
-    const ct_len = try self.reader.takeInt(u16, .big);
-    if (ct_len < 3) return error.MessageTooLarge;
-    const ct = try self.reader.take(ct_len);
-
-    var combined: [max_message_size + 3 + 16]u8 = undefined;
-    @memcpy(combined[0..16], tag);
-    @memcpy(combined[16..][0..ct_len], ct);
-
-    var plain: [max_message_size + 3]u8 = undefined;
-    crypto.nacl.SecretBox.open(plain[0..ct_len], combined[0 .. ct_len + 16], nonce, self.read_key) catch return error.DecryptFailed;
-
-    const counter = std.mem.readInt(u64, nonce[0..8], .big);
-    if (counter != self.read_counter) return error.ReplayDetected;
-    self.read_counter += 1;
-
-    const id = plain[0];
-    const payload_len = std.mem.readInt(u16, plain[1..3], .big);
-    const copy = try self.allocator.dupe(u8, plain[3..][0..payload_len]);
-    return .{ .id = id, .data = copy };
 }
