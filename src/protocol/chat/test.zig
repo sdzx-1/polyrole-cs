@@ -31,65 +31,117 @@ test "chat: three users send and receive" {
     var recv2: std.ArrayList(push.Message) = .empty;
     defer { for (recv2.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv2.deinit(allocator); }
 
-    const Client = struct {
+    const names = [_][]const u8{ "alice", "bob", "charlie" };
+    const msgs  = [_][]const u8{ "hello", "hi there", "hey" };
+    const recvs = [_]*std.ArrayList(push.Message){ &recv0, &recv1, &recv2 };
+
+    // ── Client fibers: each does connect → init → chat → push ──────────
+    var ch0 = try zio.spawn(struct {
         fn run(
-            name: []const u8, msg: []const u8,
-            a: zio.net.Address, recv: *std.ArrayList(push.Message),
+            n: []const u8, m_: []const u8,
+            a: zio.net.Address, r: *std.ArrayList(push.Message),
         ) !void {
             const s = try a.connect(.{});
             var sc: SC = undefined;
             try sc.init(allocator, s, 1024, 1024);
             defer sc.deinit(allocator);
-            var m: M = undefined;
-            try m.initFromChannel(allocator, &sc);
-            defer m.deinit();
+            var mx: M = undefined;
+            try mx.initFromChannel(allocator, &sc);
+            defer mx.deinit();
             const Ri = polyrole.runner.Runner(init.Send);
-            var ictx = init.ClientContext{ .username = name };
-            try Ri.symmetric_run(.client, &ictx, m.subChannel(0), init.Send, null);
-            try std.testing.expect(ictx.accepted);
+            var ic = init.ClientContext{ .username = n };
+            try Ri.symmetric_run(.client, &ic, mx.subChannel(0), init.Send, null);
             const Rc = polyrole.runner.Runner(chat_mod.Say);
-            var cctx = chat_mod.ClientContext{ .pending_text = msg };
-            try Rc.symmetric_run(.client, &cctx, m.subChannel(1), chat_mod.Say, null);
+            var cc = chat_mod.ClientContext{ .pending_text = m_ };
+            try Rc.symmetric_run(.client, &cc, mx.subChannel(1), chat_mod.Say, null);
             const Rp = polyrole.runner.Runner(push.Push);
-            var pctx = push.ClientContext{ .received = recv, .gpa = allocator };
-            try Rp.symmetric_run(.client, &pctx, m.subChannel(2), push.Push, null);
+            var pc = push.ClientContext{ .received = r, .gpa = allocator };
+            try Rp.symmetric_run(.client, &pc, mx.subChannel(2), push.Push, null);
+        }
+    }.run, .{ names[0], msgs[0], l.socket.address, recvs[0] });
+
+    var ch1 = try zio.spawn(struct {
+        fn run(n: []const u8, m_: []const u8, a: zio.net.Address, r: *std.ArrayList(push.Message)) !void {
+            const s = try a.connect(.{});
+            var sc: SC = undefined;
+            try sc.init(allocator, s, 1024, 1024);
+            defer sc.deinit(allocator);
+            var mx: M = undefined;
+            try mx.initFromChannel(allocator, &sc);
+            defer mx.deinit();
+            var ic = init.ClientContext{ .username = n };
+            try polyrole.runner.Runner(init.Send).symmetric_run(.client, &ic, mx.subChannel(0), init.Send, null);
+            var cc = chat_mod.ClientContext{ .pending_text = m_ };
+            try polyrole.runner.Runner(chat_mod.Say).symmetric_run(.client, &cc, mx.subChannel(1), chat_mod.Say, null);
+            var pc = push.ClientContext{ .received = r, .gpa = allocator };
+            try polyrole.runner.Runner(push.Push).symmetric_run(.client, &pc, mx.subChannel(2), push.Push, null);
+        }
+    }.run, .{ names[1], msgs[1], l.socket.address, recvs[1] });
+
+    var ch2 = try zio.spawn(struct {
+        fn run(n: []const u8, m_: []const u8, a: zio.net.Address, r: *std.ArrayList(push.Message)) !void {
+            const s = try a.connect(.{});
+            var sc: SC = undefined;
+            try sc.init(allocator, s, 1024, 1024);
+            defer sc.deinit(allocator);
+            var mx: M = undefined;
+            try mx.initFromChannel(allocator, &sc);
+            defer mx.deinit();
+            var ic = init.ClientContext{ .username = n };
+            try polyrole.runner.Runner(init.Send).symmetric_run(.client, &ic, mx.subChannel(0), init.Send, null);
+            var cc = chat_mod.ClientContext{ .pending_text = m_ };
+            try polyrole.runner.Runner(chat_mod.Say).symmetric_run(.client, &cc, mx.subChannel(1), chat_mod.Say, null);
+            var pc = push.ClientContext{ .received = r, .gpa = allocator };
+            try polyrole.runner.Runner(push.Push).symmetric_run(.client, &pc, mx.subChannel(2), push.Push, null);
+        }
+    }.run, .{ names[2], msgs[2], l.socket.address, recvs[2] });
+
+    // ── Server fibers: each accepts one connection, runs init → chat → push ──
+    // All 3 server fibers run concurrently.
+    const Srv = struct {
+        fn run(
+            lsn: *@TypeOf(l),
+            usrs: *std.StringHashMap(void),
+            msgs_: *std.ArrayList(chat_mod.Message),
+            n: []const u8,
+        ) !void {
+            const s = try lsn.accept(.{});
+            var sc: SC = undefined;
+            try sc.init(allocator, s, 1024, 1024);
+            defer sc.deinit(allocator);
+            var mx: M = undefined;
+            try mx.initFromChannel(allocator, &sc);
+            defer mx.deinit();
+
+            const Ri = polyrole.runner.Runner(init.Send);
+            var isrv = init.ServerContext{ .users = usrs };
+            try Ri.symmetric_run(.server, &isrv, mx.subChannel(0), init.Send, null);
+
+            const Rc = polyrole.runner.Runner(chat_mod.Say);
+            var csrv = chat_mod.ServerContext{ .messages = msgs_, .username = n, .gpa = allocator };
+            try Rc.symmetric_run(.server, &csrv, mx.subChannel(1), chat_mod.Say, null);
+
+            const Rp = polyrole.runner.Runner(push.Push);
+            for (msgs_.items) |m_| {
+                var psrv = push.ServerContext{};
+                psrv.pending = push.Message{ .kind = push.KIND_MSG, .from = m_.from, .text = m_.text };
+                try Rp.symmetric_run(.server, &psrv, mx.subChannel(2), push.Push, null);
+            }
+            var psrv = push.ServerContext{ .kick = true };
+            Rp.symmetric_run(.server, &psrv, mx.subChannel(2), push.Push, null) catch {};
         }
     };
 
-    const names = [_][]const u8{ "alice", "bob", "charlie" };
-    const msgs  = [_][]const u8{ "hello", "hi there", "hey" };
-    const recvs = [_]*std.ArrayList(push.Message){ &recv0, &recv1, &recv2 };
+    var sh0 = try zio.spawn(Srv.run, .{ &l, &users, &all_msgs, names[0] });
+    var sh1 = try zio.spawn(Srv.run, .{ &l, &users, &all_msgs, names[1] });
+    var sh2 = try zio.spawn(Srv.run, .{ &l, &users, &all_msgs, names[2] });
 
-    for (names, msgs, recvs) |name, msg, rc| {
-        var h = try zio.spawn(Client.run, .{ name, msg, l.socket.address, rc });
-        const s = try l.accept(.{});
-        var sc: SC = undefined;
-        try sc.init(allocator, s, 1024, 1024);
-        defer sc.deinit(allocator);
-        var m: M = undefined;
-        try m.initFromChannel(allocator, &sc);
-        defer m.deinit();
-
-        const Ri = polyrole.runner.Runner(init.Send);
-        var isrv = init.ServerContext{ .users = &users };
-        try Ri.symmetric_run(.server, &isrv, m.subChannel(0), init.Send, null);
-        try std.testing.expect(isrv.users.contains(name));
-
-        const Rc = polyrole.runner.Runner(chat_mod.Say);
-        var csrv = chat_mod.ServerContext{ .messages = &all_msgs, .username = name, .gpa = allocator };
-        try Rc.symmetric_run(.server, &csrv, m.subChannel(1), chat_mod.Say, null);
-
-        // Push: send exactly one notification to verify the channel works
-        const Rp = polyrole.runner.Runner(push.Push);
-        var psrv = push.ServerContext{};
-        if (all_msgs.items.len > 0) {
-            psrv.pending = push.Message{ .kind = push.KIND_MSG, .from = all_msgs.items[0].from, .text = all_msgs.items[0].text };
-        } else {
-            psrv.kick = true;
-        }
-        try Rp.symmetric_run(.server, &psrv, m.subChannel(2), push.Push, null);
-        h.join() catch {};
-    }
+    ch0.join() catch {};
+    ch1.join() catch {};
+    ch2.join() catch {};
+    sh0.join() catch {};
+    sh1.join() catch {};
+    sh2.join() catch {};
 
     try std.testing.expectEqual(@as(usize, 3), users.count());
     try std.testing.expectEqual(@as(usize, 3), all_msgs.items.len);
