@@ -50,7 +50,8 @@ pub const Say = union(enum) {
                 const text_dup = ctx.gpa.dupe(u8, d.data.text) catch return;
                 ctx.mu.lockUncancelable();
                 defer ctx.mu.unlock();
-                ctx.messages.append(ctx.gpa, .{ .from = from_dup, .text = text_dup }) catch {};
+                ctx.messages.ensureUnusedCapacity(ctx.gpa, 1) catch return;
+                ctx.messages.appendAssumeCapacity(.{ .from = from_dup, .text = text_dup });
             },
             .quit => {},
         }
