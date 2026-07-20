@@ -244,7 +244,7 @@ test "family: TLS + encrypted Mux + two protocols concurrent" {
     var m: M = undefined;
     try m.initFromChannel(allocator, &sc);
     defer m.deinit();
-    m.setKeys(tls_ctx.read_key, tls_ctx.write_key);
+    m.setKeys(tls_ctx.write_key, tls_ctx.read_key);
     tls_ctx.deinit();
 
     _ = try zio.spawn(struct {
