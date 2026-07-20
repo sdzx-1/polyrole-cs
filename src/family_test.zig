@@ -73,13 +73,12 @@ test "family: full handshake" {
     var srv_ctx: i32 = 0;
     var cli_ctx: i32 = 0;
 
-    var g: zio.Group = .init;
-    defer g.cancel();
-    try g.spawn(struct {
+    var h = try zio.spawn(struct {
         fn run(a: zio.net.Address, ctx: *i32) !void {
             const s = try a.connect(.{});
             var sc: SC = undefined;
             try sc.init(allocator, s, 256, 256);
+            defer sc.deinit(allocator);
             var m: M = undefined;
             try m.initFromChannel(allocator, &sc);
             defer m.deinit();
@@ -101,6 +100,7 @@ test "family: full handshake" {
     }.run, .{m.subChannel(0), &srv_ctx});
     try zio.sleep(zio.Duration.fromMilliseconds(500));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx);
+    h.join() catch {};
 }
 
 test "family: recv timeout" {
@@ -181,13 +181,12 @@ test "family: two protocols concurrent" {
     var cli_ctx1: i32 = 0;
     var cli_ctx2: i32 = 0;
 
-    var g: zio.Group = .init;
-    defer g.cancel();
-    try g.spawn(struct {
+    var h = try zio.spawn(struct {
         fn run(a: zio.net.Address, c1: *i32, c2: *i32) !void {
             const s = try a.connect(.{});
             var sc: SC = undefined;
             try sc.init(allocator, s, 256, 256);
+            defer sc.deinit(allocator);
             var m: M = undefined;
             try m.initFromChannel(allocator, &sc);
             defer m.deinit();
@@ -228,6 +227,7 @@ test "family: two protocols concurrent" {
     try zio.sleep(zio.Duration.fromMilliseconds(500));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
     try std.testing.expectEqual(@as(i32, 3), srv_ctx2);
+    h.join() catch {};
 }
 
 test "family: TLS + encrypted Mux + two protocols concurrent" {
@@ -259,9 +259,7 @@ test "family: TLS + encrypted Mux + two protocols concurrent" {
     var cli_ctx1: i32 = 0;
     var cli_ctx2: i32 = 0;
 
-    var g: zio.Group = .init;
-    defer g.cancel();
-    try g.spawn(struct {
+    var h = try zio.spawn(struct {
         fn run(a: zio.net.Address, kp: crypto.sign.Ed25519.KeyPair, pk: crypto.sign.Ed25519.PublicKey, c1: *i32, c2: *i32) !void {
             const s = try a.connect(.{});
             var sc: SC = undefined;
@@ -321,4 +319,5 @@ test "family: TLS + encrypted Mux + two protocols concurrent" {
     try zio.sleep(zio.Duration.fromMilliseconds(500));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
     try std.testing.expectEqual(@as(i32, 3), srv_ctx2);
+    h.join() catch {};
 }
