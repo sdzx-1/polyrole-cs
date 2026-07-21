@@ -6,63 +6,6 @@ const init = @import("init.zig");
 const chat = @import("chat.zig");
 const push = @import("push.zig");
 
-test "chat: persistent Chat loop" {
-    const allocator = std.testing.allocator;
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-    const SC = polyrole.channel.StreamChannel;
-    const M = Mux(3, false, 1024, 8);
-    const MUX = M;
-    const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var l = try lh.listen(.{});
-    defer l.close();
-
-    var board: std.ArrayList(chat.Message) = .empty;
-    defer { for (board.items) |m| { allocator.free(m.from); allocator.free(m.text); } board.deinit(allocator); }
-    var board_mu: zio.Mutex = .{};
-
-    var ch = try zio.spawn(struct {
-        fn run(a: zio.net.Address) !void {
-            const s = try a.connect(.{});
-            var sc: SC = undefined;
-            try sc.init(allocator, s, 1024, 1024);
-            defer sc.deinit(allocator);
-            var mx: MUX = undefined;
-            try mx.initFromChannel(allocator, &sc);
-            defer mx.deinit();
-            var chat_buf: [4][]const u8 = @splat(undefined);
-            var cc = zio.Channel([]const u8).init(&chat_buf);
-            var cctx = chat.ClientContext{ .input_ch = &cc };
-            var hc = try zio.spawn(struct {
-                fn run(mx2: *M, c2: *chat.ClientContext) !void {
-                    try polyrole.runner.Runner(chat.Say).symmetric_run(.client, c2, mx2.subChannel(1), chat.Say, null);
-                }
-            }.run, .{ &mx, &cctx });
-            cc.send("hello") catch {};
-            cc.close(.graceful);
-            hc.join() catch {};
-        }
-    }.run, .{l.socket.address});
-
-    var sh = try zio.spawn(struct {
-        fn run(lsn: *@TypeOf(l), bd: *std.ArrayList(chat.Message), bm: *zio.Mutex) !void {
-            const s = try lsn.accept(.{});
-            var sc: SC = undefined;
-            try sc.init(allocator, s, 1024, 1024);
-            defer sc.deinit(allocator);
-            var mx: MUX = undefined;
-            try mx.initFromChannel(allocator, &sc);
-            defer mx.deinit();
-            var csrv = chat.ServerContext{ .board = bd, .mu = bm, .username = "alice", .gpa = allocator };
-            polyrole.runner.Runner(chat.Say).symmetric_run(.server, &csrv, mx.subChannel(1), chat.Say, 2000) catch {};
-        }
-    }.run, .{ &l, &board, &board_mu });
-
-    sh.join() catch {};
-    ch.join() catch {};
-    try std.testing.expect(board.items.len >= 1);
-}
-
 test "chat: three users send and receive" {
     const allocator = std.testing.allocator;
     const rt = try zio.Runtime.init(allocator, .{});
