@@ -4,6 +4,9 @@ const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
 const Exit = polyrole.Exit;
+const push = @import("push.zig");
+
+pub const BcMsg = push.Message;
 
 pub const Info = ProtocolInfo("chat", ClientContext, ServerContext);
 
@@ -11,14 +14,44 @@ pub const ClientContext = struct {
     input_ch: *zio.Channel([]const u8),
 };
 
+/// A pub/sub channel: publish() sends to all subscribers.
+pub const BroadcastChannel = struct {
+    subs: std.ArrayList(*zio.Channel(BcMsg)),
+    mu: zio.Mutex,
+    gpa: std.mem.Allocator,
+
+    pub fn subscribe(self: *@This(), ch: *zio.Channel(BcMsg)) void {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        self.subs.append(self.gpa, ch) catch {};
+    }
+
+    pub fn unsubscribe(self: *@This(), ch: *zio.Channel(BcMsg)) void {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        for (self.subs.items, 0..) |item, i| {
+            if (item == ch) {
+                _ = self.subs.swapRemove(i);
+                break;
+            }
+        }
+    }
+
+    pub fn publish(self: *@This(), msg: Message) void {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        for (self.subs.items) |ch| {
+            ch.send(.{ .kind = 1, .from = msg.from, .text = msg.text }) catch {};
+        }
+    }
+};
+
 pub const ServerContext = struct {
     gpa: std.mem.Allocator,
     board: *std.ArrayList(Message),
     mu: *zio.Mutex,
     username: []const u8,
-    /// Called after each message is appended. ctx is opaque — use for broadcast channel.
-    onMsg: ?*const fn(ctx: *anyopaque, from: []const u8, text: []const u8) void = null,
-    onMsgCtx: *anyopaque = undefined,
+    bc: *BroadcastChannel,
 };
 
 pub const Message = struct { from: []const u8, text: []const u8 };
@@ -44,7 +77,7 @@ pub const Say = union(enum) {
                 ctx.mu.lockUncancelable();
                 defer ctx.mu.unlock();
                 ctx.board.append(ctx.gpa, .{ .from = from, .text = text }) catch {};
-                if (ctx.onMsg) |f| f(ctx.onMsgCtx, from, text);
+                ctx.bc.publish(.{ .from = from, .text = text });
             },
             .quit => {},
         }
