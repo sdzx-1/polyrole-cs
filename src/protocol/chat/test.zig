@@ -96,6 +96,17 @@ test "chat: three users send and receive" {
             defer mx.deinit();
             var isrv = init.ServerContext{ .users = us, .mu = um };
             try polyrole.runner.Runner(init.Send).symmetric_run(.server, &isrv, mx.subChannel(0), init.Send, null);
+
+            // Persistent push fiber — alive before and after chat
+            var push_buf: [8]push.Message = @splat(undefined);
+            var push_ch = zio.Channel(push.Message).init(&push_buf);
+            var psrv = push.ServerContext{ .board_ch = &push_ch };
+            var hp = try zio.spawn(struct {
+                fn run(mx2: *MUX, ps: *push.ServerContext) !void {
+                    try polyrole.runner.Runner(push.Push).symmetric_run(.server, ps, mx2.subChannel(2), push.Push, null);
+                }
+            }.run, .{ &mx, &psrv });
+
             var csrv = chat.ServerContext{ .board = bd, .mu = bm, .username = "alice", .gpa = allocator };
             var hc = try zio.spawn(struct {
                 fn run(mx2: *MUX, cs: *chat.ServerContext) !void {
@@ -119,14 +130,7 @@ test "chat: three users send and receive" {
                 try zio.sleep(zio.Duration.fromMilliseconds(10));
             }
 
-            var push_buf: [8]push.Message = @splat(undefined);
-            var push_ch = zio.Channel(push.Message).init(&push_buf);
-            var psrv = push.ServerContext{ .board_ch = &push_ch };
-            var hp = try zio.spawn(struct {
-                fn run(mx2: *MUX, ps: *push.ServerContext) !void {
-                    try polyrole.runner.Runner(push.Push).symmetric_run(.server, ps, mx2.subChannel(2), push.Push, null);
-                }
-            }.run, .{ &mx, &psrv });
+            // Push all board items through the persistent push fiber
             {
                 bm.lockUncancelable();
                 defer bm.unlock();
