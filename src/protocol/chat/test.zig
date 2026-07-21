@@ -79,10 +79,15 @@ test "chat: three users send and receive" {
     defer { for (board.items) |m| { allocator.free(m.from); allocator.free(m.text); } board.deinit(allocator); }
     var board_mu: zio.Mutex = .{};
 
+    // Barrier: all server fibers wait until chats_completed == 3
+    var chats_done: usize = 0;
+    var chats_done_mu: zio.Mutex = .{};
+
     const ServerType = @TypeOf(l);
     const Srv = struct {
         fn run(lsn: *ServerType, us: *std.StringHashMap(void), um: *zio.Mutex,
-               bd: *std.ArrayList(chat.Message), bm: *zio.Mutex) !void {
+               bd: *std.ArrayList(chat.Message), bm: *zio.Mutex,
+               done: *usize, dmu: *zio.Mutex) !void {
             const s = try lsn.accept(.{});
             var sc: SC = undefined;
             try sc.init(allocator, s, 4096, 4096);
@@ -98,6 +103,23 @@ test "chat: three users send and receive" {
                     try polyrole.runner.Runner(chat.Say).symmetric_run(.server, cs, mx2.subChannel(1), chat.Say, null);
                 }
             }.run, .{ &mx, &csrv });
+            hc.join() catch {};
+
+            // Barrier: wait until all 3 chat fibers complete
+            {
+                dmu.lockUncancelable();
+                defer dmu.unlock();
+                done.* += 1;
+            }
+            while (true) {
+                {
+                    dmu.lockUncancelable();
+                    defer dmu.unlock();
+                    if (done.* == 3) break;
+                }
+                try zio.sleep(zio.Duration.fromMilliseconds(10));
+            }
+
             var push_buf: [8]push.Message = @splat(undefined);
             var push_ch = zio.Channel(push.Message).init(&push_buf);
             var psrv = push.ServerContext{ .board_ch = &push_ch };
@@ -106,7 +128,6 @@ test "chat: three users send and receive" {
                     try polyrole.runner.Runner(push.Push).symmetric_run(.server, ps, mx2.subChannel(2), push.Push, null);
                 }
             }.run, .{ &mx, &psrv });
-            hc.join() catch {};
             {
                 bm.lockUncancelable();
                 defer bm.unlock();
@@ -162,19 +183,18 @@ test "chat: three users send and receive" {
     var c1 = try zio.spawn(Cli.run, .{ l.socket.address, "bob", "hi there", &recv1 });
     var c2 = try zio.spawn(Cli.run, .{ l.socket.address, "charlie", "hey", &recv2 });
 
-    var s0 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu });
-    var s1 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu });
-    var s2 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu });
+    var s0 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu, &chats_done, &chats_done_mu });
+    var s1 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu, &chats_done, &chats_done_mu });
+    var s2 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu, &chats_done, &chats_done_mu });
 
     c0.join() catch {}; c1.join() catch {}; c2.join() catch {};
     s0.join() catch {}; s1.join() catch {}; s2.join() catch {};
 
     try std.testing.expectEqual(@as(usize, 3), users.count());
     try std.testing.expectEqual(@as(usize, 3), board.items.len);
-    try std.testing.expect(recv0.items.len >= 1);
-    try std.testing.expect(recv1.items.len >= 1);
-    try std.testing.expect(recv2.items.len >= 1);
-    // Each push should contain at least one message with the correct sender
+    try std.testing.expectEqual(@as(usize, 3), recv0.items.len);
+    try std.testing.expectEqual(@as(usize, 3), recv1.items.len);
+    try std.testing.expectEqual(@as(usize, 3), recv2.items.len);
     try std.testing.expectEqual(push.KIND_MSG, recv0.items[0].kind);
     try std.testing.expectEqual(push.KIND_MSG, recv1.items[0].kind);
     try std.testing.expectEqual(push.KIND_MSG, recv2.items[0].kind);
