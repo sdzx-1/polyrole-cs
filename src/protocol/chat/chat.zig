@@ -8,7 +8,7 @@ const Exit = polyrole.Exit;
 pub const Info = ProtocolInfo("chat", ClientContext, ServerContext);
 
 pub const ClientContext = struct {
-    text: []const u8,
+    input_ch: *zio.Channel([]const u8),
 };
 
 pub const ServerContext = struct {
@@ -19,10 +19,9 @@ pub const ServerContext = struct {
 };
 
 pub const Message = struct { from: []const u8, text: []const u8 };
-
 pub const MsgPayload = struct { text: []const u8 };
 
-/// Client says one message, server acks.
+/// Persistent loop: Say.send → Ack.ok → Say.send → ... → input_ch closed → Say.quit
 pub const Say = union(enum) {
     send: Data(MsgPayload, Ack),
     quit: Data(void, Exit),
@@ -30,7 +29,8 @@ pub const Say = union(enum) {
     pub const info: Info = .{ .agent = .client, .name = "Say" };
 
     pub fn process(ctx: *ClientContext) @This() {
-        return .{ .send = .{ .data = .{ .text = ctx.text } } };
+        const text = ctx.input_ch.receive() catch return .quit;
+        return .{ .send = .{ .data = .{ .text = text } } };
     }
 
     pub fn preprocess(ctx: *ServerContext, result: @This()) void {
@@ -48,7 +48,7 @@ pub const Say = union(enum) {
 };
 
 pub const Ack = union(enum) {
-    ok: Data(void, Exit),
+    ok: Data(void, Say),
 
     pub const info: Info = .{ .agent = .server, .name = "Ack" };
 

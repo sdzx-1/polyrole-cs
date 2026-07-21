@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("zio");
 const polyrole = @import("../../root.zig");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
@@ -12,23 +13,18 @@ pub const ClientContext = struct {
 };
 
 pub const ServerContext = struct {
-    msg: Message,
+    board_ch: *zio.Channel(Message),
+    kick: bool = false,
 };
 
-pub const Message = struct {
-    kind: u8,
-    from: []const u8,
-    text: []const u8,
-};
-
+pub const Message = struct { kind: u8, from: []const u8, text: []const u8 };
 pub const Kind = u8;
 pub const KIND_MSG: u8 = 1;
 pub const KIND_JOIN: u8 = 2;
-pub const KIND_LEAVE: u8 = 3;
 
 pub const ItemPayload = struct { kind: u8, from: []const u8, text: []const u8 };
 
-/// Server pushes one message, client acks.
+/// Persistent loop: Push.item → Ack.ok → Push.item → ... → board_ch closed → Push.kick
 pub const Push = union(enum) {
     item: Data(ItemPayload, Ack),
     kick: Data(void, Exit),
@@ -36,7 +32,9 @@ pub const Push = union(enum) {
     pub const info: Info = .{ .agent = .server, .name = "Push" };
 
     pub fn process(ctx: *ServerContext) @This() {
-        return .{ .item = .{ .data = .{ .kind = ctx.msg.kind, .from = ctx.msg.from, .text = ctx.msg.text } } };
+        if (ctx.kick) return .kick;
+        const msg = ctx.board_ch.receive() catch return .kick;
+        return .{ .item = .{ .data = .{ .kind = msg.kind, .from = msg.from, .text = msg.text } } };
     }
 
     pub fn preprocess(ctx: *ClientContext, result: @This()) void {
@@ -52,7 +50,7 @@ pub const Push = union(enum) {
 };
 
 pub const Ack = union(enum) {
-    ok: Data(void, Exit),
+    ok: Data(void, Push),
 
     pub const info: Info = .{ .agent = .client, .name = "Ack" };
 
