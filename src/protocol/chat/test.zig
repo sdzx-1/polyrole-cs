@@ -120,7 +120,7 @@ test "chat: three users send and receive" {
     };
 
     const Cli = struct {
-        fn run(a: zio.net.Address, name: []const u8, text: []const u8) !void {
+        fn run(a: zio.net.Address, name: []const u8, text: []const u8, out_recv: *std.ArrayList(push.Message)) !void {
             const s = try a.connect(.{});
             var sc: SC = undefined;
             try sc.init(allocator, s, 4096, 4096);
@@ -138,9 +138,7 @@ test "chat: three users send and receive" {
                     try polyrole.runner.Runner(chat.Say).symmetric_run(.client, c2, mx2.subChannel(1), chat.Say, null);
                 }
             }.run, .{ &mx, &cctx });
-            var recv: std.ArrayList(push.Message) = .empty;
-            defer { for (recv.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv.deinit(allocator); }
-            var pctx = push.ClientContext{ .recv = &recv, .gpa = allocator };
+            var pctx = push.ClientContext{ .recv = out_recv, .gpa = allocator };
             var hp = try zio.spawn(struct {
                 fn run(mx2: *MUX, pc: *push.ClientContext) !void {
                     try polyrole.runner.Runner(push.Push).symmetric_run(.client, pc, mx2.subChannel(2), push.Push, null);
@@ -150,13 +148,19 @@ test "chat: three users send and receive" {
             cc.close(.graceful);
             hc.join() catch {};
             hp.join() catch {};
-            try std.testing.expect(recv.items.len >= 1);
         }
     };
 
-    var c0 = try zio.spawn(Cli.run, .{ l.socket.address, "alice", "hello" });
-    var c1 = try zio.spawn(Cli.run, .{ l.socket.address, "bob", "hi there" });
-    var c2 = try zio.spawn(Cli.run, .{ l.socket.address, "charlie", "hey" });
+    var recv0: std.ArrayList(push.Message) = .empty;
+    defer { for (recv0.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv0.deinit(allocator); }
+    var recv1: std.ArrayList(push.Message) = .empty;
+    defer { for (recv1.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv1.deinit(allocator); }
+    var recv2: std.ArrayList(push.Message) = .empty;
+    defer { for (recv2.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv2.deinit(allocator); }
+
+    var c0 = try zio.spawn(Cli.run, .{ l.socket.address, "alice", "hello", &recv0 });
+    var c1 = try zio.spawn(Cli.run, .{ l.socket.address, "bob", "hi there", &recv1 });
+    var c2 = try zio.spawn(Cli.run, .{ l.socket.address, "charlie", "hey", &recv2 });
 
     var s0 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu });
     var s1 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu });
@@ -166,5 +170,12 @@ test "chat: three users send and receive" {
     s0.join() catch {}; s1.join() catch {}; s2.join() catch {};
 
     try std.testing.expectEqual(@as(usize, 3), users.count());
-    try std.testing.expect(board.items.len >= 3);
+    try std.testing.expectEqual(@as(usize, 3), board.items.len);
+    try std.testing.expect(recv0.items.len >= 1);
+    try std.testing.expect(recv1.items.len >= 1);
+    try std.testing.expect(recv2.items.len >= 1);
+    // Each push should contain at least one message with the correct sender
+    try std.testing.expectEqual(push.KIND_MSG, recv0.items[0].kind);
+    try std.testing.expectEqual(push.KIND_MSG, recv1.items[0].kind);
+    try std.testing.expectEqual(push.KIND_MSG, recv2.items[0].kind);
 }
