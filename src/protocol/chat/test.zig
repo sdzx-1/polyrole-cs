@@ -116,16 +116,15 @@ test "chat: three users send and receive" {
     var c1 = try zio.spawn(Cli.run, .{ l.socket.address, "bob", "hi there", &recv1 });
     var c2 = try zio.spawn(Cli.run, .{ l.socket.address, "charlie", "hey", &recv2 });
 
-    // Accept in main fiber, spawn Handler per connection
-    const s0_stream = try l.accept(.{});
-    var s0 = try zio.spawn(Handler.run, .{ s0_stream, &users, &users_mu, &board, &board_mu });
-    const s1_stream = try l.accept(.{});
-    var s1 = try zio.spawn(Handler.run, .{ s1_stream, &users, &users_mu, &board, &board_mu });
-    const s2_stream = try l.accept(.{});
-    var s2 = try zio.spawn(Handler.run, .{ s2_stream, &users, &users_mu, &board, &board_mu });
+    // Accept in main fiber, spawn Handler per connection via Group
+    var sg: zio.Group = .init;
+    defer sg.cancel();
+    for (0..3) |_| {
+        const stream = try l.accept(.{});
+        try sg.spawn(Handler.run, .{ stream, &users, &users_mu, &board, &board_mu });
+    }
 
     c0.join() catch {}; c1.join() catch {}; c2.join() catch {};
-    s0.join() catch {}; s1.join() catch {}; s2.join() catch {};
 
     try std.testing.expectEqual(@as(usize, 3), users.count());
     try std.testing.expectEqual(@as(usize, 3), board.items.len);
