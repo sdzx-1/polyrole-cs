@@ -12,6 +12,7 @@ test "chat: persistent Chat loop" {
     defer rt.deinit();
     const SC = polyrole.channel.StreamChannel;
     const M = Mux(3, false, 1024, 8);
+    const MUX = M;
     const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var l = try lh.listen(.{});
     defer l.close();
@@ -26,7 +27,7 @@ test "chat: persistent Chat loop" {
             var sc: SC = undefined;
             try sc.init(allocator, s, 1024, 1024);
             defer sc.deinit(allocator);
-            var mx: M = undefined;
+            var mx: MUX = undefined;
             try mx.initFromChannel(allocator, &sc);
             defer mx.deinit();
             var chat_buf: [4][]const u8 = @splat(undefined);
@@ -49,7 +50,7 @@ test "chat: persistent Chat loop" {
             var sc: SC = undefined;
             try sc.init(allocator, s, 1024, 1024);
             defer sc.deinit(allocator);
-            var mx: M = undefined;
+            var mx: MUX = undefined;
             try mx.initFromChannel(allocator, &sc);
             defer mx.deinit();
             var csrv = chat.ServerContext{ .board = bd, .mu = bm, .username = "alice", .gpa = allocator };
@@ -83,14 +84,12 @@ test "chat: three users send and receive" {
     var chats_done: usize = 0;
     var chats_done_mu: zio.Mutex = .{};
 
-    const ServerType = @TypeOf(l);
-    const Srv = struct {
-        fn run(lsn: *ServerType, us: *std.StringHashMap(void), um: *zio.Mutex,
+    const Handler = struct {
+        fn run(stream: zio.net.Stream, us: *std.StringHashMap(void), um: *zio.Mutex,
                bd: *std.ArrayList(chat.Message), bm: *zio.Mutex,
                done: *usize, dmu: *zio.Mutex) !void {
-            const s = try lsn.accept(.{});
             var sc: SC = undefined;
-            try sc.init(allocator, s, 4096, 4096);
+            try sc.init(allocator, stream, 4096, 4096);
             defer sc.deinit(allocator);
             var mx: MUX = undefined;
             try mx.initFromChannel(allocator, &sc);
@@ -183,9 +182,13 @@ test "chat: three users send and receive" {
     var c1 = try zio.spawn(Cli.run, .{ l.socket.address, "bob", "hi there", &recv1 });
     var c2 = try zio.spawn(Cli.run, .{ l.socket.address, "charlie", "hey", &recv2 });
 
-    var s0 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu, &chats_done, &chats_done_mu });
-    var s1 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu, &chats_done, &chats_done_mu });
-    var s2 = try zio.spawn(Srv.run, .{ &l, &users, &users_mu, &board, &board_mu, &chats_done, &chats_done_mu });
+    // Accept in main fiber, spawn Handler per connection
+    const s0_stream = try l.accept(.{});
+    var s0 = try zio.spawn(Handler.run, .{ s0_stream, &users, &users_mu, &board, &board_mu, &chats_done, &chats_done_mu });
+    const s1_stream = try l.accept(.{});
+    var s1 = try zio.spawn(Handler.run, .{ s1_stream, &users, &users_mu, &board, &board_mu, &chats_done, &chats_done_mu });
+    const s2_stream = try l.accept(.{});
+    var s2 = try zio.spawn(Handler.run, .{ s2_stream, &users, &users_mu, &board, &board_mu, &chats_done, &chats_done_mu });
 
     c0.join() catch {}; c1.join() catch {}; c2.join() catch {};
     s0.join() catch {}; s1.join() catch {}; s2.join() catch {};
