@@ -91,6 +91,7 @@ test "chat: three users send and receive" {
             defer mx.deinit();
             var isrv = init.ServerContext{ .users = us, .mu = um };
             try polyrole.runner.Runner(init.Send).symmetric_run(.server, &isrv, mx.subChannel(0), init.Send, null);
+            const username = if (isrv.pending_name.len > 0) isrv.pending_name else "unknown";
 
             // Persistent push fiber — alive before and after chat
             var push_buf: [8]push.Message = @splat(undefined);
@@ -105,7 +106,7 @@ test "chat: three users send and receive" {
             // Short delay so all 3 push fibers start before any chat runs
             try zio.sleep(zio.Duration.fromMilliseconds(50));
 
-            var csrv = chat.ServerContext{ .board = bd, .mu = bm, .username = "alice", .gpa = allocator };
+            var csrv = chat.ServerContext{ .board = bd, .mu = bm, .username = username, .gpa = allocator };
             var hc = try zio.spawn(struct {
                 fn run(mx2: *MUX, cs: *chat.ServerContext) !void {
                     try polyrole.runner.Runner(chat.Say).symmetric_run(.server, cs, mx2.subChannel(1), chat.Say, null);
