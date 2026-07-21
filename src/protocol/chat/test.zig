@@ -105,16 +105,19 @@ test "chat: three users send and receive" {
         }
     };
 
-    var recv0: std.ArrayList(push.Message) = .empty;
-    defer { for (recv0.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv0.deinit(allocator); }
-    var recv1: std.ArrayList(push.Message) = .empty;
-    defer { for (recv1.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv1.deinit(allocator); }
-    var recv2: std.ArrayList(push.Message) = .empty;
-    defer { for (recv2.items) |m| { allocator.free(m.from); allocator.free(m.text); } recv2.deinit(allocator); }
+    var recvs: [3]std.ArrayList(push.Message) = @splat(.empty);
+    defer for (&recvs) |*r| {
+        for (r.items) |m| { allocator.free(m.from); allocator.free(m.text); }
+        r.deinit(allocator);
+    };
 
-    var c0 = try zio.spawn(Cli.run, .{ l.socket.address, "alice", "hello", &recv0 });
-    var c1 = try zio.spawn(Cli.run, .{ l.socket.address, "bob", "hi there", &recv1 });
-    var c2 = try zio.spawn(Cli.run, .{ l.socket.address, "charlie", "hey", &recv2 });
+    const names = [_][]const u8{ "alice", "bob", "charlie" };
+    const texts = [_][]const u8{ "hello", "hi there", "hey" };
+
+    var chs: [3]@TypeOf(try zio.spawn(Cli.run, .{ l.socket.address, "", "", &recvs[0] })) = undefined;
+    for (names, texts, &recvs, &chs) |name, text, *recv, *h| {
+        h.* = try zio.spawn(Cli.run, .{ l.socket.address, name, text, recv });
+    }
 
     // Accept in main fiber, spawn Handler per connection via Group
     var sg: zio.Group = .init;
@@ -124,14 +127,14 @@ test "chat: three users send and receive" {
         try sg.spawn(Handler.run, .{ stream, &users, &users_mu, &board, &board_mu });
     }
 
-    c0.join() catch {}; c1.join() catch {}; c2.join() catch {};
+    for (&chs) |*h| h.join() catch {};
 
     try std.testing.expectEqual(@as(usize, 3), users.count());
     try std.testing.expectEqual(@as(usize, 3), board.items.len);
-    try std.testing.expect(recv0.items.len >= 1);
-    try std.testing.expect(recv1.items.len >= 1);
-    try std.testing.expect(recv2.items.len >= 1);
-    try std.testing.expectEqual(push.KIND_MSG, recv0.items[0].kind);
-    try std.testing.expectEqual(push.KIND_MSG, recv1.items[0].kind);
-    try std.testing.expectEqual(push.KIND_MSG, recv2.items[0].kind);
+    try std.testing.expect(recvs[0].items.len >= 1);
+    try std.testing.expect(recvs[1].items.len >= 1);
+    try std.testing.expect(recvs[2].items.len >= 1);
+    try std.testing.expectEqual(push.KIND_MSG, recvs[0].items[0].kind);
+    try std.testing.expectEqual(push.KIND_MSG, recvs[1].items[0].kind);
+    try std.testing.expectEqual(push.KIND_MSG, recvs[2].items[0].kind);
 }
