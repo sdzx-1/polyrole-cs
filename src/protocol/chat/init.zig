@@ -8,7 +8,9 @@ const Exit = polyrole.Exit;
 pub const Info = ProtocolInfo("init", ClientContext, ServerContext);
 
 pub const ClientContext = struct {
-    username: []const u8,
+    /// External code feeds names here. On rejection, process blocks for next.
+    input_ch: *zio.Channel([]const u8),
+    /// Set to true when server accepts the last proposed name.
     accepted: bool = false,
 };
 
@@ -27,8 +29,8 @@ pub const Send = union(enum) {
     pub const info: Info = .{ .agent = .client, .name = "Send" };
 
     pub fn process(ctx: *ClientContext) @This() {
-        if (ctx.username.len == 0) return .quit;
-        return .{ .propose = .{ .data = .{ .name = ctx.username } } };
+        const name = ctx.input_ch.receive() catch return .quit;
+        return .{ .propose = .{ .data = .{ .name = name } } };
     }
 
     pub fn preprocess(ctx: *ServerContext, result: @This()) void {
@@ -41,7 +43,7 @@ pub const Send = union(enum) {
 
 pub const Reply = union(enum) {
     accept: Data(void, Exit),
-    reject: Data(void, Exit),
+    reject: Data(void, Send),
 
     pub const info: Info = .{ .agent = .server, .name = "Reply" };
 

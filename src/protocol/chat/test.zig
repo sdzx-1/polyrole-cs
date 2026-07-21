@@ -136,7 +136,10 @@ test "chat: three users send and receive" {
             var mx: MUX = undefined;
             try mx.initFromChannel(allocator, &sc);
             defer mx.deinit();
-            var ic = init.ClientContext{ .username = name };
+            var init_buf: [4][]const u8 = @splat(undefined);
+            var init_ch = zio.Channel([]const u8).init(&init_buf);
+            try init_ch.send(name);
+            var ic = init.ClientContext{ .input_ch = &init_ch };
             try polyrole.runner.Runner(init.Send).symmetric_run(.client, &ic, mx.subChannel(0), init.Send, null);
             var chat_buf: [4][]const u8 = @splat(undefined);
             var cc = zio.Channel([]const u8).init(&chat_buf);
