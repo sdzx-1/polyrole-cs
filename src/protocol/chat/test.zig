@@ -6,6 +6,42 @@ const init = @import("init.zig");
 const chat = @import("chat.zig");
 const push = @import("push.zig");
 
+const BroadcastChannel = struct {
+    subs: std.ArrayList(*zio.Channel(push.Message)),
+    mu: zio.Mutex,
+    gpa: std.mem.Allocator,
+
+    fn subscribe(self: *@This(), ch: *zio.Channel(push.Message)) void {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        self.subs.append(self.gpa, ch) catch {};
+    }
+
+    fn unsubscribe(self: *@This(), ch: *zio.Channel(push.Message)) void {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        for (self.subs.items, 0..) |item, i| {
+            if (item == ch) {
+                _ = self.subs.swapRemove(i);
+                break;
+            }
+        }
+    }
+
+    fn publish(self: *@This(), msg: push.Message) void {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        for (self.subs.items) |ch| {
+            ch.send(msg) catch {};
+        }
+    }
+};
+
+fn onChatMsg(ctx: *anyopaque, from: []const u8, text: []const u8) void {
+    const bc: *BroadcastChannel = @ptrCast(@alignCast(ctx));
+    bc.publish(.{ .kind = push.KIND_MSG, .from = from, .text = text });
+}
+
 test "chat: three users send and receive" {
     const allocator = std.testing.allocator;
     const rt = try zio.Runtime.init(allocator, .{});
@@ -23,9 +59,12 @@ test "chat: three users send and receive" {
     defer { for (board.items) |m| { allocator.free(m.from); allocator.free(m.text); } board.deinit(allocator); }
     var board_mu: zio.Mutex = .{};
 
+    var bc: BroadcastChannel = .{ .subs = .empty, .mu = .{}, .gpa = allocator };
+    defer bc.subs.deinit(allocator);
+
     const Handler = struct {
         fn run(stream: zio.net.Stream, us: *std.StringHashMap(void), um: *zio.Mutex,
-               bd: *std.ArrayList(chat.Message), bm: *zio.Mutex) !void {
+               bd: *std.ArrayList(chat.Message), bm: *zio.Mutex, brdcst: *BroadcastChannel) !void {
             var sc: SC = undefined;
             try sc.init(allocator, stream, 4096, 4096);
             defer sc.deinit(allocator);
@@ -36,9 +75,11 @@ test "chat: three users send and receive" {
             try polyrole.runner.Runner(init.Send).symmetric_run(.server, &isrv, mx.subChannel(0), init.Send, null);
             const username = if (isrv.pending_name.len > 0) isrv.pending_name else "unknown";
 
-            // Persistent push fiber — alive before and after chat
+            // Push fiber — reads from broadcast channel, sends to client
             var push_buf: [8]push.Message = @splat(undefined);
             var push_ch = zio.Channel(push.Message).init(&push_buf);
+            brdcst.subscribe(&push_ch);
+            errdefer brdcst.unsubscribe(&push_ch);
             var psrv = push.ServerContext{ .board_ch = &push_ch };
             var hp = try zio.spawn(struct {
                 fn run(mx2: *MUX, ps: *push.ServerContext) !void {
@@ -46,10 +87,9 @@ test "chat: three users send and receive" {
                 }
             }.run, .{ &mx, &psrv });
 
-            // Short delay so all 3 push fibers start before any chat runs
             try zio.sleep(zio.Duration.fromMilliseconds(50));
 
-            var csrv = chat.ServerContext{ .board = bd, .mu = bm, .username = username, .gpa = allocator };
+            var csrv = chat.ServerContext{ .board = bd, .mu = bm, .username = username, .gpa = allocator, .onMsg = &onChatMsg, .onMsgCtx = @ptrCast(brdcst) };
             var hc = try zio.spawn(struct {
                 fn run(mx2: *MUX, cs: *chat.ServerContext) !void {
                     try polyrole.runner.Runner(chat.Say).symmetric_run(.server, cs, mx2.subChannel(1), chat.Say, null);
@@ -57,16 +97,11 @@ test "chat: three users send and receive" {
             }.run, .{ &mx, &csrv });
             hc.join() catch {};
 
-            // Push all board items through the persistent push fiber
-            {
-                bm.lockUncancelable();
-                defer bm.unlock();
-                for (bd.items) |msg| {
-                    push_ch.send(.{ .kind = push.KIND_MSG, .from = msg.from, .text = msg.text }) catch break;
-                }
-            }
+            // All messages broadcast in real-time via chat.preprocess.
+            // Close push channel — push fiber exits, then unregister.
             push_ch.close(.graceful);
             hp.join() catch {};
+            brdcst.unsubscribe(&push_ch);
         }
     };
 
@@ -119,21 +154,20 @@ test "chat: three users send and receive" {
         h.* = try zio.spawn(Cli.run, .{ l.socket.address, name, text, recv });
     }
 
-    // Accept in main fiber, spawn Handler per connection via Group
     var sg: zio.Group = .init;
     defer sg.cancel();
     for (0..3) |_| {
         const stream = try l.accept(.{});
-        try sg.spawn(Handler.run, .{ stream, &users, &users_mu, &board, &board_mu });
+        try sg.spawn(Handler.run, .{ stream, &users, &users_mu, &board, &board_mu, &bc });
     }
 
     for (&chs) |*h| h.join() catch {};
 
     try std.testing.expectEqual(@as(usize, 3), users.count());
     try std.testing.expectEqual(@as(usize, 3), board.items.len);
-    try std.testing.expect(recvs[0].items.len >= 1);
-    try std.testing.expect(recvs[1].items.len >= 1);
-    try std.testing.expect(recvs[2].items.len >= 1);
+    try std.testing.expectEqual(@as(usize, 3), recvs[0].items.len);
+    try std.testing.expectEqual(@as(usize, 3), recvs[1].items.len);
+    try std.testing.expectEqual(@as(usize, 3), recvs[2].items.len);
     try std.testing.expectEqual(push.KIND_MSG, recvs[0].items[0].kind);
     try std.testing.expectEqual(push.KIND_MSG, recvs[1].items[0].kind);
     try std.testing.expectEqual(push.KIND_MSG, recvs[2].items[0].kind);

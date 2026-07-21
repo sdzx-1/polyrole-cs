@@ -16,6 +16,9 @@ pub const ServerContext = struct {
     board: *std.ArrayList(Message),
     mu: *zio.Mutex,
     username: []const u8,
+    /// Called after each message is appended. ctx is opaque — use for broadcast channel.
+    onMsg: ?*const fn(ctx: *anyopaque, from: []const u8, text: []const u8) void = null,
+    onMsgCtx: *anyopaque = undefined,
 };
 
 pub const Message = struct { from: []const u8, text: []const u8 };
@@ -41,6 +44,7 @@ pub const Say = union(enum) {
                 ctx.mu.lockUncancelable();
                 defer ctx.mu.unlock();
                 ctx.board.append(ctx.gpa, .{ .from = from, .text = text }) catch {};
+                if (ctx.onMsg) |f| f(ctx.onMsgCtx, from, text);
             },
             .quit => {},
         }
