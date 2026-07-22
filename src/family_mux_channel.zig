@@ -143,9 +143,14 @@ pub fn MultiplexChannel(
                         self.allocator.free(frame.data);
                         continue;
                     }
-                    self.sub_channels[frame.id].rb.send(frame.data) catch |err| {
+                    self.sub_channels[frame.id].rb.trySend(frame.data) catch |err| {
                         self.allocator.free(frame.data);
                         if (err == error.ChannelClosed) continue;
+                        if (err == error.ChannelFull) {
+                            self.sub_channels[frame.id].rb.close(.immediate);
+                            continue;
+                        }
+                        return err;
                     };
                 } else {
                     const id = self.reader.takeByte() catch {
@@ -165,9 +170,14 @@ pub fn MultiplexChannel(
                         self.sub_channels[id].rb.close(.immediate);
                         continue;
                     };
-                    self.sub_channels[id].rb.send(copy) catch |err| {
+                    self.sub_channels[id].rb.trySend(copy) catch |err| {
                         self.allocator.free(copy);
                         if (err == error.ChannelClosed) continue;
+                        if (err == error.ChannelFull) {
+                            self.sub_channels[id].rb.close(.immediate);
+                            continue;
+                        }
+                        return err;
                     };
                 }
             }
