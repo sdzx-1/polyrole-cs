@@ -13,26 +13,18 @@ pub fn MultiplexChannel(
     return struct {
         const Self = @This();
 
-        pub const WriteMsg = struct {
-            protocol_id: u8,
-            data: []const u8,
-        };
-
         allocator: std.mem.Allocator,
         stream: zio.net.Stream,
         writer: *std.Io.Writer,
         reader: *std.Io.Reader,
 
         reader_handle: zio.JoinHandle(anyerror!void),
-        writer_handle: zio.JoinHandle(anyerror!void),
+        write_mu: zio.Mutex = .{},
 
         write_key: [32]u8 = [_]u8{0} ** 32,
         read_key: [32]u8 = [_]u8{0} ** 32,
         write_counter: u64 = 0,
         read_counter: u64 = 0,
-
-        write_ch: zio.Channel(WriteMsg),
-        write_ch_buf: [channel_capacity]WriteMsg = @splat(undefined),
 
         /// Heap-allocated scratch for AEAD encryption (only when encrypted=true).
         enc_buf: if (encrypted) []u8 else void = if (encrypted) undefined else {},
@@ -53,16 +45,23 @@ pub fn MultiplexChannel(
             pub fn send(self: *SubChannel, state_id: anytype, _: type, val: anytype) !void {
                 var w = Io.Writer.fixed(self.send_buf);
                 try codec.encode(&w, state_id, val);
-                const copy = try self.mux.allocator.dupe(u8, self.send_buf[0..w.end]);
-                errdefer self.mux.allocator.free(copy);
-                try self.mux.write_ch.send(.{ .protocol_id = self.protocol_id, .data = copy });
+
+                self.mux.write_mu.lockUncancelable();
+                defer self.mux.write_mu.unlock();
+
+                if (comptime encrypted) {
+                    try writeEncrypted(self.mux, self.protocol_id, self.send_buf[0..w.end]);
+                } else {
+                    try self.mux.writer.writeByte(self.protocol_id);
+                    try self.mux.writer.writeInt(u16, @intCast(w.end), .big);
+                    try self.mux.writer.writeAll(self.send_buf[0..w.end]);
+                }
+                try self.mux.writer.flush();
             }
 
             pub fn recv(self: *SubChannel, state_id: anytype, T: type) !T {
                 if (self.last_recv_data) |old| self.mux.allocator.free(old);
                 const data = self.rb.receive() catch |err| {
-                    // receive failed — last_recv_data was already freed above,
-                    // but deinit would free it again. Clear now to prevent double-free.
                     self.last_recv_data = null;
                     return err;
                 };
@@ -81,8 +80,7 @@ pub fn MultiplexChannel(
             self.stream = channel.stream;
             self.writer = &channel.stream_writer.interface;
             self.reader = &channel.stream_reader.interface;
-
-            self.write_ch = zio.Channel(WriteMsg).init(&self.write_ch_buf);
+            self.write_mu = .{};
 
             for (&self.sub_channels, 0..) |*sub, i| {
                 sub.mux = self;
@@ -104,7 +102,6 @@ pub fn MultiplexChannel(
             }
 
             self.reader_handle = try zio.spawn(Self.readerLoop, .{self});
-            self.writer_handle = try zio.spawn(Self.writerLoop, .{self});
         }
 
         pub fn setKeys(self: *Self, write_key: [32]u8, read_key: [32]u8) void {
@@ -114,8 +111,6 @@ pub fn MultiplexChannel(
         }
 
         pub fn deinit(self: *Self) void {
-            self.write_ch.close(.immediate);
-            self.writer_handle.join() catch {};
             for (&self.sub_channels) |*sub| {
                 sub.rb.close(.immediate);
                 self.allocator.free(sub.send_buf);
@@ -132,21 +127,6 @@ pub fn MultiplexChannel(
 
         pub fn subChannel(self: *Self, id: u8) *SubChannel {
             return &self.sub_channels[id];
-        }
-
-        fn writerLoop(self: *Self) anyerror!void {
-            while (true) {
-                const msg = self.write_ch.receive() catch break;
-                defer self.allocator.free(msg.data);
-                if (comptime encrypted) {
-                    try writeEncrypted(self, msg);
-                } else {
-                    try self.writer.writeByte(msg.protocol_id);
-                    try self.writer.writeInt(u16, @intCast(msg.data.len), .big);
-                    try self.writer.writeAll(msg.data);
-                }
-                try self.writer.flush();
-            }
         }
 
         fn readerLoop(self: *Self) anyerror!void {
@@ -193,7 +173,7 @@ pub fn MultiplexChannel(
             }
         }
 
-        fn writeEncrypted(self: *Self, msg: WriteMsg) !void {
+        fn writeEncrypted(self: *Self, protocol_id: u8, data: []const u8) !void {
             const this_counter = self.write_counter;
             self.write_counter += 1;
 
@@ -201,10 +181,10 @@ pub fn MultiplexChannel(
             std.mem.writeInt(u64, nonce[0..8], this_counter, .big);
 
             const frame = self.enc_buf[0 .. max_message_size + 3];
-            frame[0] = msg.protocol_id;
-            std.mem.writeInt(u16, frame[1..3], @intCast(msg.data.len), .big);
-            @memcpy(frame[3..][0..msg.data.len], msg.data);
-            const plaintext = frame[0 .. 3 + msg.data.len];
+            frame[0] = protocol_id;
+            std.mem.writeInt(u16, frame[1..3], @intCast(data.len), .big);
+            @memcpy(frame[3..][0..data.len], data);
+            const plaintext = frame[0 .. 3 + data.len];
 
             const combined = self.enc_buf[0 .. plaintext.len + 16];
             crypto.nacl.SecretBox.seal(combined, plaintext, nonce, self.write_key);
