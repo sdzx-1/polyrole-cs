@@ -91,31 +91,31 @@ pub const Sync = union(enum) {
     }
 };
 
-/// Decision: poll for new data. Check committed vs cursor, route to direct / chunk / wait.
+/// Decision: poll for new data. Block internally until data arrives or kicked.
 pub const Poll = union(enum) {
     direct: Data(ChunkPayload, AckSmall),
     chunk: Data(void, Chunk(Poll)),
-    wait: Data(void, @This()),
     quit: Data(void, Exit),
 
     pub const info: Info = .{ .agent = .server, .name = "Poll" };
 
     pub fn process(ctx: *ServerContext) @This() {
-        const c = ctx.board.committed.load(.acquire);
-        if (c > ctx.cursor) {
-            ctx.batch_end = c;
-            const len = c - ctx.cursor;
-            if (len <= CHUNK_SIZE) {
-                const msgs = ctx.board.items.items[ctx.cursor..c];
-                ctx.cursor = c;
-                const payload = fillPayload(msgs);
-                return .{ .direct = .{ .data = payload } };
+        while (true) {
+            const c = ctx.board.committed.load(.acquire);
+            if (c > ctx.cursor) {
+                ctx.batch_end = c;
+                const len = c - ctx.cursor;
+                if (len <= CHUNK_SIZE) {
+                    const msgs = ctx.board.items.items[ctx.cursor..c];
+                    ctx.cursor = c;
+                    const payload = fillPayload(msgs);
+                    return .{ .direct = .{ .data = payload } };
+                }
+                return .chunk;
             }
-            return .chunk;
+            if (ctx.kick) return .quit;
+            zio.sleep(zio.Duration.fromMilliseconds(ctx.poll_ms)) catch {};
         }
-        if (ctx.kick) return .quit;
-        zio.sleep(zio.Duration.fromMilliseconds(ctx.poll_ms)) catch {};
-        return .wait;
     }
 
     pub fn preprocess(ctx: *ClientContext, result: @This()) void {
