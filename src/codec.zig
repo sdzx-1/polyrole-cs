@@ -52,7 +52,9 @@ pub fn encode_anytype(writer: *std.Io.Writer, data: anytype) !void {
             if (arr.child == u8) {
                 try writer.writeAll(&data);
             } else {
-                @compileError("Not impl!");
+                for (data) |item| {
+                    try encode_anytype(writer, item);
+                }
             }
         },
         .@"struct" => |stru| {
@@ -96,7 +98,11 @@ pub fn decode_type(reader: *std.Io.Reader, Data: type) !Data {
                 @memcpy(&result, bytes);
                 return result;
             } else {
-                @compileError("Not impl!");
+                var result: [arr.len]arr.child = undefined;
+                for (&result) |*item| {
+                    item.* = try decode_type(reader, arr.child);
+                }
+                return result;
             }
         },
         .@"struct" => |stru| {
