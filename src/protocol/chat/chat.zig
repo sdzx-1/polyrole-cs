@@ -21,9 +21,9 @@ pub const ServerContext = struct {
 pub const Message = push.Message;
 pub const MsgPayload = struct { text: []const u8 };
 
-/// Persistent loop: Say.send → Ack.ok → Say.send → ... → input_ch closed → Say.quit
+/// Persistent loop: Say.send → Say.send → ... → input_ch closed → Say.quit
 pub const Say = union(enum) {
-    send: Data(MsgPayload, Ack),
+    send: Data(MsgPayload, @This()),
     quit: Data(void, Exit),
 
     pub const info: Info = .{ .agent = .client, .name = "Say" };
@@ -45,21 +45,5 @@ pub const Say = union(enum) {
             },
             .quit => {},
         }
-    }
-};
-
-pub const Ack = union(enum) {
-    ok: Data(void, Say),
-
-    pub const info: Info = .{ .agent = .server, .name = "Ack" };
-
-    pub fn process(ctx: *ServerContext) @This() {
-        _ = ctx;
-        return .ok;
-    }
-
-    pub fn preprocess(ctx: *ClientContext, result: @This()) void {
-        _ = ctx;
-        _ = result;
     }
 };

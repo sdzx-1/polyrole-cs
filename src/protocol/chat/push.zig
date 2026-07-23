@@ -12,7 +12,6 @@ pub const Info = ProtocolInfo("push", ClientContext, ServerContext);
 pub const ClientContext = struct {
     gpa: std.mem.Allocator,
     recv: *std.ArrayList(Message),
-    chunk_done: bool = false,
 };
 
 pub const ServerContext = struct {
@@ -60,8 +59,8 @@ fn fillPayload(msgs: []const Message) ChunkPayload {
 
 /// Decision: history sync. Check committed, route to direct / chunk / done.
 pub const Sync = union(enum) {
-    direct: Data(ChunkPayload, AckSmall),
-    chunk: Data(void, Chunk(Poll)),
+    direct: Data(ChunkPayload, Poll),
+    chunk: Data(void, Chunk),
     done: Data(void, Poll),
     quit: Data(void, Exit),
 
@@ -93,14 +92,15 @@ pub const Sync = union(enum) {
 
 /// Decision: poll for new data. Block internally until data arrives or kicked.
 pub const Poll = union(enum) {
-    direct: Data(ChunkPayload, AckSmall),
-    chunk: Data(void, Chunk(Poll)),
+    direct: Data(ChunkPayload, @This()),
+    chunk: Data(void, Chunk),
     quit: Data(void, Exit),
 
     pub const info: Info = .{ .agent = .server, .name = "Poll" };
 
     pub fn process(ctx: *ServerContext) @This() {
         while (true) {
+            if (ctx.kick) return .quit;
             const c = ctx.board.committed.load(.acquire);
             if (c > ctx.cursor) {
                 ctx.batch_end = c;
@@ -113,7 +113,6 @@ pub const Poll = union(enum) {
                 }
                 return .chunk;
             }
-            if (ctx.kick) return .quit;
             zio.sleep(zio.Duration.fromMilliseconds(ctx.poll_ms)) catch {};
         }
     }
@@ -126,40 +125,32 @@ pub const Poll = union(enum) {
     }
 };
 
-/// Execution: send one chunk. Self-loop until batch_end reached, then → Done.
-pub fn Chunk(comptime Done: type) type {
-    return union(enum) {
-        items: Data(ChunkPayload, AckChunk(Done)),
-        last: Data(ChunkPayload, AckChunk(Done)),
+/// Execution: send one chunk. Self-loop until batch_end reached, then → Poll.
+pub const Chunk = union(enum) {
+    items: Data(ChunkPayload, @This()),
+    last: Data(ChunkPayload, Poll),
 
-        pub const info: Info = .{ .agent = .server, .name = "Chunk" };
+    pub const info: Info = .{ .agent = .server, .name = "Chunk" };
 
-        pub fn process(ctx: *ServerContext) @This() {
-            const end = @min(ctx.cursor + CHUNK_SIZE, ctx.batch_end);
-            const msgs = ctx.board.items.items[ctx.cursor..end];
-            ctx.cursor = end;
-            const payload = fillPayload(msgs);
-            if (end >= ctx.batch_end) {
-                return .{ .last = .{ .data = payload } };
-            } else {
-                return .{ .items = .{ .data = payload } };
-            }
+    pub fn process(ctx: *ServerContext) @This() {
+        const end = @min(ctx.cursor + CHUNK_SIZE, ctx.batch_end);
+        const msgs = ctx.board.items.items[ctx.cursor..end];
+        ctx.cursor = end;
+        const payload = fillPayload(msgs);
+        if (end >= ctx.batch_end) {
+            return .{ .last = .{ .data = payload } };
+        } else {
+            return .{ .items = .{ .data = payload } };
         }
+    }
 
-        pub fn preprocess(ctx: *ClientContext, result: @This()) void {
-            switch (result) {
-                .items => |d| {
-                    ctx.chunk_done = false;
-                    appendMsgs(ctx, d.data.msgs[0..d.data.count]);
-                },
-                .last => |d| {
-                    ctx.chunk_done = true;
-                    appendMsgs(ctx, d.data.msgs[0..d.data.count]);
-                },
-            }
-        }
-    };
-}
+    pub fn preprocess(ctx: *ClientContext, result: @This()) void {
+        const payload = switch (result) {
+            inline else => |d| d.data,
+        };
+        appendMsgs(ctx, payload.msgs[0..payload.count]);
+    }
+};
 
 fn appendMsgs(ctx: *ClientContext, msgs: []const Message) void {
     for (msgs) |m| {
@@ -171,40 +162,3 @@ fn appendMsgs(ctx: *ClientContext, msgs: []const Message) void {
         ctx.recv.append(ctx.gpa, .{ .kind = m.kind, .from = from, .text = text }) catch {};
     }
 }
-
-/// Ack for Chunk: continue chunking or finish → Done.
-pub fn AckChunk(comptime Done: type) type {
-    return union(enum) {
-        ok: Data(void, Chunk(Done)),
-        into: Data(void, Done),
-
-        pub const info: Info = .{ .agent = .client, .name = "AckChunk" };
-
-        pub fn process(ctx: *ClientContext) @This() {
-            if (ctx.chunk_done) return .into;
-            return .ok;
-        }
-
-        pub fn preprocess(ctx: *ServerContext, result: @This()) void {
-            _ = ctx;
-            _ = result;
-        }
-    };
-}
-
-/// Ack for Sync/Poll direct: simple confirm → Poll.
-pub const AckSmall = union(enum) {
-    ok: Data(void, Poll),
-
-    pub const info: Info = .{ .agent = .client, .name = "AckSmall" };
-
-    pub fn process(ctx: *ClientContext) @This() {
-        _ = ctx;
-        return .ok;
-    }
-
-    pub fn preprocess(ctx: *ServerContext, result: @This()) void {
-        _ = ctx;
-        _ = result;
-    }
-};
