@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
     const graph_step = b.step("graph", "Generate chat protocol state graphs (DOT + PNG)");
     graph_step.dependOn(&run_graph_chat.step);
 
-    inline for (.{ "chat_init", "chat_say", "chat_push" }) |name| {
+    inline for (.{ "chat_init", "chat_say", "chat_push", "tls", "net_monitor" }) |name| {
         const dot_to_png = b.addSystemCommand(&.{ "dot", "-Tpng", "-o", "docs/graphs/" ++ name ++ ".png", "docs/graphs/" ++ name ++ ".dot" });
         dot_to_png.step.dependOn(&run_graph_chat.step);
         graph_step.dependOn(&dot_to_png.step);
