@@ -23,7 +23,7 @@ pub fn main(main_init: std.process.Init) !void {
         const file = try cwd.createFile(main_init.io, dot_path, .{});
         defer file.close(main_init.io);
         var w = file.writer(main_init.io, &.{});
-        try graph.generateDot(null, &w.interface);
+        try graph.generateDot(.{}, &w.interface);
         try w.interface.flush();
     }
 }

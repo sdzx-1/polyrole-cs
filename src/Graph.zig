@@ -31,7 +31,7 @@ pub const Edge = struct {
 
 pub fn generateDot(
     self: @This(),
-    emoj_map: ?*std.StringHashMap([]const u8),
+    role_labels: Roles,
     writer: anytype,
 ) !void {
     try writer.writeAll(
@@ -78,7 +78,7 @@ pub fn generateDot(
             ,
                 .{
                     node.id,
-                    if (emoj_map) |map| map.get(node.sender) orelse "" else "",
+                    role_labels.get(node.sender),
                     node.id,
                     node.state_description,
                     colors[@as(usize, @intCast(node.id)) % colors.len],
@@ -121,6 +121,17 @@ pub fn generateDot(
 
     try writer.flush();
 }
+
+pub const Roles = struct {
+    client: []const u8 = "👤",
+    server: []const u8 = "🖥️",
+
+    pub fn get(self: @This(), role: []const u8) []const u8 {
+        if (std.mem.eql(u8, role, "client")) return self.client;
+        if (std.mem.eql(u8, role, "server")) return self.server;
+        return role;
+    }
+};
 
 pub fn initWithFsm(allocator: std.mem.Allocator, comptime State_: type) !Graph {
     @setEvalBranchQuota(2000000);
