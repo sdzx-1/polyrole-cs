@@ -82,13 +82,15 @@ try Runner(init.Send).symmetric_run(.client, &ic, sub, init.Send, null);
 
 ---
 
-## 4. Chat — 简化为单职责 Writer
+## 4. Chat — 单状态自循环
 
 ```
-Say ──send──→ Ack ──ok──→ Say
+Say ──send: Data(MsgPayload, @This())──→ Say (self-loop)
   │
   └──quit──→ Exit
 ```
+
+`Data(MsgPayload, @This())` 的自循环就是确认——Runner 把帧发给 server 端，两端转到 Say，server 的 preprocess 处理数据。不需要额外的 Ack 状态。
 
 ```zig
 pub const ServerContext = struct {
@@ -100,7 +102,7 @@ pub const ServerContext = struct {
 
 **Say.preprocess** 只做一件事：board.append。
 
-**移除内容：** BroadcastChannel、BcMsg 别名、push import。ServerContext 5 字段 → 3 字段。
+**移除内容：** BroadcastChannel、BcMsg 别名、Ack 状态。ServerContext 5 字段 → 3 字段。
 
 ---
 
@@ -109,22 +111,22 @@ pub const ServerContext = struct {
 ### 状态图
 
 ```
-Sync ──0 < committed ≤ CHUNK──→ Ack.small ──ok──→ Poll
+Sync ──0 < committed ≤ CHUNK──→ Poll
   │
-  ├──committed > CHUNK──→ Chunk(Poll)
+  ├──committed > CHUNK──→ Chunk ──items──→ Chunk (self-loop)
+  │                           │
+  │                           └──last──→ Poll
   │
   └──committed == 0──→ Poll
 
-Poll ──0 < Δ ≤ CHUNK──→ Ack.small ──ok──→ Poll
+Poll ──0 < Δ ≤ CHUNK──→ Poll (self-loop)
   │
-  ├──Δ > CHUNK──→ Chunk(Poll)
+  ├──Δ > CHUNK──→ Chunk (同上)
   │
-  └──Δ == 0──→ Poll (自循环, sleep)
-
-Chunk(Done) ──items──→ Ack.chunk ──ok──→ Chunk(Done)
-  │
-  └──last──→ Ack.chunk ──into──→ Done
+  └──quit──→ Exit
 ```
+
+`direct: Data(ChunkPayload, Poll)` 和 `items: Data(ChunkPayload, Chunk)` 的 self-loop 模式消除了所有 Ack 状态——Runner 发完帧后两端自然进入同一状态，不需要应用层额外确认。
 
 ### 分离原则
 
@@ -132,19 +134,13 @@ Chunk(Done) ──items──→ Ack.chunk ──ok──→ Chunk(Done)
 |------|------|------|
 | Sync | 检查是否有历史数据 | 不发送数据 |
 | Poll | 检查是否有新数据 | 不发送数据 |
-| Chunk(Done) | 发送一块数据 | 不检查 board |
-| Ack.chunk | 响应分块 | 不检查 board |
-| Ack.small | 响应小数据 | 不检查 board |
+| Chunk | 发送一块数据 | 不检查 board |
 
-**Sync 不自循环发数据。Poll 不自循环发数据。** 发送是 Chunk 的唯一职责。
+**Sync 不自循环发数据。Poll 不自循环发数据。** 发送是 Chunk 的唯一职责。小数据走 Poll self-loop 直发，大数据委托 Chunk self-loop 分块。
 
-### 参数化状态：Chunk(Done)
+### Chunk 出口
 
-参照 sendfile 的 `CheckHash(A, B)` 模式。模板复用一次（两个入口同一出口），逻辑写在一处。
-
-### 小数据 shortcut
-
-当 `Δ ≤ CHUNK_SIZE` 时，Sync/Poll 的 `direct` 分支直接发，不经过 Chunk → Ack 绕路。
+Chunk 不再参数化——出口总是 Poll。`items → Chunk` 自循环分块，`last → Poll` 结束。
 
 ### 为什么需要 CHUNK_SIZE
 
@@ -189,8 +185,9 @@ charlie: cc.send("hey") → committed=3, 各 Poll: Δ=1 → .direct([hey])
 | 广播机制 | BroadcastChannel（带锁 channel 列表 + pub/sub） | SharedBoard（无锁读，atomic commit） |
 | Chat 写 board | lock → append → bc.publish（嵌套锁） | lock → append → committed.store |
 | Push 读 board | 通过 bc 被动接收 channel 推送 | 主动定期 snapshot board[cursor..] |
-| Push 数据方式 | 逐条 item → ack 往返 | 批量 direct/chunk，一次发一包 |
-| Push 分块 | 无（依赖 channel 背压） | Chunk(Done) 参数化状态，小数据 shortcut |
-| Mux 队头阻塞 | 单帧可能包含全部历史消息 | CHUNK_SIZE 限制，公平调度 |
-| chat.zig 职责 | 包含 BroadcastChannel 实现 | 纯协议，不依赖 push.zig |
-| 抽象数量 | 3 个 Mutex（board, bc, users） | 2 个 Mutex（board write, users） |
+| Push 数据方式 | 逐条 item → ack 往返 | 批量 self-loop，一次发一包 |
+| Push 分块 | 无 | Chunk self-loop，小数据 Poll self-loop |
+| Ack 状态 | Chat: Ack, Push: AckSmall + AckChunk | 全部删除 — self-loop 即是确认 |
+| Mux write 路径 | 共享 channel FIFO + writerLoop | 各协议直接写 TCP + write_mu |
+| Mux read 路径 | rb.send() 阻塞（一个满全卡） | rb.trySend() 非阻塞（满则终止该协议） |
+| 状态数 | Chat 2, Push 5 | Chat 1, Push 3 |
