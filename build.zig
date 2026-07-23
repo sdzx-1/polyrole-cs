@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
     graph_step.dependOn(&run_graph_chat.step);
 
     inline for (.{ "chat_init", "chat_say", "chat_push" }) |name| {
-        const dot_to_png = b.addSystemCommand(&.{ "dot", "-Tpng", "-o", name ++ ".png", name ++ ".dot" });
+        const dot_to_png = b.addSystemCommand(&.{ "dot", "-Tpng", "-o", "docs/graphs/" ++ name ++ ".png", "docs/graphs/" ++ name ++ ".dot" });
         dot_to_png.step.dependOn(&run_graph_chat.step);
         graph_step.dependOn(&dot_to_png.step);
     }
