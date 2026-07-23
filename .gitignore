@@ -3,5 +3,5 @@
 zig-out/
 *.o
 zig-pkg/
-docs/graphs/chat_*.dot
-docs/graphs/chat_*.png
+docs/graphs/*.dot
+docs/graphs/*.png
