@@ -42,6 +42,12 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_graph_chat = b.addRunArtifact(graph_chat);
-    const graph_step = b.step("graph", "Generate chat protocol state graphs (DOT format)");
+    const graph_step = b.step("graph", "Generate chat protocol state graphs (DOT + PNG)");
     graph_step.dependOn(&run_graph_chat.step);
+
+    inline for (.{ "chat_init", "chat_say", "chat_push" }) |name| {
+        const dot_to_png = b.addSystemCommand(&.{ "dot", "-Tpng", "-o", name ++ ".png", name ++ ".dot" });
+        dot_to_png.step.dependOn(&run_graph_chat.step);
+        graph_step.dependOn(&dot_to_png.step);
+    }
 }

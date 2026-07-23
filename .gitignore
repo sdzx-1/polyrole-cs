@@ -4,3 +4,4 @@ zig-out/
 *.o
 zig-pkg/
 chat_*.dot
+chat_*.png
