@@ -27,4 +27,21 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+
+    const graph_chat = b.addExecutable(.{
+        .name = "graph_chat",
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/graph_chat.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "polyrole_cs", .module = mod },
+            },
+        }),
+    });
+
+    const run_graph_chat = b.addRunArtifact(graph_chat);
+    const graph_step = b.step("graph", "Generate chat protocol state graphs (DOT format)");
+    graph_step.dependOn(&run_graph_chat.step);
 }
