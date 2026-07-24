@@ -5,3 +5,4 @@ zig-out/
 zig-pkg/
 docs/graphs/*.dot
 docs/graphs/*.png
+desigen.md

@@ -1,6 +1,6 @@
 const std = @import("std");
 const zio = @import("zio");
-const polyrole = @import("../../root.zig");
+const polyrole = @import("polyrole_cs");
 const Mux = polyrole.family_mux_channel.MultiplexChannel;
 const init = @import("init.zig");
 const chat = @import("chat.zig");

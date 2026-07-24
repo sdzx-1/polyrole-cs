@@ -1,6 +1,7 @@
 const std = @import("std");
 const polyrole = @import("polyrole_cs");
 const Graph = polyrole.Graph;
+const chat = @import("chat_example");
 
 pub fn main(main_init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
@@ -9,9 +10,9 @@ pub fn main(main_init: std.process.Init) !void {
     cwd.createDir(main_init.io, out_dir, .default_dir) catch {};
 
     inline for (.{
-        .{ "chat_init", polyrole.chat_proto.init.Send },
-        .{ "chat_say", polyrole.chat_proto.say.Say },
-        .{ "chat_push", polyrole.chat_proto.push.Sync },
+        .{ "chat_init", chat.init.Send },
+        .{ "chat_say", chat.say.Say },
+        .{ "chat_push", chat.push.Sync },
         .{ "tls", polyrole.tls.ClientHello },
         .{ "net_monitor", polyrole.net_monitor.PingQuery },
     }) |entry| {

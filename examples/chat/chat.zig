@@ -1,6 +1,6 @@
 const std = @import("std");
 const zio = @import("zio");
-const polyrole = @import("../../root.zig");
+const polyrole = @import("polyrole_cs");
 const Data = polyrole.Data;
 const ProtocolInfo = polyrole.ProtocolInfo;
 const Exit = polyrole.Exit;

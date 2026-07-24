@@ -8,12 +8,6 @@ pub const family_mux_channel = @import("family_mux_channel.zig");
 pub const tls = @import("protocol/tls.zig");
 pub const net_monitor = @import("protocol/net_monitor.zig");
 
-pub const chat_proto = struct {
-    pub const init = @import("protocol/chat/init.zig");
-    pub const say = @import("protocol/chat/chat.zig");
-    pub const push = @import("protocol/chat/push.zig");
-};
-
 pub const Role = enum {
     client,
     server,
@@ -222,5 +216,4 @@ comptime {
     _ = @import("family_test.zig");
     _ = @import("protocol/tls/test.zig");
     _ = @import("protocol/net_monitor/test.zig");
-    _ = @import("protocol/chat/test.zig");
 }
