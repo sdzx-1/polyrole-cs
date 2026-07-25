@@ -216,6 +216,7 @@ pub fn MultiplexChannel(
             const tag = try self.reader.take(16);
             const ct_len = try self.reader.takeInt(u16, .big);
             if (ct_len < 3) return error.MessageTooLarge;
+            if (ct_len > max_message_size + 3) return error.MessageTooLarge;
             const ct = try self.reader.take(ct_len);
 
             const combined = self.dec_buf[0 .. ct_len + 16];
@@ -231,6 +232,7 @@ pub fn MultiplexChannel(
 
             const id = plain[0];
             const payload_len = std.mem.readInt(u16, plain[1..3], .big);
+            if (payload_len > ct_len - 3) return error.MessageTooLarge;
             const copy = try self.allocator.dupe(u8, plain[3..][0..payload_len]);
             return .{ .id = id, .data = copy };
         }
