@@ -1,12 +1,10 @@
 const std = @import("std");
 const Io = std.Io;
 const codec = @import("codec.zig");
-const crypto = std.crypto;
 const zio = @import("zio");
 
 pub fn MultiplexChannel(
     comptime protocol_count: u8,
-    comptime encrypted: bool,
     comptime max_message_size: usize,
     comptime channel_capacity: u8,
 ) type {
@@ -20,16 +18,6 @@ pub fn MultiplexChannel(
 
         reader_handle: zio.JoinHandle(anyerror!void),
         write_mu: zio.Mutex = .{},
-
-        write_key: [32]u8 = [_]u8{0} ** 32,
-        read_key: [32]u8 = [_]u8{0} ** 32,
-        write_counter: u64 = 0,
-        read_counter: u64 = 0,
-
-        /// Heap-allocated scratch for AEAD encryption (only when encrypted=true).
-        enc_buf: if (encrypted) []u8 else void = if (encrypted) undefined else {},
-        /// Heap-allocated scratch for AEAD decryption (only when encrypted=true).
-        dec_buf: if (encrypted) []u8 else void = if (encrypted) undefined else {},
 
         sub_channels: [protocol_count]SubChannel,
 
@@ -49,13 +37,9 @@ pub fn MultiplexChannel(
                 self.mux.write_mu.lockUncancelable();
                 defer self.mux.write_mu.unlock();
 
-                if (comptime encrypted) {
-                    try writeEncrypted(self.mux, self.protocol_id, self.send_buf[0..w.end]);
-                } else {
-                    try self.mux.writer.writeByte(self.protocol_id);
-                    try self.mux.writer.writeInt(u16, @intCast(w.end), .big);
-                    try self.mux.writer.writeAll(self.send_buf[0..w.end]);
-                }
+                try self.mux.writer.writeByte(self.protocol_id);
+                try self.mux.writer.writeInt(u16, @intCast(w.end), .big);
+                try self.mux.writer.writeAll(self.send_buf[0..w.end]);
                 try self.mux.writer.flush();
             }
 
@@ -91,23 +75,7 @@ pub fn MultiplexChannel(
                 sub.rb = zio.Channel([]const u8).init(&sub.rb_buf);
             }
 
-            self.write_key = [_]u8{0} ** 32;
-            self.read_key = [_]u8{0} ** 32;
-
-            if (encrypted) {
-                self.enc_buf = try allocator.alloc(u8, max_message_size + 3 + 16);
-                errdefer allocator.free(self.enc_buf);
-                self.dec_buf = try allocator.alloc(u8, max_message_size + 3 + 16);
-                errdefer allocator.free(self.dec_buf);
-            }
-
             self.reader_handle = try zio.spawn(Self.readerLoop, .{self});
-        }
-
-        pub fn setKeys(self: *Self, write_key: [32]u8, read_key: [32]u8) void {
-            if (comptime !encrypted) @compileError("setKeys requires encrypted=true");
-            self.write_key = write_key;
-            self.read_key = read_key;
         }
 
         pub fn deinit(self: *Self) void {
@@ -119,10 +87,6 @@ pub fn MultiplexChannel(
             self.stream.socket.shutdown(.receive) catch {};
             self.reader_handle.join() catch {};
             self.stream.close();
-            if (encrypted) {
-                self.allocator.free(self.enc_buf);
-                self.allocator.free(self.dec_buf);
-            }
         }
 
         pub fn subChannel(self: *Self, id: u8) *SubChannel {
@@ -131,110 +95,33 @@ pub fn MultiplexChannel(
 
         fn readerLoop(self: *Self) anyerror!void {
             while (true) {
-                if (comptime encrypted) {
-                    const frame = readEncrypted(self) catch |err| {
-                        if (err == error.EndOfStream) {
-                            for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
-                            return;
-                        }
-                        return err;
-                    };
-                    if (frame.id >= protocol_count) {
-                        self.allocator.free(frame.data);
-                        continue;
-                    }
-                    self.sub_channels[frame.id].rb.trySend(frame.data) catch |err| {
-                        self.allocator.free(frame.data);
-                        if (err == error.ChannelClosed) continue;
-                        if (err == error.ChannelFull) {
-                            self.sub_channels[frame.id].rb.close(.immediate);
-                            continue;
-                        }
-                        return err;
-                    };
-                } else {
-                    const id = self.reader.takeByte() catch {
-                        for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
-                        return;
-                    };
-                    const len = self.reader.takeInt(u16, .big) catch {
-                        for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
-                        return;
-                    };
-                    const raw = self.reader.take(len) catch {
-                        for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
-                        return;
-                    };
-                    if (id >= protocol_count) continue;
-                    const copy = self.allocator.dupe(u8, raw) catch {
+                const id = self.reader.takeByte() catch {
+                    for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
+                    return;
+                };
+                const len = self.reader.takeInt(u16, .big) catch {
+                    for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
+                    return;
+                };
+                const raw = self.reader.take(len) catch {
+                    for (&self.sub_channels) |*sub| sub.rb.close(.immediate);
+                    return;
+                };
+                if (id >= protocol_count) continue;
+                const copy = self.allocator.dupe(u8, raw) catch {
+                    self.sub_channels[id].rb.close(.immediate);
+                    continue;
+                };
+                self.sub_channels[id].rb.trySend(copy) catch |err| {
+                    self.allocator.free(copy);
+                    if (err == error.ChannelClosed) continue;
+                    if (err == error.ChannelFull) {
                         self.sub_channels[id].rb.close(.immediate);
                         continue;
-                    };
-                    self.sub_channels[id].rb.trySend(copy) catch |err| {
-                        self.allocator.free(copy);
-                        if (err == error.ChannelClosed) continue;
-                        if (err == error.ChannelFull) {
-                            self.sub_channels[id].rb.close(.immediate);
-                            continue;
-                        }
-                        return err;
-                    };
-                }
+                    }
+                    return err;
+                };
             }
-        }
-
-        fn writeEncrypted(self: *Self, protocol_id: u8, data: []const u8) !void {
-            const this_counter = self.write_counter;
-            self.write_counter += 1;
-
-            var nonce: [24]u8 = [_]u8{0} ** 24;
-            std.mem.writeInt(u64, nonce[0..8], this_counter, .big);
-
-            const frame = self.enc_buf[0 .. max_message_size + 3];
-            frame[0] = protocol_id;
-            std.mem.writeInt(u16, frame[1..3], @intCast(data.len), .big);
-            @memcpy(frame[3..][0..data.len], data);
-            const plaintext = frame[0 .. 3 + data.len];
-
-            const combined = self.enc_buf[0 .. plaintext.len + 16];
-            crypto.nacl.SecretBox.seal(combined, plaintext, nonce, self.write_key);
-            const ct = combined[16..][0..plaintext.len];
-
-            try self.writer.writeAll(&nonce);
-            try self.writer.writeAll(combined[0..16]);
-            try self.writer.writeInt(u16, @intCast(ct.len), .big);
-            try self.writer.writeAll(ct);
-        }
-
-        const DecryptedFrame = struct {
-            id: u8,
-            data: []const u8,
-        };
-
-        fn readEncrypted(self: *Self) !DecryptedFrame {
-            const nonce = (try self.reader.take(24))[0..24].*;
-            const tag = try self.reader.take(16);
-            const ct_len = try self.reader.takeInt(u16, .big);
-            if (ct_len < 3) return error.MessageTooLarge;
-            if (ct_len > max_message_size + 3) return error.MessageTooLarge;
-            const ct = try self.reader.take(ct_len);
-
-            const combined = self.dec_buf[0 .. ct_len + 16];
-            @memcpy(combined[0..16], tag);
-            @memcpy(combined[16..][0..ct_len], ct);
-
-            const plain = self.dec_buf[0..ct_len];
-            crypto.nacl.SecretBox.open(plain, combined[0 .. ct_len + 16], nonce, self.read_key) catch return error.DecryptFailed;
-
-            const counter = std.mem.readInt(u64, nonce[0..8], .big);
-            if (counter != self.read_counter) return error.ReplayDetected;
-            self.read_counter += 1;
-
-            const id = plain[0];
-            const payload_len = std.mem.readInt(u16, plain[1..3], .big);
-            if (payload_len > ct_len - 3) return error.MessageTooLarge;
-            const copy = try self.allocator.dupe(u8, plain[3..][0..payload_len]);
-            return .{ .id = id, .data = copy };
         }
     };
 }

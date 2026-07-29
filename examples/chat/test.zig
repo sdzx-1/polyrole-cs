@@ -11,7 +11,7 @@ test "chat: three users send and receive" {
     const rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
     const SC = polyrole.channel.StreamChannel;
-    const MUX = Mux(3, false, 1024, 8);
+    const MUX = Mux(3, 1024, 8);
     const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var l = try lh.listen(.{});
     defer l.close();
