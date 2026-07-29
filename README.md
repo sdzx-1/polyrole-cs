@@ -9,6 +9,44 @@
 const polyrole = @import("polyrole_cs");
 ```
 
+## 项目结构
+
+```
+polyrole-cs/
+├── src/                          # 核心库
+│   ├── root.zig                  # 模块入口，导出所有公共组件
+│   ├── runner.zig                # 状态机驱动（simulate / symmetric_run）
+│   ├── channel.zig               # 通道抽象（StreamChannel）
+│   ├── family_mux_channel.zig    # 协议族传输层（MultiplexChannel）
+│   ├── family_test.zig           # Mux 测试
+│   ├── codec.zig                 # 二进制编解码
+│   ├── Graph.zig                 # DOT 格式状态图生成
+│   └── protocol/                 # 协议实现
+│       ├── tls.zig               # 简易加密握手协议（模块入口）
+│       ├── tls/                  # 内部实现
+│       │   ├── root.zig
+│       │   ├── context.zig       # 握手上下文 + 密钥协商
+│       │   ├── test.zig
+│       │   ├── README.md
+│       │   └── design.md
+│       ├── net_monitor.zig       # 网络延迟探测协议（模块入口）
+│       └── net_monitor/          # 内部实现
+│           ├── root.zig
+│           ├── context.zig
+│           ├── test.zig
+│           ├── design.md
+│           └── design_cn.md
+├── tools/
+│   └── graph.zig                 # 状态图生成工具（zig build graph）
+├── docs/
+│   ├── family.md                 # 协议族设计说明
+│   └── graphs/                   # 生成的状态图（gitignored）
+├── examples/                     # 示例（当前为空）
+├── build.zig                     # 构建配置
+├── build.zig.zon                 # 依赖声明
+└── README.md
+```
+
 ## 核心概念
 
 ### 状态（State）
@@ -202,6 +240,24 @@ try graph.generateDot(null, &graph_file_writer.interface);
 
 可用 Graphviz 渲染：`dot -Tpng graph.dot -o graph.png`
 
+## 文档
+
+项目文档位于 `docs/` 目录：
+
+| 文档 | 说明 |
+|------|------|
+| `docs/family.md` | 协议族（Protocol Family）设计——多协议共享 TCP 连接的架构说明 |
+
+### 状态图
+
+用 Graph 模块和 Graphviz 生成 DOT 格式状态图：
+
+```bash
+zig build graph
+```
+
+生成 `docs/graphs/*.dot` 和 `docs/graphs/*.png`，覆盖 `tls` 和 `net_monitor` 协议。
+
 ---
 
 ## 错误处理
@@ -219,9 +275,9 @@ pub fn process(ctx: *Ctx) !@This() {
 
 ---
 
-## TLS 协议（示例）
+## 简易加密握手协议（示例）
 
-项目包含一个简化 TLS 1.3 握手实现，展示了 polyrole-cs 的完整用法。
+项目包含一个自定的简易加密握手实现，展示了 polyrole-cs 的完整用法。
 
 **前提**：Client 和 Server 已通过带外方式互知对方的 Ed25519 公钥——无需证书交换或 PKI。双方各自持有自己的身份密钥对，并信任对方的公钥。
 
