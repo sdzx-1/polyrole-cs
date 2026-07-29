@@ -86,8 +86,8 @@ var server = ServerContext{};
 try Runner(PingQuery).symmetric_run(.client, &client, &channel, PingQuery, null);
 
 for (client.results.items) |r| {
-    std.debug.print("[{d}] rtt={d}ms dwell={d}ms\n",
-        .{ r.seq_num, r.rtt_ms, r.server_dwell_ms });
+    std.debug.print("[{d}] rtt={d}ms\n",
+        .{ r.seq_num, r.rtt_ms });
 }
 ```
 
