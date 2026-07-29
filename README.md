@@ -165,7 +165,8 @@ try R.symmetric_run(.client, &client_ctx, &ch, A, null);
 | `family_mux_channel` | `src/family_mux_channel.zig` | 协议族传输层：`MultiplexChannel(N)` 多协议共享 TCP |
 | `codec` | `src/codec.zig` | 二进制编解码：状态 ID + tag + payload |
 | `Graph` | `src/Graph.zig` | DOT 格式状态图生成 |
-| `tls` | `src/protocol/tls/` | 简化 TLS 1.3 握手协议（示例） |
+| `tls` | `src/protocol/tls/` | 简易加密握手协议（示例） |
+| `net_monitor` | `src/protocol/net_monitor/` | 网络延迟探测协议（示例） |
 
 ### Channel
 
@@ -230,15 +231,14 @@ state_id(4 BE) || tag(1) || payload
 生成 DOT 格式状态图：
 
 ```zig
-var graph = try root.Graph.initWithFsm(allocator, P.A);
+var graph = try polyrole.Graph.initWithFsm(allocator, P.A);
 defer graph.deinit();
-
-const graph_file = try std.Io.Dir.cwd().createFile(io, "graph.dot", .{});
-var graph_file_writer = graph_file.writer(io, &.{});
-try graph.generateDot(null, &graph_file_writer.interface);
+try graph.generateDot(.{}, &writer.interface);
 ```
 
-可用 Graphviz 渲染：`dot -Tpng graph.dot -o graph.png`
+用 Graphviz 渲染：`dot -Tpng graph.dot -o graph.png`
+
+完整示例见 `tools/graph.zig`，运行 `zig build graph` 即可生成所有协议状态图。
 
 ## 文档
 
