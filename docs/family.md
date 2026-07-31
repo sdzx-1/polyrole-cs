@@ -31,7 +31,28 @@ channel.zig                           family_mux_channel.zig
 
 ## 3. MultiplexChannel —— 传输层
 
-单 Reader Fiber 架构。每端 TCP 连接有一个独立 fiber（Reader）从 TCP 读取数据并分发；写路径无独立 fiber——各协议 fiber 直接写 TCP，通过 Mutex 串行化：
+单 Reader Fiber 架构。每端 TCP 连接有一个独立 fiber（Reader）从传输层读取数据并分发；写路径无独立 fiber——各协议 fiber 直接写传输层，通过 Mutex 串行化：
+
+**协议族成员可配置**。每个子通道独立声明队列深度、消息上限和溢出策略：
+
+```zig
+pub const SubChannelConfig = struct {
+    capacity: u8 = 8,
+    max_message_size: usize = 1024,
+    overflow: OverflowPolicy = .close_channel,
+};
+
+const M = MultiplexChannel(&.{
+    .{ .capacity = 8, .max_message_size = 4096 },                    // 控制协议
+    .{ .capacity = 1, .overflow = .backpressure },                    // 必须保序保活
+    .{ .capacity = 8, .max_message_size = 1024, .overflow = .close_channel },
+});
+```
+
+**传输层可替换**。Mux 只依赖 `Transport` 的帧级读写契约，不绑定 StreamChannel：
+
+- `initFromChannel`：明文，直接在 StreamChannel 上读写帧；
+- `TlsChannel.transport()`：每一帧作为一个 AEAD 记录加密发送——整个协议族共享一次 TLS 握手和一套密钥。
 
 ```
                      MultiplexChannel(N)
@@ -63,24 +84,27 @@ channel.zig                           family_mux_channel.zig
 ### 3.1 数据流
 
 **上行（读）：**
-1. Reader Fiber 从 TCP 读帧：`[id][len][data]`
+1. Reader Fiber 从传输层读帧：`transport.readFrame() → [id][len][data]`
 2. `allocator.dupe(data)` → 堆上复制
 3. `sub_channels[id].rb.trySend(copy)` → 推入协议读队列（满则关闭该协议 rb）
 4. 协议 fiber：`SubChannel.recv()` → `rb.receive()` 阻塞取 → `codec.decode`
 
 **下行（写）：**
-1. 协议 fiber：`SubChannel.send()` → `codec.encode` → `write_mu.lock()` → 写 `[id][len][data]` 到 TCP → `write_mu.unlock()` → `flush()`
-2. 无独立 Writer Fiber——直接写 TCP，zio 调度器在 fiber 间自然交错执行
+1. 协议 fiber：`SubChannel.send()` → `codec.encode` → `write_mu.lock()` → `transport.writeFrame()` → `write_mu.unlock()`
+2. 无独立 Writer Fiber——直接写传输层，zio 调度器在 fiber 间自然交错执行
 
 ### 3.2 架构决策
 
 | 决策 | 理由 |
 |------|------|
-| **Reader Fiber 独立** | 单一入口从 TCP 读，解析 `protocol_id` 后路由到正确队列。协议代码不接触 TCP |
-| **无 Writer Fiber** | 所有协议 fiber 直接写 TCP + Mutex 串行化。公平性由 zio 调度器保证——每个协议短暂持锁写完后释放，调度器自动切换到下一个有数据的 fiber。比独立 Writer + 共享队列更简单，延迟更低 |
+| **Reader Fiber 独立** | 单一入口从传输层读，解析 `protocol_id` 后路由到正确队列。协议代码不接触传输层 |
+| **无 Writer Fiber** | 所有协议 fiber 直接写传输层 + Mutex 串行化。公平性由 zio 调度器保证——每个协议短暂持锁写完后释放，调度器自动切换到下一个有数据的 fiber。比独立 Writer + 共享队列更简单，延迟更低 |
 | **`zio.Channel` MVar 语义** | 满则阻塞生产者，空则阻塞消费者。天然提供背压和流量控制 |
-| **Reader 用 `trySend`** | 某协议 `rb` 满时不阻塞 Reader——满则关闭该协议，其他协议不受影响 |
+| **溢出策略可配置** | 默认 `close_channel`：某协议 `rb` 满时只关闭该协议并返回可区分的 `error.ProtocolOverflow`，其他协议不受影响；`backpressure`：Reader 阻塞等待队列腾空，保留有序可靠但可能拖慢整个连接 |
 | **每协议独立 `rb`** | 接收队列按协议隔离，Reader 按 `protocol_id` 分发，互不干扰 |
+| **`write_mu` 保证帧原子性** | 所有协议的帧写在同一把锁下串行，防止多协议并发写交错破坏帧边界 |
+
+> **为什么没有丢帧策略**：框架的状态机是锁步严格交替的，每一帧就是一次协议转移，且对端用 `state_id` 严格校验次序。本地丢弃一帧等于让对端永远等不到下一个状态——这不是"容忍丢失"，而是直接毁掉协议。Mux 对每个子通道提供有序、可靠的传输语义（等价于"连接内的 TCP"），溢出只可能来自恶意对端或非锁步驱动，因此处理方式是 fail-fast（关闭）或背压，绝不静默丢帧。
 
 ### 3.3 内存模型
 
@@ -94,6 +118,8 @@ channel.zig                           family_mux_channel.zig
 ```
 
 接收路径消息在堆上短暂存在，所有权通过 `rb` 队列传递。`last_recv_data` 管理解码引用的生命周期——下次 `recv()` 时释放上一帧。
+
+**切片生命周期契约**（所有通道一致）：`recv` 返回的消息中 `[]const u8` 字段指向通道内部缓冲区（`last_recv_data` / TlsChannel 的 `decode_buf`），**在下一次 `recv` 之前必须消费完**。
 
 ### 3.4 SubChannel 接口
 
@@ -130,12 +156,31 @@ pub fn recv(self: *SubChannel, state_id: anytype, T: type) !T {
 **deinit**（顺序严格）：
 
 ```
-1. close all rb           → 协议 fiber recv() 返回 ChannelClosed → 协议退出
-2. free send_buf, last_recv_data
-3. shutdown(.receive)     → Reader 的 takeByte() 返回 EOF → 退出循环
+1. drain all rb（释放队列中的帧）→ close all rb → 协议 fiber recv() 返回 ChannelClosed → 协议退出
+2. free send_buf, last_recv_data, rb_buf
+3. transport.shutdownReceive() → Reader 的 readFrame() 返回错误 → 退出循环
 4. join Reader
-5. stream.close()
+5. owns_stream 时 stream.close()（Mux over TLS 场景由上层拥有连接）
 ```
+
+### 3.7 协议族加密：Mux over TLS
+
+一次 TLS 握手（`Runner(tls.ClientHello).symmetric_run`）之后，把 `TlsChannel` 的记录层作为 Mux 的传输：
+
+```zig
+var tc: TlsChannel = undefined;
+try tc.init(allocator, &sc, tls_ctx.write_key, tls_ctx.read_key, 1024);
+
+var m = Mux(configs);
+try m.initFromTransport(allocator, tc.transport());
+defer m.deinit();
+
+// 每个协议独立 fiber 运行，共享同一条加密连接
+try R1.symmetric_run(.server, &ctx1, m.subChannel(0), P1.A, null);
+try R2.symmetric_run(.server, &ctx2, m.subChannel(1), P2.A, null);
+```
+
+每一条 Mux 帧作为一条 AEAD 记录（`nonce(24) || tag(16) || ct_len(2) || ct`）发送，帧边界即记录边界；nonce 单调递增并做反重放校验。`TlsChannel` 的 `decode_buf` 必须不小于 `max_message_size + 5`（帧头 3 字节 + 2 字节长度前缀），由调用方保证。
 
 ### 3.6 公平性
 
@@ -193,9 +238,12 @@ R2.symmetric_run(.server, &ctx, m.subChannel(1), P2.A, 100);
 1. **单协议握手** — 1 个 SubChannel，明文，验证 ctx 从 0 递增到 3 后 Exit
 2. **recv 超时** — 协议 1 正常完成，协议 2 等 100ms 后超时返回 `error.Canceled`
 3. **双协议并发** — 2 个 SubChannel 各自独立完成 3 轮交互，验证 ctx 值互不干扰
+4. **溢出隔离** — 容量 1 的子通道被灌帧后返回 `error.ProtocolOverflow`，其他协议不受影响
+5. **背压保序** — `backpressure` 策略下容量 1 的队列不丢帧、不关闭
+6. **TLS 协议族** — 一次握手后两个协议在加密的 Mux 上各自完成 3 轮交互
 
 ```zig
-const M = Mux(2, 1024, 8);
+const M = Mux(2, 1024, 8); // 兼容 shim：N 个相同配置
 // 双协议示例见第 4 节
 ```
 

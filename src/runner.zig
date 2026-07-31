@@ -223,7 +223,7 @@ test "symmetric run" {
             defer stream.close();
 
             var stream_channel: StreamChannel = undefined;
-            try stream_channel.init(allocator, stream, 100, 100);
+            try stream_channel.init(allocator, stream, 100, 100, 4096);
             defer stream_channel.deinit(allocator);
 
             try R.symmetric_run(.client, ctx, &stream_channel, P.A, null);
@@ -238,7 +238,7 @@ test "symmetric run" {
     defer stream.close();
 
     var stream_channel: StreamChannel = undefined;
-    try stream_channel.init(allocator, stream, 100, 100);
+    try stream_channel.init(allocator, stream, 100, 100, 4096);
     defer stream_channel.deinit(allocator);
 
     try R.symmetric_run(.server, &server_context, &stream_channel, P.A, null);
@@ -277,7 +277,7 @@ test "symmetric_run: recv timeout" {
 
     var ctx: i32 = 0;
     var ch: StreamChannel = undefined;
-    try ch.init(allocator, stream, 128, 128);
+    try ch.init(allocator, stream, 128, 128, 4096);
     defer ch.deinit(allocator);
 
     // P.A is client role. Server recvs first, client never sends → timeout
@@ -328,7 +328,7 @@ test "tls channel: symmetric_run over encrypted channel" {
             var tls_ctx = tls.ClientContext.init(kp, peer_pk);
 
             var sc: StreamChannel = undefined;
-            try sc.init(allocator, stream, 256, 256);
+            try sc.init(allocator, stream, 256, 256, 4096);
             defer sc.deinit(allocator);
             try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello, null);
 
@@ -359,7 +359,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     // Phase 1: TLS handshake
     var tls_ctx = tls.ServerContext.init(kp_s, kp_c.public_key);
     var sc: StreamChannel = undefined;
-    try sc.init(allocator, stream, 256, 256);
+    try sc.init(allocator, stream, 256, 256, 4096);
     defer sc.deinit(allocator);
     try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello, null);
 

@@ -61,7 +61,7 @@ test "symmetric run handshake" {
             defer stream.close();
 
             var ch: StreamChannel = undefined;
-            try ch.init(allocator, stream, 256, 256);
+            try ch.init(allocator, stream, 256, 256, 4096);
             defer ch.deinit(allocator);
 
             try R.symmetric_run(.client, ctx, &ch, tls.ClientHello, null);
@@ -77,7 +77,7 @@ test "symmetric run handshake" {
     defer stream.close();
 
     var ch: StreamChannel = undefined;
-    try ch.init(allocator, stream, 256, 256);
+    try ch.init(allocator, stream, 256, 256, 4096);
     defer ch.deinit(allocator);
 
     try R.symmetric_run(.server, &server, &ch, tls.ClientHello, null);

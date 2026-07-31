@@ -69,7 +69,7 @@ test "对称运行：通过 StreamChannel 通信" {
             defer stream.close();
 
             var ch: StreamChannel = undefined;
-            try ch.init(allocator, stream, 128, 128);
+            try ch.init(allocator, stream, 128, 128, 4096);
             defer ch.deinit(allocator);
 
             try R.symmetric_run(.client, ctx, &ch, nm.PingQuery, null);
@@ -84,7 +84,7 @@ test "对称运行：通过 StreamChannel 通信" {
     defer stream.close();
 
     var ch: StreamChannel = undefined;
-    try ch.init(allocator, stream, 128, 128);
+    try ch.init(allocator, stream, 128, 128, 4096);
     defer ch.deinit(allocator);
 
     try R.symmetric_run(.server, &server, &ch, nm.PingQuery, null);

@@ -1,7 +1,9 @@
 const std = @import("std");
 const zio = @import("zio");
 const polyrole = @import("root.zig");
-const Mux = @import("family_mux_channel.zig").MultiplexChannel;
+const family = @import("family_mux_channel.zig");
+const Mux = family.Mux;
+const MultiplexChannel = family.MultiplexChannel;
 
 // ── tests ─────────────────────────────────────────────────────────────────
 
@@ -12,7 +14,10 @@ const TestProtocol = struct {
             pub const A = union(enum) {
                 to_b: polyrole.Data(void, B),
                 pub const info: Info = .{ .agent = .client, .name = name ++ ".A" };
-                pub fn process(ctx: *i32) @This() { _ = ctx; return .to_b; }
+                pub fn process(ctx: *i32) @This() {
+                    _ = ctx;
+                    return .to_b;
+                }
             };
             pub const B = union(enum) {
                 to_a: polyrole.Data(void, A),
@@ -47,18 +52,18 @@ test "family: full handshake" {
         fn run(a: zio.net.Address, ctx: *i32) !void {
             const s = try a.connect(.{});
             var sc: SC = undefined;
-            try sc.init(allocator, s, 256, 256);
+            try sc.init(allocator, s, 256, 256, 4096);
             defer sc.deinit(allocator);
             var m: M = undefined;
             try m.initFromChannel(allocator, &sc);
             defer m.deinit();
             try R.symmetric_run(.client, ctx, m.subChannel(0), P1.A, null);
         }
-    }.run, .{l.socket.address, &cli_ctx});
+    }.run, .{ l.socket.address, &cli_ctx });
 
     const s = try l.accept(.{});
     var sc: SC = undefined;
-    try sc.init(allocator, s, 256, 256);
+    try sc.init(allocator, s, 256, 256, 4096);
     defer sc.deinit(allocator);
     var m: M = undefined;
     try m.initFromChannel(allocator, &sc);
@@ -67,7 +72,7 @@ test "family: full handshake" {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R.symmetric_run(.server, ctx, ch, P1.A, null);
         }
-    }.run, .{m.subChannel(0), &srv_ctx});
+    }.run, .{ m.subChannel(0), &srv_ctx });
     try zio.sleep(zio.Duration.fromMilliseconds(500));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx);
     sh.join() catch {};
@@ -98,7 +103,7 @@ test "family: recv timeout" {
         fn run(a: zio.net.Address) !void {
             const s = try a.connect(.{});
             var sc: SC = undefined;
-            try sc.init(allocator, s, 256, 256);
+            try sc.init(allocator, s, 256, 256, 4096);
             defer sc.deinit(allocator);
             var m: M = undefined;
             try m.initFromChannel(allocator, &sc);
@@ -113,7 +118,7 @@ test "family: recv timeout" {
 
     const s = try l.accept(.{});
     var sc: SC = undefined;
-    try sc.init(allocator, s, 256, 256);
+    try sc.init(allocator, s, 256, 256, 4096);
     defer sc.deinit(allocator);
     var m: M = undefined;
     try m.initFromChannel(allocator, &sc);
@@ -123,7 +128,7 @@ test "family: recv timeout" {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R1.symmetric_run(.server, ctx, ch, P1.A, null);
         }
-    }.run, .{m.subChannel(0), &srv_ctx1});
+    }.run, .{ m.subChannel(0), &srv_ctx1 });
 
     // P2: server recvs with 100ms timeout, client never sends
     const err = R2.symmetric_run(.server, &srv_ctx2, m.subChannel(1), P2.A, 100);
@@ -157,7 +162,7 @@ test "family: two protocols concurrent" {
         fn run(a: zio.net.Address, c1: *i32, c2: *i32) !void {
             const s = try a.connect(.{});
             var sc: SC = undefined;
-            try sc.init(allocator, s, 256, 256);
+            try sc.init(allocator, s, 256, 256, 4096);
             defer sc.deinit(allocator);
             var m: M = undefined;
             try m.initFromChannel(allocator, &sc);
@@ -177,11 +182,11 @@ test "family: two protocols concurrent" {
             h1.join() catch {};
             h2.join() catch {};
         }
-    }.run, .{l.socket.address, &cli_ctx1, &cli_ctx2});
+    }.run, .{ l.socket.address, &cli_ctx1, &cli_ctx2 });
 
     const s = try l.accept(.{});
     var sc: SC = undefined;
-    try sc.init(allocator, s, 256, 256);
+    try sc.init(allocator, s, 256, 256, 4096);
     defer sc.deinit(allocator);
     var m: M = undefined;
     try m.initFromChannel(allocator, &sc);
@@ -190,12 +195,12 @@ test "family: two protocols concurrent" {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R1.symmetric_run(.server, ctx, ch, P1.A, null);
         }
-    }.run, .{m.subChannel(0), &srv_ctx1});
+    }.run, .{ m.subChannel(0), &srv_ctx1 });
     var sh2 = try zio.spawn(struct {
         fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
             try R2.symmetric_run(.server, ctx, ch, P2.A, null);
         }
-    }.run, .{m.subChannel(1), &srv_ctx2});
+    }.run, .{ m.subChannel(1), &srv_ctx2 });
     try zio.sleep(zio.Duration.fromMilliseconds(500));
     try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
     try std.testing.expectEqual(@as(i32, 3), srv_ctx2);
@@ -204,3 +209,200 @@ test "family: two protocols concurrent" {
     h.join() catch {};
 }
 
+test "family: overflow close_channel surfaces ProtocolOverflow, other protocols unaffected" {
+    const allocator = std.testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const P1 = TestProtocol.make("p1", polyrole.Exit);
+    const P2 = TestProtocol.make("p2", polyrole.Exit);
+    const R1 = polyrole.runner.Runner(P1.A);
+    const SC = polyrole.channel.StreamChannel;
+    const M = MultiplexChannel(&.{
+        .{ .capacity = 8, .max_message_size = 1024 },
+        .{ .capacity = 1, .max_message_size = 1024, .overflow = .close_channel },
+    });
+    const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var l = try lh.listen(.{});
+    defer l.close();
+
+    const P2Tag = std.meta.Tag(P2.A);
+    const to_b_msg: P2.A = .{ .to_b = .{ .data = {} } };
+    // Client floods sub-channel 1 (never recvs), then runs P1 normally.
+    var h = try zio.spawn(struct {
+        fn run(a: zio.net.Address) !void {
+            const s = try a.connect(.{});
+            var sc: SC = undefined;
+            try sc.init(allocator, s, 256, 256, 4096);
+            defer sc.deinit(allocator);
+            var m: M = undefined;
+            try m.initFromChannel(allocator, &sc);
+            defer m.deinit();
+            for (0..10) |_| try m.subChannel(1).send(@as(P2Tag, .to_b), P2.A, to_b_msg);
+            var c1: i32 = 0;
+            try R1.symmetric_run(.client, &c1, m.subChannel(0), P1.A, null);
+        }
+    }.run, .{l.socket.address});
+
+    const s = try l.accept(.{});
+    var sc: SC = undefined;
+    try sc.init(allocator, s, 256, 256, 4096);
+    defer sc.deinit(allocator);
+    var m: M = undefined;
+    try m.initFromChannel(allocator, &sc);
+    defer m.deinit();
+
+    // Let the reader process the flood: queue holds 1 frame, the second one
+    // overflows and closes sub1 with a distinct error.
+    try zio.sleep(zio.Duration.fromMilliseconds(200));
+    try std.testing.expectError(error.ProtocolOverflow, m.subChannel(1).recv(@as(P2Tag, .to_b), P2.A));
+
+    // sub0 is untouched by the overflow and completes its handshake.
+    var srv_ctx1: i32 = 0;
+    try R1.symmetric_run(.server, &srv_ctx1, m.subChannel(0), P1.A, null);
+    try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
+    h.join() catch {};
+}
+
+test "family: backpressure policy blocks reader, no frames lost" {
+    const allocator = std.testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const P2 = TestProtocol.make("p2", polyrole.Exit);
+    const SC = polyrole.channel.StreamChannel;
+    const M = MultiplexChannel(&.{.{ .capacity = 1, .max_message_size = 1024, .overflow = .backpressure }});
+    const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var l = try lh.listen(.{});
+    defer l.close();
+
+    const P2Tag = std.meta.Tag(P2.A);
+    const to_b_msg: P2.A = .{ .to_b = .{ .data = {} } };
+    // Client sends 10 frames without waiting; reader blocks when the queue is
+    // full (capacity 1), then the server drains all 10.
+    var h = try zio.spawn(struct {
+        fn run(a: zio.net.Address) !void {
+            const s = try a.connect(.{});
+            var sc: SC = undefined;
+            try sc.init(allocator, s, 256, 256, 4096);
+            defer sc.deinit(allocator);
+            var m: M = undefined;
+            try m.initFromChannel(allocator, &sc);
+            defer m.deinit();
+            for (0..10) |_| try m.subChannel(0).send(@as(P2Tag, .to_b), P2.A, to_b_msg);
+        }
+    }.run, .{l.socket.address});
+
+    const s = try l.accept(.{});
+    var sc: SC = undefined;
+    try sc.init(allocator, s, 256, 256, 4096);
+    defer sc.deinit(allocator);
+    var m: M = undefined;
+    try m.initFromChannel(allocator, &sc);
+    defer m.deinit();
+
+    // All 10 frames arrive in order despite the capacity-1 queue.
+    for (0..10) |_| {
+        _ = try m.subChannel(0).recv(@as(P2Tag, .to_b), P2.A);
+    }
+    h.join() catch {};
+}
+
+test "family: protocols over one TLS session via TlsChannel.transport()" {
+    const allocator = std.testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const crypto = std.crypto;
+    const tls = @import("protocol/tls.zig");
+    const P1 = TestProtocol.make("p1", polyrole.Exit);
+    const P2 = TestProtocol.make("p2", polyrole.Exit);
+    const R1 = polyrole.runner.Runner(P1.A);
+    const R2 = polyrole.runner.Runner(P2.A);
+    const SC = polyrole.channel.StreamChannel;
+    const TC = polyrole.channel.TlsChannel;
+    const M = MultiplexChannel(&.{
+        .{ .capacity = 8, .max_message_size = 1024 },
+        .{ .capacity = 8, .max_message_size = 1024 },
+    });
+    const R_tls = polyrole.runner.Runner(tls.ClientHello);
+
+    var kp_seed: [crypto.sign.Ed25519.KeyPair.seed_length]u8 = undefined;
+    try zio.randomSecure(&kp_seed);
+    const kp_c = try crypto.sign.Ed25519.KeyPair.generateDeterministic(kp_seed);
+    try zio.randomSecure(&kp_seed);
+    const kp_s = try crypto.sign.Ed25519.KeyPair.generateDeterministic(kp_seed);
+
+    const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var l = try lh.listen(.{});
+    defer l.close();
+
+    var cli_ctx1: i32 = 0;
+    var cli_ctx2: i32 = 0;
+
+    const ClientTask = struct {
+        fn run(
+            a: zio.net.Address,
+            kp: crypto.sign.Ed25519.KeyPair,
+            peer_pk: crypto.sign.Ed25519.PublicKey,
+            c1: *i32,
+            c2: *i32,
+        ) !void {
+            const s = try a.connect(.{});
+            defer s.close();
+
+            // Phase 1: one TLS handshake shared by the whole family.
+            var tls_ctx = tls.ClientContext.init(kp, peer_pk);
+            var sc: SC = undefined;
+            try sc.init(allocator, s, 512, 512, 4096);
+            defer sc.deinit(allocator);
+            try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello, null);
+
+            // Phase 2: Mux over the established TLS record layer.
+            var tc: TC = undefined;
+            try tc.init(allocator, &sc, tls_ctx.write_key, tls_ctx.read_key, 2048);
+            defer tc.deinit(allocator);
+            tls_ctx.deinit();
+
+            var m: M = undefined;
+            try m.initFromTransport(allocator, tc.transport());
+            defer m.deinit();
+
+            try R1.symmetric_run(.client, c1, m.subChannel(0), P1.A, null);
+            try R2.symmetric_run(.client, c2, m.subChannel(1), P2.A, null);
+        }
+    };
+
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(ClientTask.run, .{
+        l.socket.address,
+        kp_c,
+        kp_s.public_key,
+        &cli_ctx1,
+        &cli_ctx2,
+    });
+
+    const s = try l.accept(.{});
+    defer s.close();
+
+    var tls_ctx = tls.ServerContext.init(kp_s, kp_c.public_key);
+    var sc: SC = undefined;
+    try sc.init(allocator, s, 512, 512, 4096);
+    defer sc.deinit(allocator);
+    try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello, null);
+
+    var tc: TC = undefined;
+    try tc.init(allocator, &sc, tls_ctx.write_key, tls_ctx.read_key, 2048);
+    defer tc.deinit(allocator);
+    tls_ctx.deinit();
+
+    var m: M = undefined;
+    try m.initFromTransport(allocator, tc.transport());
+    defer m.deinit();
+
+    var srv_ctx1: i32 = 0;
+    var srv_ctx2: i32 = 0;
+    try R1.symmetric_run(.server, &srv_ctx1, m.subChannel(0), P1.A, null);
+    try R2.symmetric_run(.server, &srv_ctx2, m.subChannel(1), P2.A, null);
+
+    try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
+    try std.testing.expectEqual(@as(i32, 3), srv_ctx2);
+}
