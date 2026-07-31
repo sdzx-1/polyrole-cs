@@ -76,6 +76,16 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_chat_tests.step);
 
     // ── 状态图工具 ──────────────────────────────────────────────────
+    const chat_protocol = b.createModule(.{
+        .root_source_file = b.path("examples/chat/protocol.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "polyrole_cs", .module = mod },
+            .{ .name = "zio", .module = zio.module("zio") },
+        },
+    });
+
     const graph = b.addExecutable(.{
         .name = "graph",
         .use_llvm = true,
@@ -85,6 +95,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "polyrole_cs", .module = mod },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "chat", .module = chat_protocol },
             },
         }),
     });
@@ -93,7 +105,7 @@ pub fn build(b: *std.Build) void {
     const graph_step = b.step("graph", "Generate protocol state graphs (DOT)");
     graph_step.dependOn(&run_graph.step);
 
-    inline for (.{ "tls", "net_monitor" }) |name| {
+    inline for (.{ "tls", "net_monitor", "chat_ctrl", "chat_push" }) |name| {
         const dot_to_png = b.addSystemCommand(&.{ "dot", "-Tpng", "-o", "docs/graphs/" ++ name ++ ".png", "docs/graphs/" ++ name ++ ".dot" });
         dot_to_png.step.dependOn(&run_graph.step);
         graph_step.dependOn(&dot_to_png.step);

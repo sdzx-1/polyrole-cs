@@ -1,5 +1,6 @@
 const std = @import("std");
 const polyrole = @import("polyrole_cs");
+const chat = @import("chat");
 
 pub fn main(main_init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
@@ -10,6 +11,8 @@ pub fn main(main_init: std.process.Init) !void {
     inline for (.{
         .{ "tls", polyrole.tls.ClientHello },
         .{ "net_monitor", polyrole.net_monitor.PingQuery },
+        .{ "chat_ctrl", chat.Login },
+        .{ "chat_push", chat.Deliver },
     }) |entry| {
         const name, const State = entry;
         var graph = try polyrole.Graph.initWithFsm(allocator, State);
