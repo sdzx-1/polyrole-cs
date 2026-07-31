@@ -39,6 +39,13 @@ pub const INVALID_CLIENT_ID: u32 = std.math.maxInt(u32);
 pub const HEARTBEAT_INTERVAL_MS: u64 = 1000;
 /// Send.process 检查输入队列的节拍（毫秒），决定消息发送延迟上界。
 pub const PROCESS_SLICE_MS: u64 = 100;
+/// Push 协议每次批量拉取的消息条数（每帧）。
+pub const PUSH_CHUNK = 8;
+/// Push 协议空转轮询间隔（毫秒）：无新消息时服务器发 idle 帧的周期，
+/// 也是推送延迟上界。
+pub const PUSH_POLL_MS: u64 = 100;
+/// 消息板水位：新连接只拉取最近 BOARD_KEEP 条历史。
+pub const BOARD_KEEP: usize = 1024;
 
 // ─── 载荷 ────────────────────────────────────────────────────────────
 
@@ -107,14 +114,12 @@ pub const ClientContext = struct {
 /// 控制协议服务器上下文（每个连接一个）。
 pub const ServerContext = struct {
     room: *Room,
-    /// 本连接的广播队列，与 Push 协议共享
-    inbox: *Channel(PushPayload),
     client_id: u32 = INVALID_CLIENT_ID,
     nickname: [MAX_NICK]u8 = [_]u8{0} ** MAX_NICK,
     member_count: u32 = 0,
 
-    pub fn init(room: *Room, inbox: *Channel(PushPayload)) ServerContext {
-        return .{ .room = room, .inbox = inbox };
+    pub fn init(room: *Room) ServerContext {
+        return .{ .room = room };
     }
 
     /// 从房间移除本连接并广播离开通知。幂等：未注册或已移除时无操作。
@@ -137,14 +142,74 @@ pub const PushClientContext = struct {
     /// 收到的推送（测试注入，用于断言；demo 客户端为 null）
     inbox: ?*Channel(PushPayload) = null,
     /// inbox 是否接收全部推送（含 system 加入/离开通知）。
-    /// 压测客户端设 false 只收 chat 消息——注册风暴的 O(N²) 加入通知
-    /// 会塞满 inbox 触发慢消费者断开，而压测只关心 chat 广播。
+    /// 压测客户端设 false 只收 chat 消息（压测关心 chat 广播，
+    /// 不关心加入通知；真实客户端用 out 打印全部）。
     inbox_all: bool = true,
 };
 
 /// 推送协议服务器上下文（每个连接一个）。
 pub const PushServerContext = struct {
-    inbox: *Channel(PushPayload),
+    /// 共享消息板（跨连接）
+    board: *SharedBoard,
+    /// 本连接已消费到的板索引（游标）
+    cursor: usize,
+    /// Ctrl 连接结束时置位，让 Poll 走 .quit 退出
+    kick: bool = false,
+};
+
+// ─── SharedBoard：共享消息板 ─────────────────────────────────────────
+
+/// 跨连接共享的消息板（借鉴早期 chat 版本的"无锁读/有锁写"设计）：
+/// 广播 = 一次 append（O(1)），每个连接的 Push 协议按自己的游标批量拉取，
+/// 消除逐连接 trySend 的 O(N) 广播与加入通知 O(N²) 风暴，慢消费者只是
+/// 游标落后而不会被断开。
+///
+/// 并发契约：
+///   - 预分配（ensureTotalCapacity）后 items 永不搬迁 → Reader 无锁读安全
+///   - Writer 唯一（Room fiber）：lock → appendAssumeCapacity → committed.store(.release)
+///   - Reader（各连接的 Push fiber）：committed.load(.acquire) → 直接读 items[from..to)
+///   - release/acquire 保证 Reader 看到 committed 新值时必然看到数据写入
+///   - 容量固定（appendAssumeCapacity 超出即 panic）：消息只增不减，需按
+///     BOARD_KEEP 水位控制新连接的历史起点；物理回收留作后续（与无锁读冲突）
+pub const SharedBoard = struct {
+    items: std.ArrayList(PushPayload),
+    mu: zio.Mutex,
+    committed: std.atomic.Value(usize),
+
+    pub fn init(self: *SharedBoard, gpa: Allocator, capacity: usize) void {
+        self.items = std.ArrayList(PushPayload).empty;
+        self.items.ensureTotalCapacity(gpa, capacity) catch @panic("board oom");
+        self.mu = .{};
+        self.committed = std.atomic.Value(usize).init(0);
+    }
+
+    pub fn deinit(self: *SharedBoard, gpa: Allocator) void {
+        self.items.deinit(gpa);
+    }
+
+    /// 广播：追加一条消息（O(1)，唯一写者持锁）。
+    pub fn append(self: *SharedBoard, payload: PushPayload) void {
+        self.mu.lockUncancelable();
+        defer self.mu.unlock();
+        self.items.appendAssumeCapacity(payload);
+        self.committed.store(self.items.items.len, .release);
+    }
+
+    /// 已追加的消息总数。
+    pub fn len(self: *SharedBoard) usize {
+        return self.committed.load(.acquire);
+    }
+
+    /// 水位：新连接的历史起点（保留最近 BOARD_KEEP 条）。
+    pub fn watermark(self: *SharedBoard) usize {
+        const c = self.committed.load(.acquire);
+        return if (c > BOARD_KEEP) c - BOARD_KEEP else 0;
+    }
+
+    /// 无锁读 [from..to)。调用方保证 to <= len()。
+    pub fn slice(self: *SharedBoard, from: usize, to: usize) []const PushPayload {
+        return self.items.items[from..to];
+    }
 };
 
 // ─── Room：房间成员表 ────────────────────────────────────────────────
@@ -152,7 +217,6 @@ pub const PushServerContext = struct {
 /// 成员操作。所有操作经 ops 队列由 Room fiber 串行处理（单写者）。
 pub const RegisterOp = struct {
     nickname: [MAX_NICK]u8,
-    inbox: *Channel(PushPayload),
     reply: *Channel(WelcomePayload),
 };
 
@@ -189,11 +253,16 @@ pub const RoomOp = union(enum) {
 
 /// 房间成员表：动态扩容 + 空闲槽位复用（见 docs/chat-scale-10000.md §3.1）。
 /// 槽位索引即 client_id；删除的槽位进 free 栈，注册时 O(1) 复用。
+/// 所有广播（聊天消息、加入/离开通知）经 SharedBoard.append 一次性写入
+/// （O(1)），各连接的 Push 协议按游标拉取——无逐连接 trySend。
 pub const Room = struct {
     allocator: Allocator,
     slots: std.ArrayList(Slot),
     free: std.ArrayList(u32),
     count: usize = 0,
+    board: *SharedBoard,
+    /// 加入/离开通知开关（大群或压测可关闭，避免注册风暴刷板）
+    notify_joins: bool = true,
     /// ops 队列容量按连接规模配置（1024 足够万级连接的注册/广播排队）
     ops: Channel(RoomOp) = undefined,
     ops_buf: [1024]RoomOp = undefined,
@@ -202,14 +271,17 @@ pub const Room = struct {
     pub const Slot = struct {
         active: bool = false,
         nickname: [MAX_NICK]u8 = [_]u8{0} ** MAX_NICK,
-        inbox: ?*Channel(PushPayload) = null,
     };
 
-    pub fn init(self: *Room, allocator: Allocator) void {
+    pub fn init(self: *Room, allocator: Allocator, board: *SharedBoard) void {
         self.allocator = allocator;
         self.slots = std.ArrayList(Slot).empty;
         self.free = std.ArrayList(u32).empty;
         self.count = 0;
+        self.board = board;
+        // 注意：`var x: Room = undefined` 初始化不应用字段默认值，
+        // init 必须显式设置（否则 notify_joins 是随机内存）
+        self.notify_joins = true;
         self.ops = Channel(RoomOp).init(&self.ops_buf);
         self.fiber = null;
     }
@@ -261,11 +333,10 @@ pub const Room = struct {
             const s = &self.slots.items[@intCast(id)];
             s.active = true;
             s.nickname = r.nickname;
-            s.inbox = r.inbox;
             self.count += 1;
             self.finishRegister(r, id);
         } else {
-            self.slots.append(self.allocator, .{ .active = true, .nickname = r.nickname, .inbox = r.inbox }) catch {
+            self.slots.append(self.allocator, .{ .active = true, .nickname = r.nickname }) catch {
                 r.reply.trySend(.{ .client_id = INVALID_CLIENT_ID, .member_count = 0 }) catch {};
                 return;
             };
@@ -277,7 +348,7 @@ pub const Room = struct {
     fn finishRegister(self: *Room, r: RegisterOp, id: u32) void {
         // 在线人数含自己，成员快照排除自己 → count - 1
         r.reply.trySend(.{ .client_id = id, .member_count = @intCast(self.count - 1) }) catch {};
-        self.notifyAllExcept(id, r.nickname, "加入了房间");
+        if (self.notify_joins) self.appendNotice(r.nickname, "加入了房间");
     }
 
     fn handleRemove(self: *Room, r: RemoveOp) void {
@@ -286,31 +357,17 @@ pub const Room = struct {
             if (s.active) {
                 const name = s.nickname;
                 s.active = false;
-                s.inbox = null;
                 self.count -= 1;
                 self.free.append(self.allocator, r.client_id) catch {}; // OOM 时槽位泄漏，可接受
-                self.notifyAllExcept(r.client_id, name, "离开了房间");
+                if (self.notify_joins) self.appendNotice(name, "离开了房间");
             }
         }
         r.reply.trySend({}) catch {};
     }
 
+    /// 广播聊天消息：一次 append 到共享板（O(1)），各连接 Push 按游标拉取。
     fn handleBroadcast(self: *Room, b: BroadcastOp) void {
-        for (self.slots.items, 0..) |*s, i| {
-            if (!s.active or i == b.from_id) continue;
-            const inbox = s.inbox orelse continue;
-            inbox.trySend(b.payload) catch {
-                // 慢消费者：队列已满，fail-fast —— 关闭其 inbox，
-                // Push fiber 收到 ChannelClosed 退出，监督 fiber 收拾连接。
-                const name = s.nickname;
-                s.active = false;
-                s.inbox = null;
-                self.count -= 1;
-                self.free.append(self.allocator, @intCast(i)) catch {};
-                inbox.close(.graceful);
-                self.notifyAllExcept(@intCast(i), name, "因接收过慢被断开");
-            };
-        }
+        self.board.append(b.payload);
     }
 
     /// /who：收集成员名单（截断到 WHO_LIST_LIMIT），Room fiber 独占访问成员表。
@@ -333,8 +390,8 @@ pub const Room = struct {
         w.reply.trySend(reply) catch {};
     }
 
-    /// 向除 except_id 外的所有在线成员广播系统通知。
-    fn notifyAllExcept(self: *Room, except_id: u32, name: [MAX_NICK]u8, verb: []const u8) void {
+    /// 向消息板追加一条系统通知（加入/离开）。
+    fn appendNotice(self: *Room, name: [MAX_NICK]u8, verb: []const u8) void {
         var text_buf: [MAX_TEXT]u8 = undefined;
         const text = std.fmt.bufPrint(&text_buf, "{s} {s}", .{ name[0..cstrLen(&name)], verb }) catch return;
         var payload = PushPayload{
@@ -346,17 +403,7 @@ pub const Room = struct {
             .ts_ms = monotonicMs(),
         };
         @memcpy(payload.text[0..text.len], text);
-        for (self.slots.items, 0..) |*s, i| {
-            if (!s.active or i == except_id) continue;
-            const inbox = s.inbox orelse continue;
-            inbox.trySend(payload) catch {
-                s.active = false;
-                s.inbox = null;
-                self.count -= 1;
-                self.free.append(self.allocator, @intCast(i)) catch {};
-                inbox.close(.graceful);
-            };
-        }
+        self.board.append(payload);
     }
 };
 
@@ -380,7 +427,7 @@ pub const Login = union(enum) {
 
         var reply_buf: [1]WelcomePayload = undefined;
         var reply: Channel(WelcomePayload) = .init(&reply_buf);
-        try ctx.room.ops.send(.{ .register = .{ .nickname = nick, .inbox = ctx.inbox, .reply = &reply } });
+        try ctx.room.ops.send(.{ .register = .{ .nickname = nick, .reply = &reply } });
         const reg = try reply.receive();
         if (reg.client_id == INVALID_CLIENT_ID) return error.RoomFull;
         ctx.client_id = reg.client_id;
@@ -465,7 +512,8 @@ pub const Send = union(enum) {
         }
     }
 
-    /// /who 响应：向 Room 查询成员名单，格式化后经本连接 inbox 推送（kind=member_list）。
+    /// /who 响应：向 Room 查询成员名单，格式化后追加到消息板（kind=member_list），
+    /// 由本连接的 Push 按游标拉取。
     fn replyMemberList(ctx: *ServerContext) !void {
         var reply_buf: [1]MemberListReply = undefined;
         var reply: Channel(MemberListReply) = .init(&reply_buf);
@@ -490,7 +538,7 @@ pub const Send = union(enum) {
             .ts_ms = monotonicMs(),
         };
         @memcpy(payload.text[0..pos], text_buf[0..pos]);
-        try ctx.inbox.send(payload); // 阻塞等 Push fiber 消费；/who 低频，不影响锁步
+        ctx.room.board.append(payload);
     }
 };
 
@@ -509,41 +557,69 @@ pub const Ack = union(enum) {
 
 const PushInfo = ProtocolInfo("chat_push", PushClientContext, PushServerContext);
 
-pub const Deliver = union(enum) {
-    push: Data(PushPayload, Deliver),
+/// 批量推送载荷：一帧最多 PUSH_CHUNK 条消息。
+pub const ChunkPayload = struct {
+    msgs: [PUSH_CHUNK]PushPayload,
+    count: u8,
+};
 
-    pub const info: PushInfo = .{ .agent = .server, .name = "Deliver" };
+/// 服务器端按游标从 SharedBoard 批量拉取推送；无新消息时发 idle 帧
+/// （同时作为 liveness，客户端 Push fiber 持续 recv）。
+pub const Poll = union(enum) {
+    batch: Data(ChunkPayload, Poll),
+    idle: Data(void, Poll),
+    quit: Data(void, Exit),
 
-    /// 服务器端：从本连接的广播队列取一条消息推送；队列关闭则退出。
+    pub const info: PushInfo = .{ .agent = .server, .name = "Poll" };
+
+    /// 服务器端：游标后有新消息则批量拉取推送；否则空转 PUSH_POLL_MS 发 idle。
     pub fn process(ctx: *PushServerContext) !@This() {
-        const payload = try ctx.inbox.receive();
-        return .{ .push = .{ .data = payload } };
+        if (ctx.kick) return .quit;
+        const c = ctx.board.len();
+        if (c > ctx.cursor) {
+            const end = @min(ctx.cursor + PUSH_CHUNK, c);
+            const msgs = ctx.board.slice(ctx.cursor, end);
+            var payload = ChunkPayload{ .msgs = undefined, .count = @intCast(msgs.len) };
+            @memcpy(payload.msgs[0..msgs.len], msgs);
+            ctx.cursor = end;
+            return .{ .batch = .{ .data = payload } };
+        }
+        try sleepMs(PUSH_POLL_MS);
+        return .idle;
     }
 
-    /// 客户端：投递到收件箱（测试）或格式化打印（demo）。
+    /// 客户端：把批量消息逐条投递到收件箱（测试）或格式化打印（demo）。
     pub fn preprocess(ctx: *PushClientContext, result: @This()) !void {
-        const p = result.push.data;
+        switch (result) {
+            .batch => |b| try deliverChunk(ctx, b.data.msgs[0..b.data.count]),
+            .idle => {},
+            .quit => {},
+        }
+    }
+};
+
+/// 客户端处理一批推送。
+fn deliverChunk(ctx: *PushClientContext, msgs: []const PushPayload) !void {
+    for (msgs) |*p| {
         if (ctx.inbox) |q| {
             if (p.kind == @intFromEnum(PushKind.chat) or ctx.inbox_all) {
-                try q.send(p); // 阻塞：消费慢时背压到服务器
+                try q.send(p.*); // 阻塞：消费慢时背压到服务器
             }
-            return;
-        }
-        if (ctx.out) |f| {
+        } else if (ctx.out) |f| {
             var buf: [MAX_TEXT + MAX_NICK + 8]u8 = undefined;
             const line = switch (p.kind) {
                 0 => std.fmt.bufPrint(&buf, "[{s}] {s}", .{
                     p.from_name[0..cstrLen(&p.from_name)],
                     p.text[0..cstrLen(&p.text)],
-                }) catch return,
-                1 => std.fmt.bufPrint(&buf, "*** {s}", .{p.text[0..cstrLen(&p.text)]}) catch return,
-                2 => std.fmt.bufPrint(&buf, "*** {s}", .{p.text[0..cstrLen(&p.text)]}) catch return,
-                else => return,
+                }) catch continue,
+                1 => std.fmt.bufPrint(&buf, "*** {s}", .{p.text[0..cstrLen(&p.text)]}) catch continue,
+                2 => std.fmt.bufPrint(&buf, "*** {s}", .{p.text[0..cstrLen(&p.text)]}) catch continue,
+                else => continue,
             };
             try writeLineLocked(f, ctx.out_lock, line);
         }
     }
-};
+}
 
 // ─── 工具 ────────────────────────────────────────────────────────────
 

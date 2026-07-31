@@ -17,11 +17,11 @@ const chat = @import("protocol.zig");
 /// 与 server.zig 保持一致的 Mux 配置。
 const Mux = polyrole.family_mux_channel.MultiplexChannel(&.{
     .{ .capacity = 1, .max_message_size = 4096, .overflow = .close_channel },
-    .{ .capacity = 16, .max_message_size = 512, .overflow = .backpressure },
+    .{ .capacity = 16, .max_message_size = 4096, .overflow = .backpressure },
 }, 4100);
 
 const CtrlRunner = polyrole.runner.Runner(chat.Login);
-const PushRunner = polyrole.runner.Runner(chat.Deliver);
+const PushRunner = polyrole.runner.Runner(chat.Poll);
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT: u16 = 7788;
@@ -83,8 +83,8 @@ pub fn main(init: std.process.Init) !void {
 
 const PushFn = struct {
     fn run(ctx: *chat.PushClientContext, ch: *Mux.SubChannel) anyerror!void {
-        // Push 通道不设超时：服务器死亡由 Ctrl 心跳检测，这里只需无限等待推送。
-        PushRunner.symmetric_run(.client, ctx, ch, chat.Deliver, null) catch {};
+        // Push 通道不设超时：服务器死亡由 Ctrl 心跳检测，这里持续收批量帧。
+        PushRunner.symmetric_run(.client, ctx, ch, chat.Poll, null) catch {};
     }
 };
 

@@ -22,11 +22,11 @@ const chat = @import("chat");
 
 const Mux = polyrole.family_mux_channel.MultiplexChannel(&.{
     .{ .capacity = 1, .max_message_size = 4096, .overflow = .close_channel },
-    .{ .capacity = 16, .max_message_size = 512, .overflow = .backpressure },
+    .{ .capacity = 16, .max_message_size = 4096, .overflow = .backpressure },
 }, 4100);
 
 const CtrlRunner = polyrole.runner.Runner(chat.Login);
-const PushRunner = polyrole.runner.Runner(chat.Deliver);
+const PushRunner = polyrole.runner.Runner(chat.Poll);
 
 /// 每批注册后的加入通知消化等待（毫秒）。
 const BATCH_GAP_MS: u64 = 2000;
@@ -107,7 +107,8 @@ pub fn main(init: std.process.Init) !void {
         elapsed_ms,
     });
     if (msgs > 0 and n > 1) {
-        const expected = (n - 1) * msgs;
+        // board 模式下发送者也经消息板拉回自己的消息，期望 = N × msgs
+        const expected = n * msgs;
         const got = stats.received.load(.acquire);
         const bs = stats.broadcast_start_ms.load(.acquire);
         const first = stats.first_recv_ms.load(.acquire);
@@ -162,7 +163,7 @@ fn clientRun(
 
     const PushFn = struct {
         fn run(ctx: *chat.PushClientContext, ch: *Mux.SubChannel) anyerror!void {
-            PushRunner.symmetric_run(.client, ctx, ch, chat.Deliver, null) catch {};
+            PushRunner.symmetric_run(.client, ctx, ch, chat.Poll, null) catch {};
         }
     };
     var push_h = try zio.spawn(PushFn.run, .{ &push_ctx, mux.subChannel(1) });

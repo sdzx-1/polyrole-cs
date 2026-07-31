@@ -16,11 +16,11 @@ const server_mod = @import("server.zig");
 
 const Mux = polyrole.family_mux_channel.MultiplexChannel(&.{
     .{ .capacity = 1, .max_message_size = 4096, .overflow = .close_channel },
-    .{ .capacity = 16, .max_message_size = 512, .overflow = .backpressure },
+    .{ .capacity = 16, .max_message_size = 4096, .overflow = .backpressure },
 }, 4100);
 
 const CtrlRunner = polyrole.runner.Runner(chat.Login);
-const PushRunner = polyrole.runner.Runner(chat.Deliver);
+const PushRunner = polyrole.runner.Runner(chat.Poll);
 
 const testing = std.testing;
 const allocator = testing.allocator;
@@ -39,35 +39,35 @@ fn makeNick(s: []const u8) [chat.MAX_NICK]u8 {
 
 // ─── 1. Room 纯逻辑（同步 drain，无需 runtime） ──────────────────────
 
-test "room: register/remove/broadcast" {
+test "room: register/remove/broadcast（消息板）" {
+    var board: chat.SharedBoard = undefined;
+    board.init(allocator, 1024);
+    defer board.deinit(allocator);
+
     var room: chat.Room = undefined;
-    room.init(allocator);
+    room.init(allocator, &board);
     defer room.deinit();
 
-    var a_buf: [4]chat.PushPayload = undefined;
-    var a_inbox: zio.Channel(chat.PushPayload) = .init(&a_buf);
-    var b_buf: [4]chat.PushPayload = undefined;
-    var b_inbox: zio.Channel(chat.PushPayload) = .init(&b_buf);
-
-    // A 注册
+    // A 注册 → 板追加 "alice 加入了房间"
     var ra_buf: [1]chat.WelcomePayload = undefined;
     var ra: zio.Channel(chat.WelcomePayload) = .init(&ra_buf);
-    try room.ops.send(.{ .register = .{ .nickname = makeNick("alice"), .inbox = &a_inbox, .reply = &ra } });
+    try room.ops.send(.{ .register = .{ .nickname = makeNick("alice"), .reply = &ra } });
     room.drain();
     const wa = try ra.receive();
     try testing.expectEqual(@as(u32, 0), wa.client_id);
     try testing.expectEqual(@as(u32, 0), wa.member_count);
+    try testing.expectEqual(@as(usize, 1), board.len());
 
-    // B 注册：B 的 Welcome 带在线人数 1；A 收到"bob 加入了房间"
+    // B 注册 → 板追加 "bob 加入了房间"；B 的 Welcome 带在线人数 1
     var rb_buf: [1]chat.WelcomePayload = undefined;
     var rb: zio.Channel(chat.WelcomePayload) = .init(&rb_buf);
-    try room.ops.send(.{ .register = .{ .nickname = makeNick("bob"), .inbox = &b_inbox, .reply = &rb } });
+    try room.ops.send(.{ .register = .{ .nickname = makeNick("bob"), .reply = &rb } });
     room.drain();
     const wb = try rb.receive();
     try testing.expectEqual(@as(u32, 1), wb.client_id);
     try testing.expectEqual(@as(u32, 1), wb.member_count);
-
-    const sys_join = try a_inbox.receive();
+    try testing.expectEqual(@as(usize, 2), board.len());
+    const sys_join = board.slice(1, 2)[0];
     try testing.expectEqual(@as(u8, @intFromEnum(chat.PushKind.system)), sys_join.kind);
     try testing.expectEqualStrings("bob 加入了房间", sys_join.text[0..chat.cstrLen(&sys_join.text)]);
 
@@ -81,7 +81,7 @@ test "room: register/remove/broadcast" {
     try testing.expectEqualStrings("bob", wl.names[0][0..chat.cstrLen(&wl.names[0])]);
     try testing.expect(!wl.truncated);
 
-    // 广播：A 发消息给房间，B 收到；A 收不到自己的消息
+    // 广播：A 发消息 → 板追加 chat 消息
     try room.ops.send(.{ .broadcast = .{
         .from_id = 0,
         .payload = .{
@@ -94,80 +94,58 @@ test "room: register/remove/broadcast" {
         },
     } });
     room.drain();
-    const msg = try b_inbox.receive();
+    try testing.expectEqual(@as(usize, 3), board.len());
+    const msg = board.slice(2, 3)[0];
     try testing.expectEqual(@as(u8, @intFromEnum(chat.PushKind.chat)), msg.kind);
     try testing.expectEqualStrings("hello", msg.text[0..chat.cstrLen(&msg.text)]);
-    try testing.expectError(error.ChannelEmpty, a_inbox.tryReceive());
 
-    // B 移除：A 收到"bob 离开了房间"，房间成员数归 1
+    // B 移除 → 板追加 "bob 离开了房间"；房间成员数归 1
     var rr_buf: [1]void = undefined;
     var rr: zio.Channel(void) = .init(&rr_buf);
     try room.ops.send(.{ .remove = .{ .client_id = 1, .reply = &rr } });
     room.drain();
     _ = try rr.receive();
-    const sys_leave = try a_inbox.receive();
+    try testing.expectEqual(@as(usize, 4), board.len());
+    const sys_leave = board.slice(3, 4)[0];
     try testing.expectEqualStrings("bob 离开了房间", sys_leave.text[0..chat.cstrLen(&sys_leave.text)]);
     try testing.expectEqual(@as(usize, 1), room.count);
 
     // 槽位复用：B 移除后其 client_id 回到空闲列表，C 注册应复用它
-    var c_buf: [4]chat.PushPayload = undefined;
-    var c_inbox: zio.Channel(chat.PushPayload) = .init(&c_buf);
     var rc_buf: [1]chat.WelcomePayload = undefined;
     var rc: zio.Channel(chat.WelcomePayload) = .init(&rc_buf);
-    try room.ops.send(.{ .register = .{ .nickname = makeNick("carol"), .inbox = &c_inbox, .reply = &rc } });
+    try room.ops.send(.{ .register = .{ .nickname = makeNick("carol"), .reply = &rc } });
     room.drain();
     const wc = try rc.receive();
     try testing.expectEqual(@as(u32, 1), wc.client_id); // 复用 bob 的槽位
     try testing.expectEqual(@as(usize, 2), room.count);
 }
 
-test "room: 慢消费者被断开" {
+test "room: notify_joins 关闭时无加入/离开通知" {
+    var board: chat.SharedBoard = undefined;
+    board.init(allocator, 1024);
+    defer board.deinit(allocator);
+
     var room: chat.Room = undefined;
-    room.init(allocator);
+    room.init(allocator, &board);
+    room.notify_joins = false; // 静默注册（大群/压测）
     defer room.deinit();
 
-    var a_buf: [1]chat.PushPayload = undefined;
-    var a_inbox: zio.Channel(chat.PushPayload) = .init(&a_buf); // 容量 1
-    var b_buf: [8]chat.PushPayload = undefined;
-    var b_inbox: zio.Channel(chat.PushPayload) = .init(&b_buf);
-
-    // A、B 注册
     var ra_buf: [1]chat.WelcomePayload = undefined;
     var ra: zio.Channel(chat.WelcomePayload) = .init(&ra_buf);
-    try room.ops.send(.{ .register = .{ .nickname = makeNick("alice"), .inbox = &a_inbox, .reply = &ra } });
+    try room.ops.send(.{ .register = .{ .nickname = makeNick("alice"), .reply = &ra } });
     var rb_buf: [1]chat.WelcomePayload = undefined;
     var rb: zio.Channel(chat.WelcomePayload) = .init(&rb_buf);
-    try room.ops.send(.{ .register = .{ .nickname = makeNick("bob"), .inbox = &b_inbox, .reply = &rb } });
+    try room.ops.send(.{ .register = .{ .nickname = makeNick("bob"), .reply = &rb } });
+    var rr_buf: [1]void = undefined;
+    var rr: zio.Channel(void) = .init(&rr_buf);
+    try room.ops.send(.{ .remove = .{ .client_id = 0, .reply = &rr } });
     room.drain();
     _ = try ra.receive();
     _ = try rb.receive();
-    _ = try a_inbox.receive(); // 消费"bob 加入了房间"
-
-    // 向房间广播 3 条：A 的容量 1，第 2 条时 A 被断开
-    const payload = chat.PushPayload{
-        .kind = @intFromEnum(chat.PushKind.chat),
-        .seq = 1,
-        .from_id = 0,
-        .from_name = makeNick("alice"),
-        .text = makeText("x"),
-        .ts_ms = 0,
-    };
-    for (0..3) |_| {
-        try room.ops.send(.{ .broadcast = .{ .from_id = 99, .payload = payload } });
-        room.drain();
-    }
-    // A 被断开：room 只剩 B；A 的 inbox 先排空缓冲的 1 条再返回 ChannelClosed
-    try testing.expectEqual(@as(usize, 1), room.count);
-    _ = try a_inbox.receive();
-    try testing.expectError(error.ChannelClosed, a_inbox.receive());
-    // B：chat(第1次广播) → sys(A断开) → chat(第2次) → chat(第3次)
-    _ = try b_inbox.receive();
-    const sys = try b_inbox.receive();
-    try testing.expectEqual(@as(u8, @intFromEnum(chat.PushKind.system)), sys.kind);
-    try testing.expectEqualStrings("alice 因接收过慢被断开", sys.text[0..chat.cstrLen(&sys.text)]);
-    _ = try b_inbox.receive();
-    _ = try b_inbox.receive();
-    try testing.expectError(error.ChannelEmpty, b_inbox.tryReceive());
+    _ = try rr.receive();
+    // 板只有广播内容：注册/离开均不追加通知
+    try testing.expectEqual(@as(usize, 0), board.len());
+    try testing.expectEqual(@as(usize, 1), room.count); // alice 移除后只剩 bob
 }
 
 // ─── 2. Ctrl simulate（Room fiber 并行处理 ops） ──────────────────────
@@ -176,20 +154,23 @@ test "ctrl: simulate 注册→欢迎→消息→退出" {
     const rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
 
+    var board: chat.SharedBoard = undefined;
+    board.init(allocator, 1024);
+    defer board.deinit(allocator);
+
     var room: chat.Room = undefined;
-    room.init(allocator);
+    room.init(allocator, &board);
     defer room.deinit();
     try room.spawn();
     defer room.stop();
 
-    // 预注册 bob（服务器端代表另一条连接）
-    var b_buf: [8]chat.PushPayload = undefined;
-    var b_inbox: zio.Channel(chat.PushPayload) = .init(&b_buf);
+    // 预注册 bob（服务器端代表另一条连接）→ 板追加 "bob 加入了房间"
     var rb_buf: [1]chat.WelcomePayload = undefined;
     var rb: zio.Channel(chat.WelcomePayload) = .init(&rb_buf);
-    try room.ops.send(.{ .register = .{ .nickname = makeNick("bob"), .inbox = &b_inbox, .reply = &rb } });
+    try room.ops.send(.{ .register = .{ .nickname = makeNick("bob"), .reply = &rb } });
     const wb = try rb.receive();
     try testing.expectEqual(@as(u32, 0), wb.member_count);
+    try testing.expectEqual(@as(usize, 1), board.len());
 
     // 客户端：预置一条消息 + /who + 退出
     var input_buf: [8]chat.UserInput = undefined;
@@ -198,11 +179,8 @@ test "ctrl: simulate 注册→欢迎→消息→退出" {
     try input.send(.who);
     try input.send(.quit);
 
-    var a_inbox_buf: [8]chat.PushPayload = undefined;
-    var a_inbox: zio.Channel(chat.PushPayload) = .init(&a_inbox_buf);
-
     var client_ctx = chat.ClientContext.init(null, makeNick("alice"), &input);
-    var server_ctx = chat.ServerContext.init(&room, &a_inbox);
+    var server_ctx = chat.ServerContext.init(&room);
 
     try CtrlRunner.simulate(&client_ctx, &server_ctx, chat.Login);
 
@@ -212,20 +190,18 @@ test "ctrl: simulate 注册→欢迎→消息→退出" {
     // 服务器端 seq 递增
     try testing.expectEqual(@as(u64, 1), client_ctx.seq);
 
-    // bob 的收件箱：alice 加入 → chat 消息 → alice 离开
-    const sys_join = try b_inbox.receive();
+    // 消息板：bob 加入 → alice 加入 → chat → /who → alice 离开（共 5 条）
+    try testing.expectEqual(@as(usize, 5), board.len());
+    const sys_join = board.slice(1, 2)[0];
     try testing.expectEqualStrings("alice 加入了房间", sys_join.text[0..chat.cstrLen(&sys_join.text)]);
-    const msg = try b_inbox.receive();
+    const msg = board.slice(2, 3)[0];
     try testing.expectEqual(@as(u8, @intFromEnum(chat.PushKind.chat)), msg.kind);
     try testing.expectEqualStrings("hello", msg.text[0..chat.cstrLen(&msg.text)]);
     try testing.expectEqual(@as(u64, 1), msg.seq);
-
-    // /who 响应：alice 的 inbox（服务器端）收到 member_list，名单含 bob
-    const who_resp = try a_inbox.receive();
+    const who_resp = board.slice(3, 4)[0];
     try testing.expectEqual(@as(u8, @intFromEnum(chat.PushKind.member_list)), who_resp.kind);
     try testing.expectEqualStrings("在线 2 人：bob", who_resp.text[0..chat.cstrLen(&who_resp.text)]);
-
-    const sys_leave = try b_inbox.receive();
+    const sys_leave = board.slice(4, 5)[0];
     try testing.expectEqualStrings("alice 离开了房间", sys_leave.text[0..chat.cstrLen(&sys_leave.text)]);
 }
 
@@ -268,7 +244,7 @@ fn clientRun(
 
     const PushFn = struct {
         fn run(ctx: *chat.PushClientContext, ch: *Mux.SubChannel) anyerror!void {
-            PushRunner.symmetric_run(.client, ctx, ch, chat.Deliver, null) catch {};
+            PushRunner.symmetric_run(.client, ctx, ch, chat.Poll, null) catch {};
         }
     };
     var push_h = try zio.spawn(PushFn.run, .{ &push_ctx, mux.subChannel(1) });
@@ -312,8 +288,12 @@ test "chat: 双客户端集成（欢迎/消息/加入离开/退出）" {
     defer listener.close();
     const server_addr = listener.socket.address;
 
+    var board: chat.SharedBoard = undefined;
+    board.init(allocator, 1024);
+    defer board.deinit(allocator);
+
     var room: chat.Room = undefined;
-    room.init(allocator);
+    room.init(allocator, &board);
     defer room.deinit();
     try room.spawn();
     defer room.stop();
@@ -336,19 +316,27 @@ test "chat: 双客户端集成（欢迎/消息/加入离开/退出）" {
     try client_group.spawn(clientRun, .{ server_addr, "alice", &a_input, &a_inbox });
     try client_group.spawn(clientRun, .{ server_addr, "bob", &b_input, &b_inbox });
 
-    // 1. A 收到"bob 加入了房间" → 说明 A、B 都已注册完成
+    // 1. A 的收件箱：自己的加入通知 → "bob 加入了房间"（board 模式含自己，顺序按注册）
+    const self_join = try a_inbox.receive();
+    try testing.expectEqualStrings("alice 加入了房间", self_join.text[0..chat.cstrLen(&self_join.text)]);
     const sys_join = try a_inbox.receive();
     try testing.expectEqual(@as(u8, @intFromEnum(chat.PushKind.system)), sys_join.kind);
     try testing.expectEqualStrings("bob 加入了房间", sys_join.text[0..chat.cstrLen(&sys_join.text)]);
 
-    // 2. A 发消息 → B 收到；A 收不到自己的消息
+    // 1.5 B 也消费注册期的历史（B 的 Push 从游标 0 拉，含 A 的加入通知）
+    _ = try b_inbox.receive(); // alice 加入了房间
+    _ = try b_inbox.receive(); // bob 加入了房间
+
+    // 2. A 发消息 → B 收到；A（board 模式）也收到自己的消息
     try a_input.send(.{ .msg = makeText("hello") });
     const msg = try b_inbox.receive();
     try testing.expectEqual(@as(u8, @intFromEnum(chat.PushKind.chat)), msg.kind);
     try testing.expectEqualStrings("alice", msg.from_name[0..chat.cstrLen(&msg.from_name)]);
     try testing.expectEqualStrings("hello", msg.text[0..chat.cstrLen(&msg.text)]);
     try testing.expectEqual(@as(u32, 0), msg.from_id); // alice 是第一个注册的
-    try testing.expectError(error.ChannelEmpty, a_inbox.tryReceive());
+    const self_msg = try a_inbox.receive(); // 发送者也会经板拉回自己的消息
+    try testing.expectEqual(@as(u8, @intFromEnum(chat.PushKind.chat)), self_msg.kind);
+    try testing.expectEqualStrings("hello", self_msg.text[0..chat.cstrLen(&self_msg.text)]);
 
     // 2.5 B 发 /who → 收到成员列表（kind=member_list，含 alice）
     try b_input.send(.who);
@@ -371,8 +359,12 @@ test "chat: 客户端断开后广播离开通知" {
     defer listener.close();
     const server_addr = listener.socket.address;
 
+    var board: chat.SharedBoard = undefined;
+    board.init(allocator, 1024);
+    defer board.deinit(allocator);
+
     var room: chat.Room = undefined;
-    room.init(allocator);
+    room.init(allocator, &board);
     defer room.deinit();
     try room.spawn();
     defer room.stop();
@@ -394,6 +386,8 @@ test "chat: 客户端断开后广播离开通知" {
     // C 注册后立即断开 → 服务器清理并广播
     try client_group.spawn(rogueRun, .{ server_addr });
 
+    // B 先收到自己的加入通知，再收到 ccc 加入/离开
+    _ = try b_inbox.receive(); // "bob 加入了房间"
     const sys_join = try b_inbox.receive();
     try testing.expectEqualStrings("ccc 加入了房间", sys_join.text[0..chat.cstrLen(&sys_join.text)]);
     const sys_leave = try b_inbox.receive();
