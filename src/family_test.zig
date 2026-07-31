@@ -364,8 +364,19 @@ test "family: protocols over one TLS session via TlsChannel.transport()" {
             try m.initFromTransport(allocator, tc.transport());
             defer m.deinit();
 
-            try R1.symmetric_run(.client, c1, m.subChannel(0), P1.A, null);
-            try R2.symmetric_run(.client, c2, m.subChannel(1), P2.A, null);
+            // 阶段 3：两个协议并发共享同一条加密连接。
+            var h1 = try zio.spawn(struct {
+                fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
+                    try R1.symmetric_run(.client, ctx, ch, P1.A, null);
+                }
+            }.run, .{ m.subChannel(0), c1 });
+            var h2 = try zio.spawn(struct {
+                fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
+                    try R2.symmetric_run(.client, ctx, ch, P2.A, null);
+                }
+            }.run, .{ m.subChannel(1), c2 });
+            h1.join() catch {};
+            h2.join() catch {};
         }
     };
 
@@ -399,8 +410,18 @@ test "family: protocols over one TLS session via TlsChannel.transport()" {
 
     var srv_ctx1: i32 = 0;
     var srv_ctx2: i32 = 0;
-    try R1.symmetric_run(.server, &srv_ctx1, m.subChannel(0), P1.A, null);
-    try R2.symmetric_run(.server, &srv_ctx2, m.subChannel(1), P2.A, null);
+    var sh1 = try zio.spawn(struct {
+        fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
+            try R1.symmetric_run(.server, ctx, ch, P1.A, null);
+        }
+    }.run, .{ m.subChannel(0), &srv_ctx1 });
+    var sh2 = try zio.spawn(struct {
+        fn run(ch: *M.SubChannel, ctx: *i32) anyerror!void {
+            try R2.symmetric_run(.server, ctx, ch, P2.A, null);
+        }
+    }.run, .{ m.subChannel(1), &srv_ctx2 });
+    sh1.join() catch {};
+    sh2.join() catch {};
 
     try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
     try std.testing.expectEqual(@as(i32, 3), srv_ctx2);
