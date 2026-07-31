@@ -220,7 +220,7 @@ test "family: overflow close_channel surfaces ProtocolOverflow, other protocols 
     const M = MultiplexChannel(&.{
         .{ .capacity = 8, .max_message_size = 1024 },
         .{ .capacity = 1, .max_message_size = 1024, .overflow = .close_channel },
-    });
+    }, 4096);
     const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var l = try lh.listen(.{});
     defer l.close();
@@ -268,7 +268,7 @@ test "family: backpressure policy blocks reader, no frames lost" {
     defer rt.deinit();
     const P2 = TestProtocol.make("p2", polyrole.Exit);
     const SC = polyrole.channel.StreamChannel;
-    const M = MultiplexChannel(&.{.{ .capacity = 1, .max_message_size = 1024, .overflow = .backpressure }});
+    const M = MultiplexChannel(&.{.{ .capacity = 1, .max_message_size = 1024, .overflow = .backpressure }}, 4096);
     const lh = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var l = try lh.listen(.{});
     defer l.close();
@@ -320,7 +320,7 @@ test "family: protocols over one TLS session via TlsChannel.transport()" {
     const M = MultiplexChannel(&.{
         .{ .capacity = 8, .max_message_size = 1024 },
         .{ .capacity = 8, .max_message_size = 1024 },
-    });
+    }, 4096);
     const R_tls = polyrole.runner.Runner(tls.ClientHello);
 
     var kp_seed: [crypto.sign.Ed25519.KeyPair.seed_length]u8 = undefined;

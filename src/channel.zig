@@ -140,19 +140,17 @@ pub const TlsChannel = struct {
         return try codec.decode(&reader, state_id, T, self.decode_buf.len);
     }
 
-    /// 记录模式写入：将一条不透明帧作为单个记录加密。
+    /// 记录模式写入：将一条完整 Mux 帧作为单个记录加密。
     ///
-    /// 帧格式为 `[protocol_id(1) || len(2 BE) || payload]`——与
-    /// `family_mux_channel.MultiplexChannel` 帧的线上格式完全一致。
-    /// 用于通过 `transport()` 在 TLS 之上叠加 Mux。
-    pub fn recordWrite(self: *@This(), id: u8, payload: []const u8) !void {
-        const frame_len = 3 + payload.len;
+    /// 帧体是 `MultiplexChannel` 的整帧（`[seg_count][段...]`），
+    /// 由 Mux 的 writer 打包后整体交给本层。用于通过 `transport()`
+    /// 在 TLS 之上叠加 Mux。
+    pub fn recordWriteFrame(self: *@This(), frame: []const u8) !void {
+        const frame_len = frame.len;
         std.debug.assert(frame_len <= std.math.maxInt(u16));
         std.debug.assert(frame_len + 2 <= self.encode_buf.len);
         std.mem.writeInt(u16, self.encode_buf[0..2], @intCast(frame_len), .big);
-        self.encode_buf[2] = id;
-        std.mem.writeInt(u16, self.encode_buf[3..5], @intCast(payload.len), .big);
-        @memcpy(self.encode_buf[5..][0..payload.len], payload);
+        @memcpy(self.encode_buf[2..][0..frame_len], frame);
         try self.sealAndSend(self.encode_buf[0 .. 2 + frame_len]);
     }
 
@@ -242,20 +240,17 @@ pub const TlsChannel = struct {
 
 // ─────────────────── Mux 传输适配器 ───────────────────
 
-fn tlsWriteFrame(ctx: *anyopaque, id: u8, payload: []const u8) anyerror!void {
+fn tlsWriteFrame(ctx: *anyopaque, frame: []const u8) anyerror!void {
     const tc: *TlsChannel = @ptrCast(@alignCast(ctx));
-    try tc.recordWrite(id, payload);
+    try tc.recordWriteFrame(frame);
 }
 
-fn tlsReadFrame(ctx: *anyopaque) anyerror!family_mux.ReadFrame {
+fn tlsReadFrame(ctx: *anyopaque) anyerror![]const u8 {
     const tc: *TlsChannel = @ptrCast(@alignCast(ctx));
     const plain = try tc.recordRead();
     const frame_len = std.mem.readInt(u16, plain[0..2], .big);
     if (plain.len != frame_len + 2) return error.BadLength;
-    const id = plain[2];
-    const payload_len = std.mem.readInt(u16, plain[3..5], .big);
-    if (frame_len != 3 + payload_len) return error.BadLength;
-    return .{ .id = id, .payload = plain[5..][0..payload_len] };
+    return plain[2..][0..frame_len];
 }
 
 fn tlsShutdownReceive(ctx: *anyopaque) void {
