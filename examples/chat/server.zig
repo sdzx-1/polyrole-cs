@@ -78,8 +78,9 @@ pub fn serveConnection(
     try mux.initFromChannel(allocator, &sc);
     errdefer mux.deinit();
 
-    // 广播队列容量按心跳间隔与广播频率配置（64 条足够 1s 心跳下的突发）
-    var inbox_buf: [64]chat.PushPayload = undefined;
+    // 广播队列容量：需吸收单批注册的加入通知（每批 N 人时单连接收 ~N 条），
+    // 服务器单线程 Push 推送消化不及会按慢消费者断开（见 docs/chat-scale-10000.md §3.5）。
+    var inbox_buf: [256]chat.PushPayload = undefined;
     var inbox: zio.Channel(chat.PushPayload) = .init(&inbox_buf);
 
     var ctrl_ctx = chat.ServerContext.init(room, &inbox);

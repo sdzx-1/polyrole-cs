@@ -136,6 +136,10 @@ pub const PushClientContext = struct {
     out_lock: ?*zio.Mutex = null,
     /// 收到的推送（测试注入，用于断言；demo 客户端为 null）
     inbox: ?*Channel(PushPayload) = null,
+    /// inbox 是否接收全部推送（含 system 加入/离开通知）。
+    /// 压测客户端设 false 只收 chat 消息——注册风暴的 O(N²) 加入通知
+    /// 会塞满 inbox 触发慢消费者断开，而压测只关心 chat 广播。
+    inbox_all: bool = true,
 };
 
 /// 推送协议服务器上下文（每个连接一个）。
@@ -520,7 +524,9 @@ pub const Deliver = union(enum) {
     pub fn preprocess(ctx: *PushClientContext, result: @This()) !void {
         const p = result.push.data;
         if (ctx.inbox) |q| {
-            try q.send(p); // 阻塞：消费慢时背压到服务器
+            if (p.kind == @intFromEnum(PushKind.chat) or ctx.inbox_all) {
+                try q.send(p); // 阻塞：消费慢时背压到服务器
+            }
             return;
         }
         if (ctx.out) |f| {
