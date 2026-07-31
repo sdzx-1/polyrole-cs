@@ -12,7 +12,7 @@ pub fn main(main_init: std.process.Init) !void {
         .{ "tls", polyrole.tls.ClientHello },
         .{ "net_monitor", polyrole.net_monitor.PingQuery },
         .{ "chat_ctrl", chat.Login },
-        .{ "chat_push", chat.Deliver },
+        .{ "chat_push", chat.Poll },
     }) |entry| {
         const name, const State = entry;
         var graph = try polyrole.Graph.initWithFsm(allocator, State);

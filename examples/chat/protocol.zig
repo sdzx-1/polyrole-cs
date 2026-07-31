@@ -9,8 +9,9 @@
 //   Send(client) ─Msg{heartbeat}/Quit─▶ Ack(server) ─Ack(void)─▶ Send(client)
 //   Send.quit ─▶ Exit（两端同时终止）
 //
-// Push 状态机：
-//   Deliver(server) ─Push{...}─▶ Deliver(server)（自环）
+// Push 状态机（SharedBoard 游标拉取）：
+//   Poll(server) ─batch{8条}/idle─▶ Poll；kick ─▶ Exit
+//   服务器端按游标从共享消息板批量拉取推送；无新消息时发 idle 帧。
 //
 // 设计原则（与 src/protocol 下的协议一致）：
 //   - 协议只建模正确流；超时、重连、断线清理都是调用方（server.zig / client.zig）的事。
