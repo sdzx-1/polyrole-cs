@@ -6,7 +6,7 @@
 //
 // Ctrl 状态机：
 //   Login(client) ─Register{nickname}─▶ Welcome(server) ─Welcome{id,members}─▶ Send(client)
-//   Send(client) ─Msg{poll}/Quit─▶ Ack(server) ─Ack(void)─▶ Send(client)
+//   Send(client) ─Msg{heartbeat}/Quit─▶ Ack(server) ─Ack(void)─▶ Send(client)
 //   Send.quit ─▶ Exit（两端同时终止）
 //
 // Push 状态机：
@@ -33,8 +33,8 @@ pub const MAX_MEMBERS = 64;
 pub const MAX_NICK = 32;
 pub const MAX_TEXT = 256;
 pub const INVALID_CLIENT_ID: u32 = std.math.maxInt(u32);
-/// 客户端空转时的轮询间隔（毫秒）。既是消息发送延迟上限，也是心跳周期。
-pub const POLL_INTERVAL_MS: u64 = 100;
+/// 客户端空转时的心跳间隔（毫秒）。既是消息发送延迟上限，也是心跳周期。
+pub const HEARTBEAT_INTERVAL_MS: u64 = 100;
 
 // ─── 载荷 ────────────────────────────────────────────────────────────
 
@@ -368,7 +368,7 @@ pub const Welcome = union(enum) {
 
 pub const Send = union(enum) {
     msg: Data(MsgPayload, Ack),
-    poll: Data(void, Ack),
+    heartbeat: Data(void, Ack),
     quit: Data(void, Exit),
 
     pub const info: CtrlInfo = .{ .agent = .client, .name = "Send" };
@@ -386,8 +386,8 @@ pub const Send = union(enum) {
                 return .{ .msg = .{ .data = .{ .seq = ctx.seq, .text = text } } };
             },
         };
-        try sleepMs(POLL_INTERVAL_MS);
-        return .poll;
+        try sleepMs(HEARTBEAT_INTERVAL_MS);
+        return .heartbeat;
     }
 
     /// 服务器端：聊天消息广播给房间，退出则移除并广播离开。
@@ -404,7 +404,7 @@ pub const Send = union(enum) {
                 };
                 try ctx.room.ops.send(.{ .broadcast = .{ .from_id = ctx.client_id, .payload = payload } });
             },
-            .poll => {},
+            .heartbeat => {},
             .quit => try ctx.leave(),
         }
     }

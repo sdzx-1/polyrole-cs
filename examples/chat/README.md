@@ -26,7 +26,7 @@ Push fiber:  消费推送并打印        ◀───▶  Push 协议（独立 
 
 ```
 Login(client) ─Register{nickname}─▶ Welcome(server) ─Welcome{id,members}─▶ Send(client)
-Send(client) ─Msg{poll}/Quit─▶ Ack(server) ─Ack(void)─▶ Send(client)
+Send(client) ─Msg{heartbeat}/Quit─▶ Ack(server) ─Ack(void)─▶ Send(client)
 Send.quit ─▶ Exit（两端同时终止）
 ```
 

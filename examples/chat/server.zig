@@ -6,7 +6,7 @@
 //   监督 fiber     —— 每连接两个协议 fiber（Ctrl 锁步 + Push 推送），
 //                     任一退出即清理整个连接（remove + 广播离开 + 关 Mux）
 //
-// 掉线检测：客户端每 100ms 发一次心跳（poll），服务器 Ctrl recv 超过
+// 掉线检测：客户端每 100ms 发一次心跳（heartbeat），服务器 Ctrl recv 超过
 // CTRL_RECV_TIMEOUT_MS 未收到消息即认为连接死亡，走清理路径。
 
 const std = @import("std");
