@@ -10,17 +10,17 @@ const types = @import("context.zig");
 const TlsInfo = ProtocolInfo("simple_tls", types.ClientContext, types.ServerContext);
 
 const TlsError = error{
-    /// System entropy unavailable
+    /// 系统熵不可用
     EntropyUnavailable,
-    /// DH key agreement failed (invalid peer public key)
+    /// DH 密钥协商失败（无效的对端公钥）
     DhFailed,
-    /// Ed25519 signature verification failed
+    /// Ed25519 签名验证失败
     SignatureInvalid,
-    /// HMAC verification failed (wrong handshake key or tampered transcript)
+    /// HMAC 验证失败（握手密钥错误或转录被篡改）
     HmacInvalid,
 };
 
-// ─────────────────── Payload Types ───────────────────
+// ─────────────────── 载荷类型 ───────────────────
 
 const ClientHelloPayload = struct {
     nonce: [24]u8,
@@ -39,7 +39,7 @@ const ClientFinishedPayload = struct {
     mac: [32]u8,
 };
 
-// ─────────────────── SHA256 helper ───────────────────
+// ─────────────────── SHA256 辅助函数 ───────────────────
 
 fn sha256(parts: anytype) [32]u8 {
     var h = crypto.hash.sha2.Sha256.init(.{});
@@ -63,7 +63,7 @@ fn generateX25519Keypair() !crypto.dh.X25519.KeyPair {
     return try crypto.dh.X25519.KeyPair.generateDeterministic(seed);
 }
 
-// ─────────────────── Step 1: ClientHello ───────────────────
+// ─────────────────── 步骤 1：ClientHello ───────────────────
 
 pub const ClientHello = union(enum) {
     to_server: Data(ClientHelloPayload, ServerHello),
@@ -94,7 +94,7 @@ pub const ClientHello = union(enum) {
     }
 };
 
-// ─────────────────── Step 2: ServerHello ───────────────────
+// ─────────────────── 步骤 2：ServerHello ───────────────────
 
 pub const ServerHello = union(enum) {
     to_client: Data(ServerHelloPayload, ClientFinished),
@@ -157,7 +157,7 @@ pub const ServerHello = union(enum) {
     }
 };
 
-// ─────────────────── Step 3: ClientFinished ───────────────────
+// ─────────────────── 步骤 3：ClientFinished ───────────────────
 
 pub const ClientFinished = union(enum) {
     close: Data(ClientFinishedPayload, Exit),
@@ -199,7 +199,7 @@ pub const ClientFinished = union(enum) {
     }
 };
 
-// ─────────────────── Crypto helpers ───────────────────
+// ─────────────────── 密码学辅助函数 ───────────────────
 
 fn sign(kp: crypto.sign.Ed25519.KeyPair, msg: []const u8) ![64]u8 {
     const sig = try kp.sign(msg, null);

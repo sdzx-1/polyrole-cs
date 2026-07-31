@@ -8,7 +8,7 @@ const types = @import("context.zig");
 
 const NetMonitorInfo = ProtocolInfo("net_monitor", types.ClientContext, types.ServerContext);
 
-// ─────────────────── PingQuery (client) ─────────────────────────────────────
+// ─────────────────── PingQuery（客户端）─────────────────────────────────────
 
 pub const PingQuery = union(enum) {
     to_server: Data(types.PingPayload, PingResponse),
@@ -28,7 +28,7 @@ pub const PingQuery = union(enum) {
         return .{ .to_server = .{ .data = .{ .seq_num = ctx.seq_num } } };
     }
 
-    /// Server receives PingQuery: store seq_num for echo, or exit.
+    /// 服务端接收 PingQuery：存储 seq_num 用于回显，或退出。
     pub fn preprocess(ctx: *types.ServerContext, result: @This()) void {
         switch (result) {
             .to_server => |d| ctx.last_seq_num = d.data.seq_num,
@@ -37,7 +37,7 @@ pub const PingQuery = union(enum) {
     }
 };
 
-// ─────────────────── PingResponse (server → client) ─────────────────────────
+// ─────────────────── PingResponse（服务端 → 客户端）─────────────────────────
 
 pub const PingResponse = union(enum) {
     to_client: Data(types.PongPayload, PingQuery),

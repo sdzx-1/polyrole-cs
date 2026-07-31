@@ -5,7 +5,7 @@ const family = @import("family_mux_channel.zig");
 const Mux = family.Mux;
 const MultiplexChannel = family.MultiplexChannel;
 
-// ── tests ─────────────────────────────────────────────────────────────────
+// ── 测试 ─────────────────────────────────────────────────────────────────
 
 const TestProtocol = struct {
     fn make(comptime name: []const u8, comptime Next: type) type {
@@ -96,7 +96,7 @@ test "family: recv timeout" {
     var srv_ctx1: i32 = 0;
     var srv_ctx2: i32 = 0;
 
-    // Client: P1 sends normally, P2 never sends
+    // 客户端：P1 正常发送，P2 从不发送
     var g: zio.Group = .init;
     defer g.cancel();
     try g.spawn(struct {
@@ -108,10 +108,10 @@ test "family: recv timeout" {
             var m: M = undefined;
             try m.initFromChannel(allocator, &sc);
             defer m.deinit();
-            // P1: run normally
+            // P1：正常运行
             var c1: i32 = 0;
             try R1.symmetric_run(.client, &c1, m.subChannel(0), P1.A, null);
-            // Keep connection alive for P2 timeout
+            // 保持连接存活以等待 P2 超时
             try zio.sleep(zio.Duration.fromSeconds(1));
         }
     }.run, .{l.socket.address});
@@ -130,7 +130,7 @@ test "family: recv timeout" {
         }
     }.run, .{ m.subChannel(0), &srv_ctx1 });
 
-    // P2: server recvs with 100ms timeout, client never sends
+    // P2：服务端以 100ms 超时 recv，客户端从不发送
     const err = R2.symmetric_run(.server, &srv_ctx2, m.subChannel(1), P2.A, 100);
     try std.testing.expectError(error.Canceled, err);
 
@@ -227,7 +227,7 @@ test "family: overflow close_channel surfaces ProtocolOverflow, other protocols 
 
     const P2Tag = std.meta.Tag(P2.A);
     const to_b_msg: P2.A = .{ .to_b = .{ .data = {} } };
-    // Client floods sub-channel 1 (never recvs), then runs P1 normally.
+    // 客户端灌满子通道 1（从不 recv），然后正常运行 P1。
     var h = try zio.spawn(struct {
         fn run(a: zio.net.Address) !void {
             const s = try a.connect(.{});
@@ -251,12 +251,11 @@ test "family: overflow close_channel surfaces ProtocolOverflow, other protocols 
     try m.initFromChannel(allocator, &sc);
     defer m.deinit();
 
-    // Let the reader process the flood: queue holds 1 frame, the second one
-    // overflows and closes sub1 with a distinct error.
+    // 让 Reader 处理灌入的帧：队列容纳 1 帧，第二帧溢出并以可区分的错误关闭 sub1。
     try zio.sleep(zio.Duration.fromMilliseconds(200));
     try std.testing.expectError(error.ProtocolOverflow, m.subChannel(1).recv(@as(P2Tag, .to_b), P2.A));
 
-    // sub0 is untouched by the overflow and completes its handshake.
+    // sub0 不受溢出影响，正常完成握手。
     var srv_ctx1: i32 = 0;
     try R1.symmetric_run(.server, &srv_ctx1, m.subChannel(0), P1.A, null);
     try std.testing.expectEqual(@as(i32, 3), srv_ctx1);
@@ -276,8 +275,8 @@ test "family: backpressure policy blocks reader, no frames lost" {
 
     const P2Tag = std.meta.Tag(P2.A);
     const to_b_msg: P2.A = .{ .to_b = .{ .data = {} } };
-    // Client sends 10 frames without waiting; reader blocks when the queue is
-    // full (capacity 1), then the server drains all 10.
+    // 客户端不等待地连发 10 帧；队列满（容量 1）时 Reader 阻塞，
+    // 随后服务端把 10 帧全部取出。
     var h = try zio.spawn(struct {
         fn run(a: zio.net.Address) !void {
             const s = try a.connect(.{});
@@ -299,7 +298,7 @@ test "family: backpressure policy blocks reader, no frames lost" {
     try m.initFromChannel(allocator, &sc);
     defer m.deinit();
 
-    // All 10 frames arrive in order despite the capacity-1 queue.
+    // 尽管队列容量为 1，10 帧仍按序全部到达。
     for (0..10) |_| {
         _ = try m.subChannel(0).recv(@as(P2Tag, .to_b), P2.A);
     }
@@ -348,14 +347,14 @@ test "family: protocols over one TLS session via TlsChannel.transport()" {
             const s = try a.connect(.{});
             defer s.close();
 
-            // Phase 1: one TLS handshake shared by the whole family.
+            // 阶段 1：整个协议族共享一次 TLS 握手。
             var tls_ctx = tls.ClientContext.init(kp, peer_pk);
             var sc: SC = undefined;
             try sc.init(allocator, s, 512, 512, 4096);
             defer sc.deinit(allocator);
             try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello, null);
 
-            // Phase 2: Mux over the established TLS record layer.
+            // 阶段 2：在已建立的 TLS 记录层之上运行 Mux。
             var tc: TC = undefined;
             try tc.init(allocator, &sc, tls_ctx.write_key, tls_ctx.read_key, 2048);
             defer tc.deinit(allocator);

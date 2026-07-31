@@ -12,31 +12,26 @@ fn returnsError(comptime fun: anytype) bool {
     return @typeInfo(ret) == .error_union;
 }
 
-/// A state machine runner that drives a protocol between two agents.
+/// 状态机运行器：驱动协议在两端之间执行。
 ///
-/// Error handling design:
+/// 错误处理设计：
 /// ----------------------
-/// Originally, `process` and `preprocess` were not expected to return errors.
-/// The reasoning was that in typical communication protocols, neither party
-/// should unilaterally abort without first notifying the peer — a clean close
-/// through an Exit transition is the expected path.
+/// 最初 `process` 和 `preprocess` 不应返回错误。理由是典型通信协议中，
+/// 任一方都不应在未通知对端的情况下单方面中止——通过 Exit 转移优雅关闭
+/// 才是预期路径。
 ///
-/// However, certain scenarios demand unilateral termination. For example, a
-/// server facing an illegal or malicious client must be able to abort the
-/// protocol immediately upon detecting invalid credentials, a tampered
-/// message, or a replay attack. In these cases, attempting to cooperate with
-/// the peer (by sending a graceful close) is undesirable or impossible.
+/// 但某些场景需要单方面终止。例如，面对非法或恶意客户端的服务端，
+/// 在检测到无效凭据、被篡改的消息或重放攻击时必须立即中止协议。
+/// 此时尝试与对端协作（发送优雅关闭）不可取甚至不可能。
 ///
-/// To support both patterns, the Runner now inspects the return type of each
-/// state's `process` and `preprocess` at compile time:
-/// - If the return type is a plain union (e.g. `@This()`), it is called
-///   directly and the protocol proceeds as before.
-/// - If the return type is an error union (e.g. `!@This()`), the Runner uses
-///   `try` and propagates the error to its own caller, terminating the
-///   protocol immediately.
+/// 为同时支持两种模式，Runner 在编译期检查每个状态的 `process` 和
+/// `preprocess` 返回类型：
+/// - 若返回类型是普通 union（如 `@This()`），直接调用，协议照常推进。
+/// - 若返回类型是错误联合（如 `!@This()`），Runner 用 `try` 并把错误
+///   传播给自己的调用方，立即终止协议。
 ///
-/// This allows protocol authors to choose per-state whether abort-on-error
-/// semantics apply, without forcing all states into one model.
+/// 这样协议作者可以按状态选择是否启用"出错即中止"语义，
+/// 而无需让所有状态都采用同一模型。
 pub fn Runner(
     comptime State_: type,
 ) type {
@@ -55,15 +50,14 @@ pub fn Runner(
             return state_map.StateFromId(state_id);
         }
 
-        /// Run both sides of the protocol in-memory without a channel.
+        /// 在内存中运行协议两端，不经过通道。
         ///
-        /// Simulates the full protocol execution by driving client and server
-        /// states in a single thread. For each state, the owning agent's
-        /// `process` is called first, then the other side's `preprocess`
-        /// receives the transition — no serialization or network I/O involved.
+        /// 在单线程中驱动客户端与服务端状态，模拟完整协议执行。
+        /// 每个状态先调用归属方的 `process`，再让另一端的 `preprocess`
+        /// 接收转移——不涉及序列化或网络 I/O。
         ///
-        /// Useful for testing protocol logic before deploying it over a real
-        /// channel, or when the two sides share an address space.
+        /// 适用于在部署到真实通道之前测试协议逻辑，
+        /// 或两端共享同一地址空间的场景。
         pub fn simulate(client: *Client, server: *Server, start: type) !void {
             const start_id = idFromState(start);
             @setEvalBranchQuota(10_000_000);
@@ -91,25 +85,22 @@ pub fn Runner(
             }
         }
 
-        /// Run one side of the protocol over a channel (symmetric topology).
+        /// 通过通道运行协议的一端（对称拓扑）。
         ///
-        /// A single function handles both client and server roles: pass
-        /// `.client` or `.server` via `role`. States owned by the current role
-        /// are processed locally and sent over the channel; states owned by the
-        /// other role are received and handled via `preprocess`.
+        /// 单个函数同时处理客户端和服务端角色：通过 `role` 传入 `.client`
+        /// 或 `.server`。当前角色拥有的状态在本地处理并通过通道发送；
+        /// 另一端拥有的状态通过 `preprocess` 接收和处理。
         ///
-        /// "Symmetric" refers to the 1:1 communication topology —
-        /// a single client talks to a single server. For N:1 or other
-        /// asymmetric topologies, a separate runner is needed.
+        /// "对称"指 1:1 通信拓扑——单个客户端与单个服务端通信。
+        /// N:1 或其他非对称拓扑需要单独的 runner。
         ///
-        /// The `channel` must implement `send(state_id, State, result)`
-        /// and `recv(state_id, State) -> result`.
+        /// `channel` 必须实现 `send(state_id, State, result)`
+        /// 和 `recv(state_id, State) -> result`。
         ///
-        /// If `recv_timeout_ms` is set, each `channel.recv()` call is guarded
-        /// by a fresh zio AutoCancel timer. If the recv blocks longer than the
-        /// timeout, the fiber is cancelled and `error.Canceled` propagates up.
-        /// The timer is cleared after every recv (success or failure), so the
-        /// next iteration starts with a clean slate.
+        /// 若设置 `recv_timeout_ms`，每次 `channel.recv()` 调用都由一个
+        /// 全新的 zio AutoCancel 定时器守护。若 recv 阻塞超过超时时间，
+        /// fiber 被取消，`error.Canceled` 向上传播。每次 recv 后
+        /// （无论成功或失败）定时器都会被清除，因此下一轮从干净状态开始。
         pub fn symmetric_run(
             comptime role: Role,
             ctx: if (role == .client) *Client else *Server,
@@ -161,7 +152,6 @@ pub fn Runner(
     };
 }
 
-//
 fn CreateTestProtocol(name: []const u8, Next: type) type {
     return struct {
         const TestInfo = ProtocolInfo(name, i32, i32);
@@ -260,14 +250,14 @@ test "symmetric_run: recv timeout" {
     var listener = try localhost.listen(.{});
     defer listener.close();
 
-    // Client connects but sends nothing — server recv should timeout
+    // 客户端连接但什么都不发送——服务端 recv 应超时
     var group: zio.Group = .init;
     defer group.cancel();
     try group.spawn(struct {
         fn run(addr: zio.net.Address) !void {
             var stream = try addr.connect(.{});
             defer stream.close();
-            // Hold the connection open forever, never send a protocol message
+            // 永远保持连接打开，不发送任何协议消息
             try zio.sleep(zio.Duration.fromSeconds(60));
         }
     }.run, .{listener.socket.address});
@@ -280,8 +270,8 @@ test "symmetric_run: recv timeout" {
     try ch.init(allocator, stream, 128, 128, 4096);
     defer ch.deinit(allocator);
 
-    // P.A is client role. Server recvs first, client never sends → timeout
-    // zio's reader layer converts fiber Canceled to ReadFailed
+    // P.A 是客户端角色。服务端先 recv，客户端从不发送 → 超时
+    // zio 的读取层会把 fiber 的 Canceled 转换为 ReadFailed
     try testing.expectError(error.ReadFailed, R.symmetric_run(.server, &ctx, &ch, P.A, 100));
     try testing.expectEqual(error.Canceled, ch.stream_reader.err.?);
 }
@@ -324,7 +314,7 @@ test "tls channel: symmetric_run over encrypted channel" {
             var stream = try addr.connect(.{});
             defer stream.close();
 
-            // Phase 1: TLS handshake
+            // 阶段 1：TLS 握手
             var tls_ctx = tls.ClientContext.init(kp, peer_pk);
 
             var sc: StreamChannel = undefined;
@@ -332,12 +322,12 @@ test "tls channel: symmetric_run over encrypted channel" {
             defer sc.deinit(allocator);
             try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello, null);
 
-            // Phase 2: encrypted protocol — reuse sc
+            // 阶段 2：加密协议——复用 sc
             var tc: TlsChannel = undefined;
             try tc.init(allocator, &sc, tls_ctx.write_key, tls_ctx.read_key, 512);
             defer tc.deinit(allocator);
 
-            // Keys copied to TlsChannel — zero the handshake context
+            // 密钥已复制到 TlsChannel——清零握手上下文
             tls_ctx.deinit();
 
             try R_pp.symmetric_run(.client, counter, &tc, P.A, null);
@@ -356,19 +346,19 @@ test "tls channel: symmetric_run over encrypted channel" {
     var stream = try listener.accept(.{});
     defer stream.close();
 
-    // Phase 1: TLS handshake
+    // 阶段 1：TLS 握手
     var tls_ctx = tls.ServerContext.init(kp_s, kp_c.public_key);
     var sc: StreamChannel = undefined;
     try sc.init(allocator, stream, 256, 256, 4096);
     defer sc.deinit(allocator);
     try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello, null);
 
-    // Phase 2: encrypted protocol — reuse sc
+    // 阶段 2：加密协议——复用 sc
     var tc: TlsChannel = undefined;
     try tc.init(allocator, &sc, tls_ctx.write_key, tls_ctx.read_key, 512);
     defer tc.deinit(allocator);
 
-    // Keys copied to TlsChannel — zero the handshake context
+    // 密钥已复制到 TlsChannel——清零握手上下文
     tls_ctx.deinit();
 
     try R_pp.symmetric_run(.server, &server_counter, &tc, P.A, null);

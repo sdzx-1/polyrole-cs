@@ -6,14 +6,13 @@ const zio = @import("zio");
 const family_mux = @import("family_mux_channel.zig");
 const Stream = zio.net.Stream;
 
-///stream channel
+/// 流通道
 pub const StreamChannel = struct {
     stream: Stream,
     rbuff: []u8,
     wbuff: []u8,
-    /// Upper bound for a single `[]const u8` slice decoded from the wire.
-    /// Guards against attacker-controlled length prefixes causing unbounded
-    /// blocking reads or buffer growth on the stream path.
+    /// 从线上解码单个 `[]const u8` 切片的上限。
+    /// 防止攻击者控制长度前缀导致流路径上的无界阻塞读取或缓冲膨胀。
     max_slice_len: usize,
     stream_writer: Stream.Writer,
     stream_reader: Stream.Reader,
@@ -52,32 +51,31 @@ pub const StreamChannel = struct {
     }
 };
 
-/// Encrypted transport channel — wraps a borrowed StreamChannel with AEAD
-/// encryption using keys derived from a prior TLS handshake.
+/// 加密传输通道——包装一个借用的 StreamChannel，使用先前 TLS 握手
+/// 派生的密钥进行 AEAD 加密。
 ///
-/// Wire format per message:
+/// 每条消息的线上格式：
 ///   nonce(24) || tag(16) || ct_len(2 BE) || ciphertext(ct_len)
 ///
-/// The payload inside ciphertext is:  msg_len(2 BE) || protocol_message(msg_len).
-/// ct_len on the wire is a frame delimiter; the authenticated msg_len inside the
-/// AEAD envelope is the source of truth.
+/// 密文内的载荷为：msg_len(2 BE) || protocol_message(msg_len)。
+/// 线上的 ct_len 是帧定界符；AEAD 信封内被认证的 msg_len 才是可信来源。
 ///
-/// The nonce is a monotonic counter (u64 big-endian, zero-padded to 24 bytes).
-/// Each direction has its own counter starting from 0.
+/// nonce 是单调计数器（u64 大端，零填充到 24 字节）。
+/// 每个方向有独立的计数器，从 0 开始。
 pub const TlsChannel = struct {
-    /// Borrowed — caller owns the StreamChannel and must deinit it after TlsChannel.
+    /// 借用——调用方拥有 StreamChannel，必须在 TlsChannel 之后 deinit 它。
     inner: *StreamChannel,
     write_key: [32]u8,
     read_key: [32]u8,
     write_counter: u64,
     read_counter: u64,
 
-    /// Buffer for encoding protocol messages before encryption.
-    /// First 2 bytes reserved for the authenticated length prefix.
+    /// 加密前编码协议消息的缓冲区。
+    /// 前 2 字节保留给被认证的长度前缀。
     encode_buf: []u8,
-    /// Buffer for decrypted plaintext before decoding
+    /// 解码前存放解密明文的缓冲区
     decode_buf: []u8,
-    /// Scratch buffer for seal/open combined output (tag || ciphertext)
+    /// seal/open 组合输出（tag || ciphertext）的临时缓冲区
     combined_buf: []u8,
 
     pub fn init(
@@ -109,13 +107,13 @@ pub const TlsChannel = struct {
     }
 
     pub fn send(self: *@This(), state_id: anytype, _: type, val: anytype) !void {
-        // Encode protocol message after 2-byte length prefix
+        // 在 2 字节长度前缀之后编码协议消息
         const buf = self.encode_buf[2..];
         var writer = Io.Writer.fixed(buf);
         try codec.encode(&writer, state_id, val);
         const msg = buf[0..writer.end];
 
-        // Prepend authenticated length prefix
+        // 前置被认证的长度前缀
         std.mem.writeInt(u16, self.encode_buf[0..2], @intCast(msg.len), .big);
         try self.sealAndSend(self.encode_buf[0 .. 2 + msg.len]);
     }
@@ -127,11 +125,11 @@ pub const TlsChannel = struct {
         return try codec.decode(&reader, state_id, T, self.decode_buf.len);
     }
 
-    /// Record-mode write: encrypt one opaque frame as a single record.
+    /// 记录模式写入：将一条不透明帧作为单个记录加密。
     ///
-    /// The frame is `[protocol_id(1) || len(2 BE) || payload]` — the exact
-    /// wire shape a `family_mux_channel.MultiplexChannel` frame has. Used to
-    /// layer Mux over TLS via `transport()`.
+    /// 帧格式为 `[protocol_id(1) || len(2 BE) || payload]`——与
+    /// `family_mux_channel.MultiplexChannel` 帧的线上格式完全一致。
+    /// 用于通过 `transport()` 在 TLS 之上叠加 Mux。
     pub fn recordWrite(self: *@This(), id: u8, payload: []const u8) !void {
         const frame_len = 3 + payload.len;
         std.debug.assert(frame_len <= std.math.maxInt(u16));
@@ -143,10 +141,9 @@ pub const TlsChannel = struct {
         try self.sealAndSend(self.encode_buf[0 .. 2 + frame_len]);
     }
 
-    /// Record-mode read: read one record and return its plaintext.
+    /// 记录模式读取：读取一个记录并返回其明文。
     ///
-    /// Returned slice layout: `[frame_len(2 BE) || frame]`, valid until the
-    /// next read on this channel.
+    /// 返回的切片布局为 `[frame_len(2 BE) || frame]`，在下次读取本通道之前有效。
     pub fn recordRead(self: *@This()) ![]const u8 {
         const sr = &self.inner.stream_reader.interface;
 
@@ -157,7 +154,7 @@ pub const TlsChannel = struct {
 
         const ct = try sr.take(ct_len);
 
-        // AEAD decrypt
+        // AEAD 解密
         const combined = self.combined_buf[0 .. ct_len + 16];
         @memcpy(combined[0..16], tag);
         @memcpy(combined[16..][0..ct_len], ct);
@@ -168,11 +165,11 @@ pub const TlsChannel = struct {
             self.read_key,
         ) catch return error.DecryptFailed;
 
-        // Read authenticated message length
+        // 读取被认证的消息长度
         const msg_len = std.mem.readInt(u16, self.decode_buf[0..2], .big);
         if (msg_len != ct_len - 2) return error.BadLength;
 
-        // Verify and advance counter
+        // 校验并推进计数器
         const counter = std.mem.readInt(u64, nonce[0..8], .big);
         if (counter != self.read_counter) return error.ReplayDetected;
         std.debug.assert(self.read_counter < std.math.maxInt(u64));
@@ -181,14 +178,14 @@ pub const TlsChannel = struct {
         return self.decode_buf[0 .. 2 + msg_len];
     }
 
-    /// Exposes the established encrypted session as a Mux transport.
+    /// 将已建立的加密会话暴露为 Mux 传输层。
     ///
-    /// The `MultiplexChannel` is layered directly on the TLS record layer:
-    /// every mux frame travels as one authenticated record, so the whole
-    /// protocol family shares a single handshake and key set.
+    /// `MultiplexChannel` 直接叠在 TLS 记录层之上：
+    /// 每条 mux 帧作为一条被认证的记录传输，因此整个协议族
+    /// 共享一次握手和一套密钥。
     ///
-    /// The returned transport does not own the stream; the caller keeps
-    /// ownership of the TlsChannel and its underlying StreamChannel.
+    /// 返回的传输层不拥有流；调用方保留对 TlsChannel 及其底层
+    /// StreamChannel 的所有权。
     pub fn transport(self: *@This()) family_mux.Transport {
         return .{
             .context = self,
@@ -200,33 +197,33 @@ pub const TlsChannel = struct {
         };
     }
 
-    /// Atomically advance the counter and send one AEAD record.
-    /// Nonce is never reused, even if a later flush fails and the caller retries.
+    /// 原子性地推进计数器并发送一条 AEAD 记录。
+    /// nonce 永不复用——即使后续 flush 失败且调用方重试。
     fn sealAndSend(self: *@This(), plaintext: []const u8) !void {
         const this_counter = self.write_counter;
         std.debug.assert(this_counter < std.math.maxInt(u64));
         self.write_counter += 1;
 
-        // Build nonce from the already-committed counter
+        // 从已提交的计数器构造 nonce
         var nonce: [24]u8 = [_]u8{0} ** 24;
         std.mem.writeInt(u64, nonce[0..8], this_counter, .big);
 
-        // AEAD encrypt
+        // AEAD 加密
         const combined = self.combined_buf[0 .. plaintext.len + 16];
         crypto.nacl.SecretBox.seal(combined, plaintext, nonce, self.write_key);
         const ct = combined[16..][0..plaintext.len];
 
-        // Wire format: nonce || tag || ct_len || ciphertext
+        // 线上格式：nonce || tag || ct_len || ciphertext
         const sw = &self.inner.stream_writer.interface;
         try sw.writeAll(&nonce);
-        try sw.writeAll(combined[0..16]); // tag
+        try sw.writeAll(combined[0..16]); // 标签
         try sw.writeInt(u16, @intCast(ct.len), .big);
         try sw.writeAll(ct);
         try sw.flush();
     }
 };
 
-// ─────────────────── Mux transport adapter ───────────────────
+// ─────────────────── Mux 传输适配器 ───────────────────
 
 fn tlsWriteFrame(ctx: *anyopaque, id: u8, payload: []const u8) anyerror!void {
     const tc: *TlsChannel = @ptrCast(@alignCast(ctx));

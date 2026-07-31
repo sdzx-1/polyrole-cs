@@ -3,69 +3,65 @@ const Io = std.Io;
 const codec = @import("codec.zig");
 const zio = @import("zio");
 
-/// What happens when an incoming frame arrives for a sub-channel whose
-/// receive queue is full.
+/// 当帧到达时其子通道接收队列已满，该如何处理。
 ///
-/// The framework's state machines are lockstep and strictly ordered: every
-/// frame is one protocol step, and dropping a frame would leave the peer's
-/// state machine stuck. The Mux therefore guarantees ordered, reliable
-/// delivery per sub-channel (equivalent to "TCP inside the connection");
-/// overflow can only be caused by a misbehaving peer or a protocol driver
-/// that sends without receiving, never by legitimate lockstep traffic.
+/// 框架的状态机是锁步严格有序的：每一帧就是一次协议步骤，丢弃一帧
+/// 会让对端的状态机卡住。因此 Mux 对每个子通道保证有序、可靠投递
+/// （等价于"连接内的 TCP"）；溢出只可能由恶意对端或"只发不收"的
+/// 协议驱动引起，绝不会来自合法的锁步流量。
 pub const OverflowPolicy = enum {
-    /// Fail fast: close only this sub-channel and surface `error.ProtocolOverflow`
-    /// to its `recv` calls. Other protocols are unaffected.
+    /// 快速失败：只关闭该子通道，并让它的 `recv` 返回可区分的
+    /// `error.ProtocolOverflow`。其他协议不受影响。
     close_channel,
-    /// Block the reader until the queue drains, preserving order and delivery.
-    /// A saturated protocol stalls the whole connection (cross-protocol HOL);
-    /// choose this only when the connection must survive at any cost.
+    /// 阻塞 Reader 直到队列腾空，保留顺序与投递。
+    /// 饱和的协议会拖慢整个连接（跨协议 HOL）；
+    /// 仅在"连接必须不计代价存活"时选用。
     backpressure,
 };
 
-/// Per-protocol member configuration of a protocol family.
+/// 协议族中每个协议成员的配置。
 pub const SubChannelConfig = struct {
-    /// Size of this sub-channel's bounded receive queue (frames).
+    /// 该子通道有界接收队列的大小（帧数）。
     capacity: u8 = 8,
-    /// Maximum codec payload size for this protocol, in bytes.
-    /// Must be <= 65532 so that `payload_len + 3` fits in the u16 frame header.
+    /// 该协议 codec 载荷的最大字节数。
+    /// 必须 <= 65532，以保证 `payload_len + 3` 能放进 u16 帧头。
     max_message_size: usize = 1024,
-    /// Overflow behavior for this protocol's receive queue.
+    /// 该协议接收队列的溢出行为。
     overflow: OverflowPolicy = .close_channel,
 };
 
-/// One decoded frame handed back by a transport.
+/// 传输层交回的一帧解码结果。
 pub const ReadFrame = struct {
     id: u8,
-    /// Payload only — valid until the next `readFrame` call on the transport.
+    /// 仅载荷——在传输层下一次 `readFrame` 调用之前有效。
     payload: []const u8,
 };
 
-/// Byte-transport contract for the Mux. Implementations provide frame-level
-/// read/write so the Mux is decoupled from the underlying channel type.
+/// Mux 的字节传输契约。实现方提供帧级读写，
+/// 使 Mux 与底层通道类型解耦。
 ///
-/// Two built-in transports exist:
-///  - `initFromChannel`: plaintext over a `StreamChannel`.
-///  - `TlsChannel.transport()`: every frame travels as one authenticated
-///    TLS record, giving the whole family a single handshake and key set.
+/// 内置两种传输：
+///  - `initFromChannel`：在 `StreamChannel` 上的明文传输。
+///  - `TlsChannel.transport()`：每一帧作为一条被认证的 TLS 记录传输，
+///    让整个协议族共享一次握手和一套密钥。
 pub const Transport = struct {
     context: *anyopaque,
-    /// Underlying byte stream; used only for teardown (`owns_stream`).
+    /// 底层字节流；仅用于销毁流程（`owns_stream`）。
     stream: zio.net.Stream,
-    /// Whether this Mux instance owns `stream` and must close it on deinit.
+    /// 该 Mux 实例是否拥有 `stream` 并需在 deinit 时关闭它。
     owns_stream: bool = true,
 
-    /// Write one complete frame `[id(1) || len(2 BE) || payload]`.
+    /// 写入一条完整帧 `[id(1) || len(2 BE) || payload]`。
     writeFrame: *const fn (ctx: *anyopaque, id: u8, payload: []const u8) anyerror!void,
-    /// Read one complete frame. The returned slice is transport-owned and
-    /// valid only until the next `readFrame` call.
+    /// 读取一条完整帧。返回的切片归传输层所有，
+    /// 仅在下次 `readFrame` 调用前有效。
     readFrame: *const fn (ctx: *anyopaque) anyerror!ReadFrame,
-    /// Shut down the receive side so a blocked `readFrame` unblocks during
-    /// teardown.
+    /// 关闭接收侧，使阻塞中的 `readFrame` 在销毁时解除阻塞。
     shutdownReceive: *const fn (ctx: *anyopaque) void,
 };
 
-/// Backwards-compatible shim: `Mux(n, max_size, capacity)` is equivalent to
-/// N identical sub-channel configs.
+/// 向后兼容的 shim：`Mux(n, max_size, capacity)` 等价于
+/// N 个完全相同的子通道配置。
 pub fn Mux(comptime n: u8, comptime max_size: usize, comptime cap: u8) type {
     return MultiplexChannel(&[_]SubChannelConfig{
         .{ .capacity = cap, .max_message_size = max_size },
@@ -86,8 +82,8 @@ pub fn MultiplexChannel(comptime configs: []const SubChannelConfig) type {
 
         allocator: std.mem.Allocator,
         stream: zio.net.Stream,
-        /// Stream-transport adapter state; only used when the transport was
-        /// built by `initFromChannel` (context == self).
+        /// 流传输适配器状态；仅在传输由 `initFromChannel`
+        /// 构建时使用（context == self）。
         writer: *Io.Writer,
         reader: *Io.Reader,
         owns_stream: bool,
@@ -105,17 +101,17 @@ pub fn MultiplexChannel(comptime configs: []const SubChannelConfig) type {
             send_buf: []u8,
             rb: zio.Channel([]const u8) = undefined,
             rb_buf: []([]const u8) = &.{},
-            /// Freed on next recv — ensures slices from codec.decode remain valid.
+            /// 下次 recv 时释放——确保 codec.decode 返回的切片仍然有效。
             last_recv_data: ?[]const u8 = null,
-            /// Set when this sub-channel is closed due to overflow, so recv can
-            /// distinguish `error.ProtocolOverflow` from a plain EOF close.
+            /// 该子通道因溢出而关闭时设置，使 recv 能区分
+            /// `error.ProtocolOverflow` 与普通的 EOF 关闭。
             closed_reason: ?anyerror = null,
 
             pub fn send(self: *SubChannel, state_id: anytype, _: type, val: anytype) !void {
                 var w = Io.Writer.fixed(self.send_buf);
                 try codec.encode(&w, state_id, val);
-                // Frame atomicity: serialize all writes on the shared transport
-                // so a frame is never interleaved with another protocol's frame.
+                // 帧原子性：在共享传输层上串行化所有写入，
+                // 保证一帧永远不会与其他协议的帧交错。
                 self.mux.write_mu.lockUncancelable();
                 defer self.mux.write_mu.unlock();
                 try self.mux.transport.writeFrame(
@@ -169,8 +165,8 @@ pub fn MultiplexChannel(comptime configs: []const SubChannelConfig) type {
             self.reader_handle = try zio.spawn(Self.readerLoop, .{self});
         }
 
-        /// Plaintext transport over a StreamChannel (or any channel exposing
-        /// `stream`, `stream_writer.interface`, `stream_reader.interface`).
+        /// 在 StreamChannel（或任何暴露 `stream`、
+        /// `stream_writer.interface`、`stream_reader.interface` 的通道）上的明文传输。
         pub fn initFromChannel(
             self: *Self,
             allocator: std.mem.Allocator,
@@ -225,8 +221,8 @@ pub fn MultiplexChannel(comptime configs: []const SubChannelConfig) type {
                         if (err == error.ChannelClosed) continue;
                         if (err == error.ChannelFull) {
                             sub.closed_reason = error.ProtocolOverflow;
-                            // close(.immediate) would drop buffered frames
-                            // without freeing them — drain first.
+                            // close(.immediate) 会丢弃缓冲帧而不释放——
+                            // 先排空队列。
                             while (sub.rb.tryReceive()) |queued| {
                                 self.allocator.free(queued);
                             } else |_| {}
@@ -244,7 +240,7 @@ pub fn MultiplexChannel(comptime configs: []const SubChannelConfig) type {
             }
         }
 
-        // ── Stream transport adapter ──────────────────────────────
+        // ── 流传输适配器 ──────────────────────────────────────────
 
         fn streamWriteFrame(ctx: *anyopaque, id: u8, payload: []const u8) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
@@ -259,7 +255,7 @@ pub fn MultiplexChannel(comptime configs: []const SubChannelConfig) type {
             const id = try self.reader.takeByte();
             const len = try self.reader.takeInt(u16, .big);
             if (len + 3 > max_frame_size) {
-                // Consume the oversized payload to keep frame sync, then fail.
+                // 消费超长载荷以保持帧同步，然后失败。
                 self.reader.toss(len);
                 return error.MessageTooLarge;
             }

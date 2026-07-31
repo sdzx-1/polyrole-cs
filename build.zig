@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // ── Library tests ───────────────────────────────────────────────
+    // ── 库测试 ─────────────────────────────────────────────────────
     const mod_tests = b.addTest(.{
         .root_module = mod,
         .use_llvm = true,
@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
 
-    // ── Graph tool ──────────────────────────────────────────────────
+    // ── 状态图工具 ──────────────────────────────────────────────────
     const graph = b.addExecutable(.{
         .name = "graph",
         .use_llvm = true,

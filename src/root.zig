@@ -44,7 +44,7 @@ pub fn ProtocolInfo(
     };
 }
 
-//The Exit status is unique.
+// Exit 状态是唯一的。
 pub const Exit = union(enum) {
     pub const info: Info = .{};
 
@@ -118,7 +118,7 @@ fn reachableStatesDepthFirstSearch(
                     const NextState = field.type.State;
 
                     if (!states_set.has(NextState)) {
-                        // Validate that the handler context type matches (skip for special states like Exit)
+                        // 校验处理器上下文类型是否匹配（跳过 Exit 等特殊状态）
                         if (NextState != Exit) {
                             const NextInfo = @TypeOf(NextState.info);
                             {

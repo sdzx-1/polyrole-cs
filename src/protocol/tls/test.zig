@@ -168,11 +168,11 @@ test "simulate multiple sessions with same contexts" {
 
     const R = Runner(tls.ClientHello);
 
-    // Session 1
+    // 会话 1
     try R.simulate(&client, &server, tls.ClientHello);
     const key1 = client.write_key;
 
-    // Session 2 — 新的临时密钥对，write_key 应不同
+    // 会话 2——新的临时密钥对，write_key 应不同
     try R.simulate(&client, &server, tls.ClientHello);
 
     try testing.expect(!std.mem.eql(u8, &key1, &client.write_key));

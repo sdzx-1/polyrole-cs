@@ -2,36 +2,36 @@ const std = @import("std");
 const crypto = std.crypto;
 
 pub const ClientContext = struct {
-    /// Own Ed25519 identity keypair
+    /// 自己的 Ed25519 身份密钥对
     id_keypair: crypto.sign.Ed25519.KeyPair,
-    /// Server's Ed25519 identity public key
+    /// 服务端的 Ed25519 身份公钥
     peer_id_public: crypto.sign.Ed25519.PublicKey,
 
-    /// Own ephemeral X25519 secret key (generated in ClientHello)
+    /// 自己的临时 X25519 私钥（在 ClientHello 中生成）
     ephemeral_sk: [32]u8,
-    /// Own ephemeral X25519 public key
+    /// 自己的临时 X25519 公钥
     own_ephemeral_pk: [32]u8,
-    /// Own nonce (generated in ClientHello)
+    /// 自己的 nonce（在 ClientHello 中生成）
     own_nonce: [24]u8,
 
-    /// Peer's nonce (received in ServerHello)
+    /// 对端的 nonce（在 ServerHello 中收到）
     peer_nonce: [24]u8,
-    /// Peer's ephemeral X25519 public key (received in ServerHello)
+    /// 对端的临时 X25519 公钥（在 ServerHello 中收到）
     peer_ephemeral_pk: [32]u8,
 
-    /// Peer's Ed25519 signature (received in ServerHello)
+    /// 对端的 Ed25519 签名（在 ServerHello 中收到）
     peer_signature: [64]u8,
-    /// Peer's Finished MAC (received in ServerHello)
+    /// 对端的 Finished MAC（在 ServerHello 中收到）
     peer_mac: [32]u8,
 
-    /// X25519 shared secret
+    /// X25519 共享密钥
     shared_secret: [32]u8,
-    /// Derived from shared_secret via HKDF
+    /// 由 shared_secret 通过 HKDF 派生
     handshake_key: [32]u8,
 
-    /// Derived application key (for TlsChannel write)
+    /// 派生的应用密钥（用于 TlsChannel 写入）
     write_key: [32]u8,
-    /// Derived application key (for TlsChannel read)
+    /// 派生的应用密钥（用于 TlsChannel 读取）
     read_key: [32]u8,
 
     pub fn init(id_keypair: crypto.sign.Ed25519.KeyPair, peer_id_public: crypto.sign.Ed25519.PublicKey) ClientContext {
@@ -52,8 +52,7 @@ pub const ClientContext = struct {
         };
     }
 
-    /// Zero sensitive key material. Call after the handshake completes
-    /// and keys have been copied to TlsChannel (if used).
+    /// 清零敏感密钥材料。握手完成且密钥已复制到 TlsChannel（若使用）后调用。
     pub fn deinit(self: *ClientContext) void {
         @memset(&self.ephemeral_sk, 0);
         @memset(&self.shared_secret, 0);
@@ -64,35 +63,35 @@ pub const ClientContext = struct {
 };
 
 pub const ServerContext = struct {
-    /// Own Ed25519 identity keypair
+    /// 自己的 Ed25519 身份密钥对
     id_keypair: crypto.sign.Ed25519.KeyPair,
-    /// Client's Ed25519 identity public key
+    /// 客户端的 Ed25519 身份公钥
     peer_id_public: crypto.sign.Ed25519.PublicKey,
 
-    /// Own ephemeral X25519 secret key (generated in ServerHello)
+    /// 自己的临时 X25519 私钥（在 ServerHello 中生成）
     ephemeral_sk: [32]u8,
-    /// Own ephemeral X25519 public key
+    /// 自己的临时 X25519 公钥
     own_ephemeral_pk: [32]u8,
-    /// Peer's ephemeral X25519 public key (received in ClientHello)
+    /// 对端的临时 X25519 公钥（在 ClientHello 中收到）
     peer_ephemeral_pk: [32]u8,
 
-    /// Peer's nonce (received in ClientHello)
+    /// 对端的 nonce（在 ClientHello 中收到）
     peer_nonce: [24]u8,
-    /// Own nonce (generated in ServerHello)
+    /// 自己的 nonce（在 ServerHello 中生成）
     own_nonce: [24]u8,
 
-    /// X25519 shared secret
+    /// X25519 共享密钥
     shared_secret: [32]u8,
-    /// Derived from shared_secret via HKDF
+    /// 由 shared_secret 通过 HKDF 派生
     handshake_key: [32]u8,
-    /// Own Ed25519 signature (computed in ServerHello, used in ClientFinished transcript)
+    /// 自己的 Ed25519 签名（在 ServerHello 中计算，用于 ClientFinished 转录）
     own_signature: [64]u8,
-    /// Own Finished MAC (computed in ServerHello, used in ClientFinished transcript)
+    /// 自己的 Finished MAC（在 ServerHello 中计算，用于 ClientFinished 转录）
     own_mac: [32]u8,
 
-    /// Derived application key (for TlsChannel read)
+    /// 派生的应用密钥（用于 TlsChannel 读取）
     read_key: [32]u8,
-    /// Derived application key (for TlsChannel write)
+    /// 派生的应用密钥（用于 TlsChannel 写入）
     write_key: [32]u8,
 
     pub fn init(id_keypair: crypto.sign.Ed25519.KeyPair, peer_id_public: crypto.sign.Ed25519.PublicKey) ServerContext {
@@ -113,8 +112,7 @@ pub const ServerContext = struct {
         };
     }
 
-    /// Zero sensitive key material. Call after the handshake completes
-    /// and keys have been copied to TlsChannel (if used).
+    /// 清零敏感密钥材料。握手完成且密钥已复制到 TlsChannel（若使用）后调用。
     pub fn deinit(self: *ServerContext) void {
         @memset(&self.ephemeral_sk, 0);
         @memset(&self.shared_secret, 0);
@@ -124,18 +122,18 @@ pub const ServerContext = struct {
     }
 };
 
-/// HKDF-Extract: prk = HMAC-SHA256(salt, ikm)
+/// HKDF-Extract：prk = HMAC-SHA256(salt, ikm)
 fn hkdf_extract(salt: [32]u8, ikm: [32]u8) [32]u8 {
     var out: [32]u8 = undefined;
     crypto.auth.hmac.sha2.HmacSha256.create(&out, &ikm, &salt);
     return out;
 }
 
-/// HKDF-Expand: okm = HMAC-SHA256(prk, info || 0x01)[0..L]
+/// HKDF-Expand：okm = HMAC-SHA256(prk, info || 0x01)[0..L]
 ///
-/// Currently single-iteration only (one HMAC call). The return type `[32]u8`
-/// enforces this at the type level — if a larger output is ever needed, the
-/// caller must implement RFC 5869 §2.3 multi-iteration chaining.
+/// 目前仅支持单次迭代（一次 HMAC 调用）。返回类型 `[32]u8` 在类型层面
+/// 强制这一点——如果将来需要更大输出，调用方必须实现 RFC 5869 §2.3
+/// 的多轮迭代链。
 inline fn hkdf_expand(prk: [32]u8, info: []const u8) [32]u8 {
     var buf: [info.len + 1]u8 = undefined;
     @memcpy(buf[0..info.len], info);

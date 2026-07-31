@@ -19,23 +19,23 @@ test "模拟：基本流程" {
     const R = Runner(nm.PingQuery);
     try R.simulate(&client, &server, nm.PingQuery);
 
-    // fencepost: remaining=5 produces exactly 5 pings
+    // 边界检查：remaining=5 恰好产生 5 次 ping
     try testing.expectEqual(@as(u64, 5), client.seq_num);
     try testing.expectEqual(@as(u32, 0), client.remaining);
     try testing.expectEqual(@as(usize, 5), client.results.items.len);
 
-    // seq_num monotonic
+    // seq_num 单调递增
     for (client.results.items, 0..) |r, i| {
         try testing.expectEqual(@as(u64, @intCast(i + 1)), r.seq_num);
     }
 
-    // server receives and echoes last seq_num
+    // 服务端收到并回显最后一个 seq_num
     try testing.expectEqual(@as(u64, 5), server.last_seq_num);
 
-    // last_send_ms was recorded
+    // last_send_ms 已被记录
     try testing.expect(client.last_send_ms > 0);
 
-    // RTT values are non-negative and reasonable
+    // RTT 值非负且合理
     for (client.results.items) |r| {
         try testing.expect(r.rtt_ms < std.math.maxInt(u64));
     }

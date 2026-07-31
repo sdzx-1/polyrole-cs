@@ -39,21 +39,21 @@ pub fn generateDot(
         \\
     );
 
-    { //state graph
+    { // 状态图
         try writer.writeAll(
             \\  subgraph cluster_transitions {
             \\    label = "State Transitions";
             \\
         );
 
-        // Create subgraphs for each FSM's nodes
+        // 为每个状态机的节点创建子图
         var cluster_idx: u32 = 0;
         var current_fsm_name: ?[]const u8 = null;
 
         for (self.nodes.items) |node| {
-            // Start new FSM subgraph if needed
+            // 必要时开始新的状态机子图
             if (current_fsm_name == null or !std.mem.eql(u8, current_fsm_name.?, node.fsm_description)) {
-                // Close previous subgraph if any
+                // 若存在则关闭上一个子图
                 if (current_fsm_name != null) {
                     try writer.writeAll(
                         \\    }
@@ -62,7 +62,7 @@ pub fn generateDot(
                     cluster_idx += 1;
                 }
 
-                // Start new subgraph
+                // 开始新子图
                 current_fsm_name = node.fsm_description;
                 try writer.print(
                     \\    subgraph cluster_fsm_{d} {{
@@ -71,7 +71,7 @@ pub fn generateDot(
                 , .{ cluster_idx, node.fsm_description });
             }
 
-            // Add node to current FSM subgraph
+            // 向当前状态机子图添加节点
             try writer.print(
                 \\      {d}[shape=rect,  label="{s}[{d}] {s}", color = "{s}"];
                 \\
@@ -86,7 +86,7 @@ pub fn generateDot(
             );
         }
 
-        // Close last subgraph
+        // 关闭最后一个子图
         if (current_fsm_name != null) {
             try writer.writeAll(
                 \\    }
@@ -94,7 +94,7 @@ pub fn generateDot(
             );
         }
 
-        // Add edges
+        // 添加边
         for (self.edges.items) |edge| {
             try writer.print(
                 \\    {d} -> {d} [label = "{s}", color = "{s}", fontcolor = "{s}"];
@@ -176,7 +176,7 @@ pub fn initWithFsm(allocator: std.mem.Allocator, comptime State_: type) !Graph {
         }
     }
 
-    // Sort nodes by FSM name
+    // 按状态机名称排序节点
     std.mem.sort(Node, nodes.items, {}, struct {
         pub fn lessThan(_: void, lhs: Node, rhs: Node) bool {
             const cmp = std.mem.order(u8, lhs.fsm_description, rhs.fsm_description);
