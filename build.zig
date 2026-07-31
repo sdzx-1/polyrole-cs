@@ -29,6 +29,52 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
 
+    // ── 聊天室 demo ─────────────────────────────────────────────────
+    const chat_server = b.addExecutable(.{
+        .name = "chat-server",
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/chat/server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "polyrole_cs", .module = mod },
+                .{ .name = "zio", .module = zio.module("zio") },
+            },
+        }),
+    });
+    b.installArtifact(chat_server);
+
+    const chat_client = b.addExecutable(.{
+        .name = "chat-client",
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/chat/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "polyrole_cs", .module = mod },
+                .{ .name = "zio", .module = zio.module("zio") },
+            },
+        }),
+    });
+    b.installArtifact(chat_client);
+
+    const chat_tests = b.addTest(.{
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/chat/test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "polyrole_cs", .module = mod },
+                .{ .name = "zio", .module = zio.module("zio") },
+            },
+        }),
+    });
+    const run_chat_tests = b.addRunArtifact(chat_tests);
+    test_step.dependOn(&run_chat_tests.step);
+
     // ── 状态图工具 ──────────────────────────────────────────────────
     const graph = b.addExecutable(.{
         .name = "graph",
