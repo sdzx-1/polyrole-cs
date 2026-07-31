@@ -29,12 +29,16 @@ pub const Allocator = std.mem.Allocator;
 
 // ─── 常量 ────────────────────────────────────────────────────────────
 
-pub const MAX_MEMBERS = 64;
+/// 成员表容量动态（无上限），见 docs/chat-scale-10000.md §3.1。
 pub const MAX_NICK = 32;
 pub const MAX_TEXT = 256;
+/// 单次 /who 响应的成员名单上限（截断显示，避免超大帧）。
+pub const WHO_LIST_LIMIT = 32;
 pub const INVALID_CLIENT_ID: u32 = std.math.maxInt(u32);
-/// 客户端空转时的心跳间隔（毫秒）。既是消息发送延迟上限，也是心跳周期。
-pub const HEARTBEAT_INTERVAL_MS: u64 = 100;
+/// 心跳间隔（毫秒）：客户端空闲时发心跳的周期，也是服务器掉线检测的依据。
+pub const HEARTBEAT_INTERVAL_MS: u64 = 1000;
+/// Send.process 检查输入队列的节拍（毫秒），决定消息发送延迟上界。
+pub const PROCESS_SLICE_MS: u64 = 100;
 
 // ─── 载荷 ────────────────────────────────────────────────────────────
 
@@ -42,10 +46,10 @@ pub const RegisterPayload = struct {
     nickname: [MAX_NICK]u8,
 };
 
+/// Welcome 只带身份与在线人数；成员列表按需获取（/who），见 §3.2。
 pub const WelcomePayload = struct {
     client_id: u32,
-    member_count: u8,
-    members: [MAX_MEMBERS][MAX_NICK]u8,
+    member_count: u32,
 };
 
 pub const MsgPayload = struct {
@@ -54,7 +58,7 @@ pub const MsgPayload = struct {
 };
 
 pub const PushPayload = struct {
-    /// 0 = 聊天消息，1 = 系统通知（加入/离开）
+    /// 0 = 聊天消息，1 = 系统通知（加入/离开），2 = /who 成员列表响应
     kind: u8,
     /// 客户端消息序号原样透传；系统通知为 0
     seq: u64,
@@ -69,6 +73,7 @@ pub const PushPayload = struct {
 pub const PushKind = enum(u8) {
     chat = 0,
     system = 1,
+    member_list = 2,
 };
 
 // ─── 上下文 ──────────────────────────────────────────────────────────
@@ -76,6 +81,8 @@ pub const PushKind = enum(u8) {
 /// stdin 线程/fiber 投递的用户输入。
 pub const UserInput = union(enum) {
     msg: [MAX_TEXT]u8,
+    /// 请求在线成员列表（服务器经 Push 通道回 member_list 响应）
+    who,
     quit,
 };
 
@@ -86,12 +93,11 @@ pub const ClientContext = struct {
     /// 输出串行化锁：Ctrl 与 Push 两个 fiber 并发写 stdout 会交错
     out_lock: ?*zio.Mutex = null,
     nickname: [MAX_NICK]u8,
-    /// 用户输入队列，Send.process 每轮 tryReceive
+    /// 用户输入队列，Send.process 每 PROCESS_SLICE_MS 轮询
     input: *Channel(UserInput),
     seq: u64 = 0,
     client_id: u32 = INVALID_CLIENT_ID,
-    member_count: u8 = 0,
-    members: [MAX_MEMBERS][MAX_NICK]u8 = [_][MAX_NICK]u8{[_]u8{0} ** MAX_NICK} ** MAX_MEMBERS,
+    member_count: u32 = 0,
 
     pub fn init(out: ?zio.File, nickname: [MAX_NICK]u8, input: *Channel(UserInput)) ClientContext {
         return .{ .out = out, .nickname = nickname, .input = input };
@@ -105,8 +111,7 @@ pub const ServerContext = struct {
     inbox: *Channel(PushPayload),
     client_id: u32 = INVALID_CLIENT_ID,
     nickname: [MAX_NICK]u8 = [_]u8{0} ** MAX_NICK,
-    member_count: u8 = 0,
-    members: [MAX_MEMBERS][MAX_NICK]u8 = [_][MAX_NICK]u8{[_]u8{0} ** MAX_NICK} ** MAX_MEMBERS,
+    member_count: u32 = 0,
 
     pub fn init(room: *Room, inbox: *Channel(PushPayload)) ServerContext {
         return .{ .room = room, .inbox = inbox };
@@ -157,17 +162,37 @@ pub const BroadcastOp = struct {
     payload: PushPayload,
 };
 
+/// /who 响应的成员名单（截断到 WHO_LIST_LIMIT）。
+pub const MemberListReply = struct {
+    count: u32,
+    /// 实际填入的名字数量（<= WHO_LIST_LIMIT）
+    name_count: u32,
+    names: [WHO_LIST_LIMIT][MAX_NICK]u8,
+    truncated: bool,
+};
+
+pub const WhoOp = struct {
+    client_id: u32,
+    reply: *Channel(MemberListReply),
+};
+
 pub const RoomOp = union(enum) {
     register: RegisterOp,
     remove: RemoveOp,
     broadcast: BroadcastOp,
+    who: WhoOp,
 };
 
+/// 房间成员表：动态扩容 + 空闲槽位复用（见 docs/chat-scale-10000.md §3.1）。
+/// 槽位索引即 client_id；删除的槽位进 free 栈，注册时 O(1) 复用。
 pub const Room = struct {
-    slots: [MAX_MEMBERS]Slot,
-    count: u8 = 0,
+    allocator: Allocator,
+    slots: std.ArrayList(Slot),
+    free: std.ArrayList(u32),
+    count: usize = 0,
+    /// ops 队列容量按连接规模配置（1024 足够万级连接的注册/广播排队）
     ops: Channel(RoomOp) = undefined,
-    ops_buf: [64]RoomOp = undefined,
+    ops_buf: [1024]RoomOp = undefined,
     fiber: ?zio.JoinHandle(anyerror!void) = null,
 
     pub const Slot = struct {
@@ -176,11 +201,18 @@ pub const Room = struct {
         inbox: ?*Channel(PushPayload) = null,
     };
 
-    pub fn init(self: *Room) void {
-        self.slots = [_]Slot{.{}} ** MAX_MEMBERS;
+    pub fn init(self: *Room, allocator: Allocator) void {
+        self.allocator = allocator;
+        self.slots = std.ArrayList(Slot).empty;
+        self.free = std.ArrayList(u32).empty;
         self.count = 0;
         self.ops = Channel(RoomOp).init(&self.ops_buf);
         self.fiber = null;
+    }
+
+    pub fn deinit(self: *Room) void {
+        self.slots.deinit(self.allocator);
+        self.free.deinit(self.allocator);
     }
 
     /// 启动 Room 后台 fiber：串行处理所有成员操作。
@@ -215,46 +247,44 @@ pub const Room = struct {
             .register => |r| self.handleRegister(r),
             .remove => |r| self.handleRemove(r),
             .broadcast => |b| self.handleBroadcast(b),
+            .who => |w| self.handleWho(w),
         }
     }
 
     fn handleRegister(self: *Room, r: RegisterOp) void {
-        if (self.count >= MAX_MEMBERS) {
-            r.reply.trySend(.{ .client_id = INVALID_CLIENT_ID, .member_count = 0, .members = undefined }) catch {};
-            return;
+        if (self.free.items.len > 0) {
+            const id: u32 = self.free.pop().?;
+            const s = &self.slots.items[@intCast(id)];
+            s.active = true;
+            s.nickname = r.nickname;
+            s.inbox = r.inbox;
+            self.count += 1;
+            self.finishRegister(r, id);
+        } else {
+            self.slots.append(self.allocator, .{ .active = true, .nickname = r.nickname, .inbox = r.inbox }) catch {
+                r.reply.trySend(.{ .client_id = INVALID_CLIENT_ID, .member_count = 0 }) catch {};
+                return;
+            };
+            self.count += 1;
+            self.finishRegister(r, @intCast(self.slots.items.len - 1));
         }
-        const id = self.allocSlot() orelse {
-            r.reply.trySend(.{ .client_id = INVALID_CLIENT_ID, .member_count = 0, .members = undefined }) catch {};
-            return;
-        };
-        self.slots[id] = .{ .active = true, .nickname = r.nickname, .inbox = r.inbox };
-        self.count += 1;
+    }
 
-        // 成员快照（排除自己，供 Welcome 发送）
-        var welcome = WelcomePayload{
-            .client_id = @intCast(id),
-            .member_count = 0,
-            .members = [_][MAX_NICK]u8{[_]u8{0} ** MAX_NICK} ** MAX_MEMBERS,
-        };
-        for (&self.slots, 0..) |*s, i| {
-            if (s.active and i != id) {
-                welcome.members[welcome.member_count] = s.nickname;
-                welcome.member_count += 1;
-            }
-        }
-        r.reply.trySend(welcome) catch {};
-
-        self.notifyAllExcept(@intCast(id), r.nickname, "加入了房间");
+    fn finishRegister(self: *Room, r: RegisterOp, id: u32) void {
+        // 在线人数含自己，成员快照排除自己 → count - 1
+        r.reply.trySend(.{ .client_id = id, .member_count = @intCast(self.count - 1) }) catch {};
+        self.notifyAllExcept(id, r.nickname, "加入了房间");
     }
 
     fn handleRemove(self: *Room, r: RemoveOp) void {
-        if (r.client_id < MAX_MEMBERS) {
-            const s = &self.slots[r.client_id];
+        if (r.client_id < self.slots.items.len) {
+            const s = &self.slots.items[r.client_id];
             if (s.active) {
                 const name = s.nickname;
                 s.active = false;
                 s.inbox = null;
                 self.count -= 1;
+                self.free.append(self.allocator, r.client_id) catch {}; // OOM 时槽位泄漏，可接受
                 self.notifyAllExcept(r.client_id, name, "离开了房间");
             }
         }
@@ -262,7 +292,7 @@ pub const Room = struct {
     }
 
     fn handleBroadcast(self: *Room, b: BroadcastOp) void {
-        for (&self.slots, 0..) |*s, i| {
+        for (self.slots.items, 0..) |*s, i| {
             if (!s.active or i == b.from_id) continue;
             const inbox = s.inbox orelse continue;
             inbox.trySend(b.payload) catch {
@@ -272,17 +302,31 @@ pub const Room = struct {
                 s.active = false;
                 s.inbox = null;
                 self.count -= 1;
+                self.free.append(self.allocator, @intCast(i)) catch {};
                 inbox.close(.graceful);
                 self.notifyAllExcept(@intCast(i), name, "因接收过慢被断开");
             };
         }
     }
 
-    fn allocSlot(self: *Room) ?usize {
-        for (&self.slots, 0..) |*s, i| {
-            if (!s.active) return i;
+    /// /who：收集成员名单（截断到 WHO_LIST_LIMIT），Room fiber 独占访问成员表。
+    fn handleWho(self: *Room, w: WhoOp) void {
+        var reply = MemberListReply{
+            .count = @intCast(self.count),
+            .name_count = 0,
+            .truncated = false,
+            .names = undefined,
+        };
+        for (self.slots.items, 0..) |*s, i| {
+            if (!s.active) continue;
+            if (i == w.client_id) continue; // 不含自己
+            if (reply.name_count < WHO_LIST_LIMIT) {
+                reply.names[reply.name_count] = s.nickname;
+                reply.name_count += 1;
+            }
         }
-        return null;
+        reply.truncated = reply.name_count < (self.count - 1);
+        w.reply.trySend(reply) catch {};
     }
 
     /// 向除 except_id 外的所有在线成员广播系统通知。
@@ -298,13 +342,14 @@ pub const Room = struct {
             .ts_ms = monotonicMs(),
         };
         @memcpy(payload.text[0..text.len], text);
-        for (&self.slots, 0..) |*s, i| {
+        for (self.slots.items, 0..) |*s, i| {
             if (!s.active or i == except_id) continue;
             const inbox = s.inbox orelse continue;
             inbox.trySend(payload) catch {
                 s.active = false;
                 s.inbox = null;
                 self.count -= 1;
+                self.free.append(self.allocator, @intCast(i)) catch {};
                 inbox.close(.graceful);
             };
         }
@@ -324,7 +369,7 @@ pub const Login = union(enum) {
         return .{ .register = .{ .data = .{ .nickname = ctx.nickname } } };
     }
 
-    /// 服务器端：向 Room 注册，分配 client_id，存成员快照。
+    /// 服务器端：向 Room 注册，分配 client_id，存在线人数。
     pub fn preprocess(ctx: *ServerContext, result: @This()) !void {
         const nick = result.register.data.nickname;
         ctx.nickname = nick;
@@ -336,7 +381,6 @@ pub const Login = union(enum) {
         if (reg.client_id == INVALID_CLIENT_ID) return error.RoomFull;
         ctx.client_id = reg.client_id;
         ctx.member_count = reg.member_count;
-        ctx.members = reg.members;
     }
 };
 
@@ -349,16 +393,14 @@ pub const Welcome = union(enum) {
         return .{ .to_client = .{ .data = .{
             .client_id = ctx.client_id,
             .member_count = ctx.member_count,
-            .members = ctx.members,
         } } };
     }
 
-    /// 客户端：保存自己的 ID 与成员快照，打印欢迎语。
+    /// 客户端：保存自己的 ID 与在线人数，打印欢迎语。
     pub fn preprocess(ctx: *ClientContext, result: @This()) !void {
         const w = result.to_client.data;
         ctx.client_id = w.client_id;
         ctx.member_count = w.member_count;
-        ctx.members = w.members;
         if (ctx.out) |f| {
             var buf: [MAX_TEXT * 2]u8 = undefined;
             try writeLineLocked(f, ctx.out_lock, welcomeText(w, &ctx.nickname, &buf));
@@ -369,28 +411,37 @@ pub const Welcome = union(enum) {
 pub const Send = union(enum) {
     msg: Data(MsgPayload, Ack),
     heartbeat: Data(void, Ack),
+    who: Data(void, Ack),
     quit: Data(void, Exit),
 
     pub const info: CtrlInfo = .{ .agent = .client, .name = "Send" };
 
-    /// 客户端：取一条用户输入（消息/退出）；无输入则空转一个间隔后发心跳。
+    /// 客户端：每 100ms 检查一次用户输入（消息到达延迟 ≤100ms）；
+    /// 累计 HEARTBEAT_INTERVAL_MS 无输入则发心跳（liveness + 锁步填充）。
+    /// 不用 select 等 Channel：zio 的 select+asyncReceive 对 timer 分支不消费
+    /// 队列值（tick 永在），会导致心跳忙循环。
     pub fn process(ctx: *ClientContext) !@This() {
-        const input = ctx.input.tryReceive() catch |err| switch (err) {
-            error.ChannelEmpty => null,
-            else => return err,
-        };
-        if (input) |i| switch (i) {
-            .quit => return .quit,
-            .msg => |text| {
-                ctx.seq += 1;
-                return .{ .msg = .{ .data = .{ .seq = ctx.seq, .text = text } } };
-            },
-        };
-        try sleepMs(HEARTBEAT_INTERVAL_MS);
+        var waited: u64 = 0;
+        while (waited < HEARTBEAT_INTERVAL_MS) {
+            const input = ctx.input.tryReceive() catch |err| switch (err) {
+                error.ChannelEmpty => null,
+                else => return err,
+            };
+            if (input) |i| switch (i) {
+                .quit => return .quit,
+                .msg => |text| {
+                    ctx.seq += 1;
+                    return .{ .msg = .{ .data = .{ .seq = ctx.seq, .text = text } } };
+                },
+                .who => return .who,
+            };
+            try sleepMs(PROCESS_SLICE_MS);
+            waited += PROCESS_SLICE_MS;
+        }
         return .heartbeat;
     }
 
-    /// 服务器端：聊天消息广播给房间，退出则移除并广播离开。
+    /// 服务器端：聊天消息广播给房间；/who 经 Push 通道回成员列表；退出则移除并广播离开。
     pub fn preprocess(ctx: *ServerContext, result: @This()) !void {
         switch (result) {
             .msg => |m| {
@@ -405,8 +456,37 @@ pub const Send = union(enum) {
                 try ctx.room.ops.send(.{ .broadcast = .{ .from_id = ctx.client_id, .payload = payload } });
             },
             .heartbeat => {},
+            .who => try replyMemberList(ctx),
             .quit => try ctx.leave(),
         }
+    }
+
+    /// /who 响应：向 Room 查询成员名单，格式化后经本连接 inbox 推送（kind=member_list）。
+    fn replyMemberList(ctx: *ServerContext) !void {
+        var reply_buf: [1]MemberListReply = undefined;
+        var reply: Channel(MemberListReply) = .init(&reply_buf);
+        try ctx.room.ops.send(.{ .who = .{ .client_id = ctx.client_id, .reply = &reply } });
+        const list = try reply.receive();
+
+        var text_buf: [MAX_TEXT]u8 = undefined;
+        var pos: usize = 0;
+        pos += (std.fmt.bufPrint(text_buf[pos..], "在线 {d} 人：", .{list.count}) catch return).len;
+        for (list.names[0..list.name_count], 0..) |*name, i| {
+            if (i > 0) pos += (std.fmt.bufPrint(text_buf[pos..], ", ", .{}) catch break).len;
+            pos += (std.fmt.bufPrint(text_buf[pos..], "{s}", .{name[0..cstrLen(name)]}) catch break).len;
+        }
+        if (list.truncated) pos += (std.fmt.bufPrint(text_buf[pos..], "…", .{}) catch return).len;
+
+        var payload = PushPayload{
+            .kind = @intFromEnum(PushKind.member_list),
+            .seq = 0,
+            .from_id = 0,
+            .from_name = [_]u8{0} ** MAX_NICK,
+            .text = [_]u8{0} ** MAX_TEXT,
+            .ts_ms = monotonicMs(),
+        };
+        @memcpy(payload.text[0..pos], text_buf[0..pos]);
+        try ctx.inbox.send(payload); // 阻塞等 Push fiber 消费；/who 低频，不影响锁步
     }
 };
 
@@ -451,6 +531,7 @@ pub const Deliver = union(enum) {
                     p.text[0..cstrLen(&p.text)],
                 }) catch return,
                 1 => std.fmt.bufPrint(&buf, "*** {s}", .{p.text[0..cstrLen(&p.text)]}) catch return,
+                2 => std.fmt.bufPrint(&buf, "*** {s}", .{p.text[0..cstrLen(&p.text)]}) catch return,
                 else => return,
             };
             try writeLineLocked(f, ctx.out_lock, line);
@@ -499,21 +580,13 @@ pub fn writeLineLocked(out: zio.File, lock: ?*zio.Mutex, line: []const u8) !void
     try writeLine(out, line);
 }
 
-/// 构造欢迎语，写入 `buf`。
+/// 构造欢迎语，写入 `buf`（在线人数；成员名单按需 /who 获取）。
 fn welcomeText(w: WelcomePayload, own_nick: *const [MAX_NICK]u8, buf: []u8) []const u8 {
     var pos: usize = 0;
-    pos += (std.fmt.bufPrint(buf[pos..], "== 欢迎，{s}！你的 ID 是 {d}。在线成员：", .{
+    pos += (std.fmt.bufPrint(buf[pos..], "== 欢迎，{s}！你的 ID 是 {d}。当前在线 {d} 人（/who 查看名单）。", .{
         own_nick[0..cstrLen(own_nick)],
         w.client_id,
+        w.member_count,
     }) catch return buf[0..pos]).len;
-    if (w.member_count == 0) {
-        pos += (std.fmt.bufPrint(buf[pos..], "（无）", .{}) catch return buf[0..pos]).len;
-    } else {
-        for (0..w.member_count) |i| {
-            const name = w.members[i][0..cstrLen(&w.members[i])];
-            const sep = if (i > 0) ", " else "";
-            pos += (std.fmt.bufPrint(buf[pos..], "{s}{s}", .{ sep, name }) catch return buf[0..pos]).len;
-        }
-    }
     return buf[0..pos];
 }

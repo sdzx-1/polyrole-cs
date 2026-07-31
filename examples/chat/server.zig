@@ -2,12 +2,14 @@
 //
 // 结构：
 //   main           —— 监听端口，每连接 spawn 一个监督 fiber
-//   Room fiber     —— 串行处理成员操作（register/remove/broadcast）
+//   Room fiber     —— 串行处理成员操作（register/remove/broadcast/who）
 //   监督 fiber     —— 每连接两个协议 fiber（Ctrl 锁步 + Push 推送），
 //                     任一退出即清理整个连接（remove + 广播离开 + 关 Mux）
 //
-// 掉线检测：客户端每 100ms 发一次心跳（heartbeat），服务器 Ctrl recv 超过
-// CTRL_RECV_TIMEOUT_MS 未收到消息即认为连接死亡，走清理路径。
+// 10000 并发支持（见 docs/chat-scale-10000.md）：
+//   - fiber 栈初始提交 256KB → 64KB（万连接栈内存 10GB → 2.5GB）
+//   - 心跳间隔 1s（客户端时钟驱动），掉线检测放宽到 20s
+//   - Room 成员表动态扩容，无上限
 
 const std = @import("std");
 const zio = @import("zio");
@@ -24,11 +26,14 @@ const CtrlRunner = polyrole.runner.Runner(chat.Login);
 const PushRunner = polyrole.runner.Runner(chat.Deliver);
 
 const DEFAULT_PORT: u16 = 7788;
-/// 服务器端 Ctrl recv 超时：客户端心跳 100ms，2s 未收到即判定掉线。
-const CTRL_RECV_TIMEOUT_MS: u64 = 2000;
+/// 服务器端 Ctrl recv 超时：客户端心跳 1s，20s 未收到即判定掉线。
+const CTRL_RECV_TIMEOUT_MS: u64 = 20000;
 
 pub fn main(init: std.process.Init) !void {
-    var rt = try zio.Runtime.init(init.gpa, .{});
+    // 万连接场景：每连接 4 fiber × 64KB 初始栈 ≈ 2.5GB（默认 256KB 则 10GB）
+    var rt = try zio.Runtime.init(init.gpa, .{
+        .stack_pool = .{ .maximum_size = 8 * 1024 * 1024, .committed_size = 64 * 1024 },
+    });
     defer rt.deinit();
 
     var args_it = std.process.Args.Iterator.init(init.minimal.args);
@@ -37,7 +42,8 @@ pub fn main(init: std.process.Init) !void {
     if (args_it.next()) |arg| port = try std.fmt.parseInt(u16, arg, 10);
 
     var room: chat.Room = undefined;
-    room.init();
+    room.init(init.gpa);
+    defer room.deinit();
     try room.spawn();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", port);
@@ -72,7 +78,8 @@ pub fn serveConnection(
     try mux.initFromChannel(allocator, &sc);
     errdefer mux.deinit();
 
-    var inbox_buf: [16]chat.PushPayload = undefined;
+    // 广播队列容量按心跳间隔与广播频率配置（64 条足够 1s 心跳下的突发）
+    var inbox_buf: [64]chat.PushPayload = undefined;
     var inbox: zio.Channel(chat.PushPayload) = .init(&inbox_buf);
 
     var ctrl_ctx = chat.ServerContext.init(room, &inbox);

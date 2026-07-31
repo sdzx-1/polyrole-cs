@@ -1,12 +1,13 @@
 // 聊天室客户端 demo
 //
 // 结构：
-//   stdin fiber —— 异步读 stdin，投递到输入队列（/quit 退出）
-//   Push fiber  —— 消费服务器推送并打印
-//   Ctrl 主循环 —— 锁步协议：注册 → 发送消息 / 心跳 / 退出
+//   stdin fiber  —— 异步读 stdin，投递到输入队列（/who、/quit）
+//   Push fiber   —— 消费服务器推送并打印
+//   Ctrl 主循环  —— 锁步协议：注册 → 发送消息 / /who / 心跳 / 退出
 //
-// 服务器死亡检测由 Ctrl 承担：客户端每 100ms 发一次心跳，
-// 服务器 5s 无响应（CTRL_RECV_TIMEOUT_MS）即判定连接死亡。
+// 心跳由 Send.process 内部节流（每 100ms 查输入、1s 无输入发心跳），
+// 不依赖额外 fiber。服务器死亡检测由 Ctrl 承担：服务器 20s 无响应
+// （CTRL_RECV_TIMEOUT_MS）即判定连接死亡。
 
 const std = @import("std");
 const zio = @import("zio");
@@ -24,10 +25,13 @@ const PushRunner = polyrole.runner.Runner(chat.Deliver);
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT: u16 = 7788;
-const CTRL_RECV_TIMEOUT_MS: u64 = 5000;
+/// 与服务器 CTRL_RECV_TIMEOUT_MS 对齐：20s 无响应判定连接死亡。
+const CTRL_RECV_TIMEOUT_MS: u64 = 20000;
 
 pub fn main(init: std.process.Init) !void {
-    var rt = try zio.Runtime.init(init.gpa, .{});
+    var rt = try zio.Runtime.init(init.gpa, .{
+        .stack_pool = .{ .maximum_size = 8 * 1024 * 1024, .committed_size = 64 * 1024 },
+    });
     defer rt.deinit();
 
     var args_it = std.process.Args.Iterator.init(init.minimal.args);
@@ -98,6 +102,10 @@ fn stdinLoop(input: *zio.Channel(chat.UserInput)) anyerror!void {
         if (std.mem.eql(u8, l, "/quit")) {
             input.send(.quit) catch return;
             return;
+        }
+        if (std.mem.eql(u8, l, "/who")) {
+            input.send(.who) catch return;
+            continue;
         }
         var text: [chat.MAX_TEXT]u8 = [_]u8{0} ** chat.MAX_TEXT;
         const n = @min(l.len, chat.MAX_TEXT - 1);

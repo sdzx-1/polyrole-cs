@@ -60,6 +60,30 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(chat_client);
 
+    const chat_loadtest = b.addExecutable(.{
+        .name = "chat-loadtest",
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/chat_loadtest.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "polyrole_cs", .module = mod },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "chat", .module = b.createModule(.{
+                    .root_source_file = b.path("examples/chat/protocol.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "polyrole_cs", .module = mod },
+                        .{ .name = "zio", .module = zio.module("zio") },
+                    },
+                }) },
+            },
+        }),
+    });
+    b.installArtifact(chat_loadtest);
+
     const chat_tests = b.addTest(.{
         .use_llvm = true,
         .root_module = b.createModule(.{
