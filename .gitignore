@@ -6,3 +6,6 @@ zig-pkg/
 docs/graphs/*.dot
 docs/graphs/*.png
 desigen.md
+
+# Reasonix 工具配置
+reasonix.toml
