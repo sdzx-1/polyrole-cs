@@ -298,9 +298,11 @@ pub fn process(ctx: *Ctx) !@This() {
 
 ```bash
 zig build
-zig-out/bin/chat-server 7788          # 服务器
+zig-out/bin/chat-server 7788          # 服务器（广播压测加 --silent-join）
 zig-out/bin/chat-client alice         # 客户端（多开几个）
-zig-out/bin/chat-loadtest 10000 127.0.0.1 7788 6   # 10000 并发压测
+ulimit -n 65535                       # 压测前提：fd 上限（10000 连接需 ≥20000）
+zig-out/bin/chat-loadtest 10000 127.0.0.1 7788 6    # 10000 并发压测
+zig-out/bin/chat-loadtest 10000 127.0.0.1 7788 15 10 # 广播压测：10 条 × 10000，期望 10 万条
 ```
 
 完整设计文档（架构、推演史、验证数据、**设计不变式**）见 `examples/chat/README.md`。

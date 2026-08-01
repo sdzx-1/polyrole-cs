@@ -116,12 +116,16 @@ pub fn main(init: std.process.Init) !void {
         const first = stats.first_recv_ms.load(.acquire);
         const last = stats.last_recv_ms.load(.acquire);
         if (bs > 0 and first != std.math.maxInt(u64)) {
+            // 饱和减法：服务器未重启时 board 残留上一轮广播消息，首条收到时间
+            // 可能早于本轮 broadcast_start_ms（first < bs），直接相减会下溢 panic。
+            const first_delay = if (first > bs) first - bs else 0;
+            const last_delay = if (last > bs) last - bs else 0;
             std.log.info("广播：期望 {d} 条，实收 {d} 条（{d}%），首条延迟 {d}ms，末条延迟 {d}ms", .{
                 expected,
                 got,
                 got * 100 / expected,
-                first - bs,
-                last - bs,
+                first_delay,
+                last_delay,
             });
         } else {
             std.log.info("广播：期望 {d} 条，实收 {d} 条", .{ expected, got });
@@ -172,11 +176,27 @@ fn clientRun(
     // 消费收件箱并统计 chat 消息：注册风暴的加入通知若不消费会把 inbox 塞满，
     // 背压到服务器后被当作慢消费者断开。
     var drain_h = try zio.spawn(drainPush, .{ stats, &push_inbox });
-    // 限时退出：duration 到期后投递 /quit，Ctrl 走 Exit 优雅退出
-    _ = try zio.spawn(quitAfter, .{ duration_ms, &input });
-    // 广播发送方：仅客户端 0，等 settle_ms（全部注册 + 风暴消化）后连发 msgs 条
+    // 限时退出：duration 到期后投递 /quit，Ctrl 走 Exit 优雅退出。
+    // 必须在 clientRun 退出时 cancel+join：失败路径（连接中途断开）下 Ctrl 提前
+    // 返回，若任由 quitAfter 挂到 duration 结束，rt.deinit() 会因 task_count != 0
+    // 断言 panic（这些任务不在 group 内，group.cancel() 等不到它们）。
+    var quit_h = try zio.spawn(quitAfter, .{ duration_ms, &input });
+    defer {
+        quit_h.cancel();
+        quit_h.join() catch {};
+    }
+    // 广播发送方：仅客户端 0，等 settle_ms（全部注册 + 风暴消化）后连发 msgs 条。
+    // 注意：defer 必须在函数作用域声明——若写在 if 块内，会在块结束时立即
+    // cancel+join，broadcastDriver 从未等到发送时机（曾致广播实收 0 的回归）。
+    var bd_h: ?zio.JoinHandle(anyerror!void) = null;
+    defer {
+        if (bd_h != null) {
+            bd_h.?.cancel();
+            bd_h.?.join() catch {};
+        }
+    }
     if (i == 0 and msgs > 0) {
-        _ = try zio.spawn(broadcastDriver, .{ msgs, settle_ms, &stats.broadcast_start_ms, &input });
+        bd_h = try zio.spawn(broadcastDriver, .{ msgs, settle_ms, &stats.broadcast_start_ms, &input });
     }
 
     // Ctrl 正常结束（/quit → Exit）即视为成功；任何错误视为失败。
