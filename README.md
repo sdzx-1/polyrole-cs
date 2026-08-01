@@ -41,7 +41,7 @@ polyrole-cs/
 ├── docs/
 │   ├── family.md                 # 协议族设计说明
 │   └── graphs/                   # 生成的状态图（gitignored）
-├── examples/                     # 示例（当前为空）
+├── examples/chat/               # 多人聊天室 demo（10000 并发压测通过）
 ├── build.zig                     # 构建配置
 ├── build.zig.zon                 # 依赖声明
 └── README.md
@@ -146,7 +146,7 @@ try R.simulate(&client, &server, A);
 ```zig
 // Server 端
 var ch: StreamChannel = undefined;
-try ch.init(allocator, stream, 256, 256);
+try ch.init(allocator, stream, 256, 256, 256);
 defer ch.deinit(allocator);
 try R.symmetric_run(.server, &server_ctx, &ch, A, null);
 
@@ -174,7 +174,7 @@ try R.symmetric_run(.client, &client_ctx, &ch, A, null);
 
 ```zig
 var ch: StreamChannel = undefined;
-try ch.init(allocator, stream, read_buf_size, write_buf_size);
+try ch.init(allocator, stream, read_buf_size, write_buf_size, max_slice_len);
 defer ch.deinit(allocator);
 ```
 
@@ -192,7 +192,16 @@ nonce 内嵌单调 u64 计数器，提供防重放和防乱序保护。
 **MultiplexChannel** — 协议族传输层，多协议共享一条 TCP 连接：
 
 ```zig
-pub fn MultiplexChannel(comptime protocol_count: u8, comptime max_message_size: usize, comptime channel_capacity: u8) type
+pub fn MultiplexChannel(comptime configs: []const SubChannelConfig, comptime frame_budget: usize) type
+```
+
+每个子通道用 `SubChannelConfig` 声明容量、消息上限与溢出策略（`.close_channel` 直接关通道 / `.backpressure` 背压到 Reader）：
+
+```zig
+const Mux = polyrole.family_mux_channel.MultiplexChannel(&.{
+    .{ .capacity = 1, .max_message_size = 4096, .overflow = .close_channel },
+    .{ .capacity = 16, .max_message_size = 4096, .overflow = .backpressure },
+}, 4100);
 ```
 
 **架构**：独立 Reader Fiber + 有界 MVar 队列：
@@ -247,6 +256,7 @@ try graph.generateDot(.{}, &writer.interface);
 | 文档 | 说明 |
 |------|------|
 | `docs/family.md` | 协议族（Protocol Family）设计——多协议共享 TCP 连接的架构说明 |
+| `examples/chat/README.md` | 多人聊天室 demo 设计文档：架构、推演史、压测验证、设计不变式 |
 
 ### 状态图
 
@@ -256,7 +266,7 @@ try graph.generateDot(.{}, &writer.interface);
 zig build graph
 ```
 
-生成 `docs/graphs/*.dot` 和 `docs/graphs/*.png`，覆盖 `tls` 和 `net_monitor` 协议。
+生成 `docs/graphs/*.dot` 和 `docs/graphs/*.png`，覆盖 `tls`、`net_monitor`、`chat_ctrl`、`chat_push` 四个协议。
 
 ---
 
@@ -272,6 +282,28 @@ pub fn process(ctx: *Ctx) !@This() {
     // ...
 }
 ```
+
+---
+
+## 多人聊天室 demo（示例）
+
+项目包含一个完整的多人聊天室示例（`examples/chat/`），是框架能力的**端到端验证样本**：
+用 Mux 双协议承载控制面与推送面，用 SharedBoard（共享消息板 + 游标拉取）实现 O(1) 广播，
+在本机 20 核 / 31GB 上通过 **10000 并发压测**（10000/10000 连接零失败，10 万条广播 100% 送达）。
+
+- **Ctrl 协议**（锁步）：注册、消息、心跳、`/who`、退出
+- **Push 协议**（游标拉取）：按连接游标从 SharedBoard 批量拉取广播（8 条/帧）
+- **Room fiber**：成员表与消息板的唯一写者（Channel 串行化，无锁）
+- **SharedBoard**：预分配 + 原子游标 + release/acquire 无锁读
+
+```bash
+zig build
+zig-out/bin/chat-server 7788          # 服务器
+zig-out/bin/chat-client alice         # 客户端（多开几个）
+zig-out/bin/chat-loadtest 10000 127.0.0.1 7788 6   # 10000 并发压测
+```
+
+完整设计文档（架构、推演史、验证数据、**设计不变式**）见 `examples/chat/README.md`。
 
 ---
 
