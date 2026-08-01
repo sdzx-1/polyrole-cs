@@ -30,7 +30,7 @@ pub const Allocator = std.mem.Allocator;
 
 // ─── 常量 ────────────────────────────────────────────────────────────
 
-/// 成员表容量动态（无上限），见 docs/chat-scale-10000.md §3.1。
+/// 成员表容量动态（无上限），见 examples/chat/README.md §5.2.1。
 pub const MAX_NICK = 32;
 pub const MAX_TEXT = 256;
 /// 单次 /who 响应的成员名单上限（截断显示，避免超大帧）。
@@ -54,7 +54,7 @@ pub const RegisterPayload = struct {
     nickname: [MAX_NICK]u8,
 };
 
-/// Welcome 只带身份与在线人数；成员列表按需获取（/who），见 §3.2。
+/// Welcome 只带身份与在线人数；成员列表按需获取（/who），见 examples/chat/README.md §5.2.2。
 pub const WelcomePayload = struct {
     client_id: u32,
     member_count: u32,
@@ -252,7 +252,7 @@ pub const RoomOp = union(enum) {
     who: WhoOp,
 };
 
-/// 房间成员表：动态扩容 + 空闲槽位复用（见 docs/chat-scale-10000.md §3.1）。
+/// 房间成员表：动态扩容 + 空闲槽位复用（见 examples/chat/README.md §5.2.1）。
 /// 槽位索引即 client_id；删除的槽位进 free 栈，注册时 O(1) 复用。
 /// 所有广播（聊天消息、加入/离开通知）经 SharedBoard.append 一次性写入
 /// （O(1)），各连接的 Push 协议按游标拉取——无逐连接 trySend。

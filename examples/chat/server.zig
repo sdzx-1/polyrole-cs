@@ -7,7 +7,7 @@
 //   监督 fiber     —— 每连接两个协议 fiber（Ctrl 锁步 + Push 游标拉取），
 //                     Ctrl 结束即清理连接（remove + kick Push + 关 Mux）
 //
-// 推送架构（SharedBoard + 游标，见 docs/chat-scale-10000.md §3.7）：
+// 推送架构（SharedBoard + 游标，见 examples/chat/README.md §4）：
 //   - 所有广播（聊天消息、加入/离开通知、/who 响应）一次 append 到共享板
 //   - 每个连接的 Push 协议按自己的游标批量拉取（Poll/Chunk），
 //     慢消费者只是游标落后而不会被断开——消除逐连接 trySend 的
