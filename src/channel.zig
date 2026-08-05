@@ -51,8 +51,9 @@ pub const StreamChannel = struct {
     }
 };
 
-///  只允许单条消息发送接收
-pub const SingleMessageChannel = struct {
+/// 进程内内存通道——不经过网络 I/O，只允许单条消息在途：
+/// send 与 recv 通过 send_start/send_end 两个信号量严格交替（乒乓）。
+pub const InMemoryChannel = struct {
     /// send_start 的容量 1 缓冲（发送许可 token 槽位）。
     send_start_buf: [1]void = undefined,
     /// send_end 的容量 1 缓冲（数据就绪 token 槽位）。
@@ -496,7 +497,7 @@ test "tls channel: oversized record is rejected before reading its body" {
     try testing.expectError(error.MessageTooLarge, tc.recordRead());
 }
 
-// ─────────────────── SingleMessageChannel 测试 ───────────────────
+// ─────────────────── InMemoryChannel 测试 ───────────────────
 
 const SmcState = enum { hello, add };
 const SmcMsg = union(SmcState) {
@@ -505,11 +506,11 @@ const SmcMsg = union(SmcState) {
 };
 
 const SmcSide = struct {
-    fn sendHello(c: *SingleMessageChannel, text: []const u8) !void {
+    fn sendHello(c: *InMemoryChannel, text: []const u8) !void {
         try c.send(SmcState.hello, SmcMsg, @as(SmcMsg, .{ .hello = .{ .data = text } }));
     }
 
-    fn recvHello(c: *SingleMessageChannel, expected: []const u8) !void {
+    fn recvHello(c: *InMemoryChannel, expected: []const u8) !void {
         const m = try c.recv(SmcState.hello, SmcMsg);
         switch (m) {
             .hello => |h| try std.testing.expectEqualStrings(expected, h.data),
@@ -517,7 +518,7 @@ const SmcSide = struct {
         }
     }
 
-    fn sendN(c: *SingleMessageChannel, n: usize) !void {
+    fn sendN(c: *InMemoryChannel, n: usize) !void {
         var i: usize = 0;
         while (i < n) : (i += 1) {
             var buf: [32]u8 = undefined;
@@ -526,7 +527,7 @@ const SmcSide = struct {
         }
     }
 
-    fn recvN(c: *SingleMessageChannel, n: usize) !void {
+    fn recvN(c: *InMemoryChannel, n: usize) !void {
         var i: usize = 0;
         while (i < n) : (i += 1) {
             const m = try c.recv(SmcState.hello, SmcMsg);
@@ -539,11 +540,11 @@ const SmcSide = struct {
         }
     }
 
-    fn sendAdd(c: *SingleMessageChannel) !void {
+    fn sendAdd(c: *InMemoryChannel) !void {
         try c.send(SmcState.add, SmcMsg, @as(SmcMsg, .{ .add = .{ .data = .{ .a = 30, .b = 12 } } }));
     }
 
-    fn recvAdd(c: *SingleMessageChannel) !void {
+    fn recvAdd(c: *InMemoryChannel) !void {
         const m = try c.recv(SmcState.add, SmcMsg);
         switch (m) {
             .add => |v| {
@@ -560,7 +561,7 @@ test "smc: single message round-trip" {
     const rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
 
-    var c: SingleMessageChannel = undefined;
+    var c: InMemoryChannel = undefined;
     try c.init(allocator, 1024, 4096);
     defer c.deinit(allocator);
 
@@ -575,7 +576,7 @@ test "smc: multiple sequential round-trips" {
     const rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
 
-    var c: SingleMessageChannel = undefined;
+    var c: InMemoryChannel = undefined;
     try c.init(allocator, 1024, 4096);
     defer c.deinit(allocator);
 
@@ -590,7 +591,7 @@ test "smc: struct payload round-trip" {
     const rt = try zio.Runtime.init(allocator, .{});
     defer rt.deinit();
 
-    var c: SingleMessageChannel = undefined;
+    var c: InMemoryChannel = undefined;
     try c.init(allocator, 1024, 4096);
     defer c.deinit(allocator);
 
