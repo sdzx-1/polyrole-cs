@@ -51,6 +51,61 @@ pub const StreamChannel = struct {
     }
 };
 
+///  只允许单条消息发送接收
+pub const SingleMessageChannel = struct {
+    //channel 初始化时传入空buff
+    send_start: zio.Channel(void),
+    //channel 初始化时传入空buff
+    send_end: zio.Channel(void),
+
+    len: usize,
+    send_buff: []u8,
+    recv_buff: []u8,
+
+    pub fn init(
+        self: *@This(),
+        gpa: std.mem.Allocator,
+        buff_size: usize,
+        max_slice_len: usize,
+    ) !void {
+        const send_buff = try gpa.alloc(u8, buff_size);
+        const recv_buff = try gpa.alloc(u8, buff_size);
+        self.max_slice_len = max_slice_len;
+
+        self.send_buff = send_buff;
+        self.recv_buff = recv_buff;
+
+        self.send_start = .init(.{});
+        self.send_end = .init(.{});
+
+        self.len = 0;
+
+        try self.send_start.send({});
+    }
+
+    pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
+        gpa.free(self.send_buff);
+        gpa.free(self.recv_buff);
+    }
+
+    pub fn send(self: *@This(), state_id: anytype, _: type, val: anytype) !void {
+        _ = try self.send_start.receive();
+        const writer = Io.Writer.fixed(self.send_buff);
+        try codec.encode(writer, state_id, val);
+        self.len = writer.buffered().len;
+        try self.send_end.send({});
+    }
+
+    pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
+        _ = try self.send_end.receive();
+        @memcpy(self.recv_buff[0..self.len], self.send_buff[0..self.len]);
+        const reader = Io.Reader.fixed(self.recv_buff[0..self.len]);
+        const res = try codec.decode(reader, state_id, T, self.max_slice_len);
+        try self.send_start.send({});
+        return res;
+    }
+};
+
 /// 加密传输通道——包装一个借用的 StreamChannel，使用先前 TLS 握手
 /// 派生的密钥进行 AEAD 加密。
 ///
