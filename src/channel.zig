@@ -535,3 +535,112 @@ test "tls channel: oversized record is rejected before reading its body" {
     try writeRaw(&sc_client, &hdr);
     try testing.expectError(error.MessageTooLarge, tc.recordRead());
 }
+
+// ─────────────────── InMemoryChannel 全双工验证测试 ───────────────────
+
+const SmcState = enum { hello };
+const SmcMsg = union(SmcState) {
+    hello: struct { data: []const u8 },
+};
+
+/// 期望消息为 "{prefix}-{i}"。
+fn expectPrefixed(prefix: []const u8, i: usize, data: []const u8) !void {
+    var buf: [32]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&buf, "{s}-{d}", .{ prefix, i });
+    try std.testing.expectEqualStrings(expected, data);
+}
+
+test "smc: full-duplex - both directions flow concurrently" {
+    const allocator = std.testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    var half1: HalfChannel = undefined;
+    var half2: HalfChannel = undefined;
+    try half1.init(allocator, 1024);
+    try half2.init(allocator, 1024);
+    defer half1.deinit(allocator);
+    defer half2.deinit(allocator);
+
+    const ch_c: InMemoryChannel = .{ .max_slice_len = 4096, .half_self = &half1, .half_peer = &half2 };
+    const ch_s: InMemoryChannel = .{ .max_slice_len = 4096, .half_self = &half2, .half_peer = &half1 };
+
+    const n = 200;
+    const Side = struct {
+        // 客户端：先发后收。第 i+1 条发送只依赖对端收走 c-i，
+        // 不依赖 s-i 到达——两个方向并行流动。
+        fn client(c: *const InMemoryChannel, count: usize) !void {
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                var buf: [32]u8 = undefined;
+                const text = try std.fmt.bufPrint(&buf, "c-{d}", .{i});
+                try c.send(SmcState.hello, SmcMsg, @as(SmcMsg, .{ .hello = .{ .data = text } }));
+                const m = try c.recv(SmcState.hello, SmcMsg);
+                switch (m) {
+                    .hello => |h| try expectPrefixed("s", i, h.data),
+                }
+            }
+        }
+
+        // 服务端：先收后发，相位与客户端相反。
+        fn server(c: *const InMemoryChannel, count: usize) !void {
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const m = try c.recv(SmcState.hello, SmcMsg);
+                switch (m) {
+                    .hello => |h| try expectPrefixed("c", i, h.data),
+                }
+                var buf: [32]u8 = undefined;
+                const text = try std.fmt.bufPrint(&buf, "s-{d}", .{i});
+                try c.send(SmcState.hello, SmcMsg, @as(SmcMsg, .{ .hello = .{ .data = text } }));
+            }
+        }
+    };
+
+    var t1 = try rt.spawn(Side.client, .{ &ch_c, n });
+    var t2 = try rt.spawn(Side.server, .{ &ch_s, n });
+    try t1.join();
+    try t2.join();
+}
+
+test "smc: server sends first - client never receives its own message" {
+    const allocator = std.testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    var half1: HalfChannel = undefined;
+    var half2: HalfChannel = undefined;
+    try half1.init(allocator, 1024);
+    try half2.init(allocator, 1024);
+    defer half1.deinit(allocator);
+    defer half2.deinit(allocator);
+
+    const ch_c: InMemoryChannel = .{ .max_slice_len = 4096, .half_self = &half1, .half_peer = &half2 };
+    const ch_s: InMemoryChannel = .{ .max_slice_len = 4096, .half_self = &half2, .half_peer = &half1 };
+
+    const Side = struct {
+        fn serverFirst(c: *const InMemoryChannel) !void {
+            try c.send(SmcState.hello, SmcMsg, @as(SmcMsg, .{ .hello = .{ .data = "s-first" } }));
+            const m = try c.recv(SmcState.hello, SmcMsg);
+            switch (m) {
+                .hello => |h| try std.testing.expectEqualStrings("c-first", h.data),
+            }
+        }
+
+        fn clientLater(c: *const InMemoryChannel) !void {
+            // 确保 server 先完成 send 再开始收：旧实现（两端共享单一
+            // 信号量）下 server 会取回自己刚发的消息。
+            try zio.sleep(zio.Duration.fromMilliseconds(100));
+            const m = try c.recv(SmcState.hello, SmcMsg);
+            switch (m) {
+                .hello => |h| try std.testing.expectEqualStrings("s-first", h.data),
+            }
+            try c.send(SmcState.hello, SmcMsg, @as(SmcMsg, .{ .hello = .{ .data = "c-first" } }));
+        }
+    };
+
+    var t1 = try rt.spawn(Side.serverFirst, .{ &ch_s });
+    var t2 = try rt.spawn(Side.clientLater, .{ &ch_c });
+    try t1.join();
+    try t2.join();
+}
