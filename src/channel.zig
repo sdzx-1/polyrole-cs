@@ -112,9 +112,9 @@ pub const InMemoryChannel = struct {
     pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
         _ = try self.send_end.receive();
         @memcpy(self.recv_buff[0..self.len], self.send_buff[0..self.len]);
+        try self.send_start.send({});
         var reader = Io.Reader.fixed(self.recv_buff[0..self.len]);
         const res = try codec.decode(&reader, state_id, T, self.max_slice_len);
-        try self.send_start.send({});
         return res;
     }
 };
