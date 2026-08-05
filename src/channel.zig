@@ -53,11 +53,17 @@ pub const StreamChannel = struct {
 
 ///  只允许单条消息发送接收
 pub const SingleMessageChannel = struct {
+    /// send_start 的容量 1 缓冲（发送许可 token 槽位）。
+    send_start_buf: [1]void = undefined,
+    /// send_end 的容量 1 缓冲（数据就绪 token 槽位）。
+    send_end_buf: [1]void = undefined,
     //channel 初始化时传入空buff
     send_start: zio.Channel(void),
     //channel 初始化时传入空buff
     send_end: zio.Channel(void),
 
+    /// 从线上解码单个 `[]const u8` 切片的上限，语义同 `StreamChannel`。
+    max_slice_len: usize,
     len: usize,
     send_buff: []u8,
     recv_buff: []u8,
@@ -75,8 +81,14 @@ pub const SingleMessageChannel = struct {
         self.send_buff = send_buff;
         self.recv_buff = recv_buff;
 
-        self.send_start = .init(.{});
-        self.send_end = .init(.{});
+        // send_start 用容量 1 的缓冲 channel 作“发送许可”信号量：
+        // init 预置一个 token，send 取走一个，recv 归还一个，严格交替。
+        self.send_start = .init(&self.send_start_buf);
+        // send_end 用容量 1 的缓冲 channel 作“数据就绪”事件：
+        // init 不预置 token——token 只能由 send 在真实写入数据后产生。
+        // 缓冲使 send 不必阻塞等待 recv 取走；send_start 的许可仍保证
+        // 同一时刻至多一条消息在途。
+        self.send_end = .init(&self.send_end_buf);
 
         self.len = 0;
 
@@ -90,8 +102,8 @@ pub const SingleMessageChannel = struct {
 
     pub fn send(self: *@This(), state_id: anytype, _: type, val: anytype) !void {
         _ = try self.send_start.receive();
-        const writer = Io.Writer.fixed(self.send_buff);
-        try codec.encode(writer, state_id, val);
+        var writer = Io.Writer.fixed(self.send_buff);
+        try codec.encode(&writer, state_id, val);
         self.len = writer.buffered().len;
         try self.send_end.send({});
     }
@@ -99,8 +111,8 @@ pub const SingleMessageChannel = struct {
     pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
         _ = try self.send_end.receive();
         @memcpy(self.recv_buff[0..self.len], self.send_buff[0..self.len]);
-        const reader = Io.Reader.fixed(self.recv_buff[0..self.len]);
-        const res = try codec.decode(reader, state_id, T, self.max_slice_len);
+        var reader = Io.Reader.fixed(self.recv_buff[0..self.len]);
+        const res = try codec.decode(&reader, state_id, T, self.max_slice_len);
         try self.send_start.send({});
         return res;
     }
@@ -482,4 +494,108 @@ test "tls channel: oversized record is rejected before reading its body" {
 
     try writeRaw(&sc_client, &hdr);
     try testing.expectError(error.MessageTooLarge, tc.recordRead());
+}
+
+// ─────────────────── SingleMessageChannel 测试 ───────────────────
+
+const SmcState = enum { hello, add };
+const SmcMsg = union(SmcState) {
+    hello: struct { data: []const u8 },
+    add: struct { data: struct { a: i32, b: i32 } },
+};
+
+const SmcSide = struct {
+    fn sendHello(c: *SingleMessageChannel, text: []const u8) !void {
+        try c.send(SmcState.hello, SmcMsg, @as(SmcMsg, .{ .hello = .{ .data = text } }));
+    }
+
+    fn recvHello(c: *SingleMessageChannel, expected: []const u8) !void {
+        const m = try c.recv(SmcState.hello, SmcMsg);
+        switch (m) {
+            .hello => |h| try std.testing.expectEqualStrings(expected, h.data),
+            else => unreachable,
+        }
+    }
+
+    fn sendN(c: *SingleMessageChannel, n: usize) !void {
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            var buf: [32]u8 = undefined;
+            const text = try std.fmt.bufPrint(&buf, "msg-{d}", .{i});
+            try c.send(SmcState.hello, SmcMsg, @as(SmcMsg, .{ .hello = .{ .data = text } }));
+        }
+    }
+
+    fn recvN(c: *SingleMessageChannel, n: usize) !void {
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const m = try c.recv(SmcState.hello, SmcMsg);
+            var buf: [32]u8 = undefined;
+            const expected = try std.fmt.bufPrint(&buf, "msg-{d}", .{i});
+            switch (m) {
+                .hello => |h| try std.testing.expectEqualStrings(expected, h.data),
+                else => unreachable,
+            }
+        }
+    }
+
+    fn sendAdd(c: *SingleMessageChannel) !void {
+        try c.send(SmcState.add, SmcMsg, @as(SmcMsg, .{ .add = .{ .data = .{ .a = 30, .b = 12 } } }));
+    }
+
+    fn recvAdd(c: *SingleMessageChannel) !void {
+        const m = try c.recv(SmcState.add, SmcMsg);
+        switch (m) {
+            .add => |v| {
+                try std.testing.expectEqual(@as(i32, 30), v.data.a);
+                try std.testing.expectEqual(@as(i32, 12), v.data.b);
+            },
+            else => unreachable,
+        }
+    }
+};
+
+test "smc: single message round-trip" {
+    const allocator = std.testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    var c: SingleMessageChannel = undefined;
+    try c.init(allocator, 1024, 4096);
+    defer c.deinit(allocator);
+
+    var t1 = try rt.spawn(SmcSide.sendHello, .{ &c, "hello" });
+    var t2 = try rt.spawn(SmcSide.recvHello, .{ &c, "hello" });
+    try t1.join();
+    try t2.join();
+}
+
+test "smc: multiple sequential round-trips" {
+    const allocator = std.testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    var c: SingleMessageChannel = undefined;
+    try c.init(allocator, 1024, 4096);
+    defer c.deinit(allocator);
+
+    var t1 = try rt.spawn(SmcSide.sendN, .{ &c, 8 });
+    var t2 = try rt.spawn(SmcSide.recvN, .{ &c, 8 });
+    try t1.join();
+    try t2.join();
+}
+
+test "smc: struct payload round-trip" {
+    const allocator = std.testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    var c: SingleMessageChannel = undefined;
+    try c.init(allocator, 1024, 4096);
+    defer c.deinit(allocator);
+
+    var t1 = try rt.spawn(SmcSide.sendAdd, .{&c});
+    var t2 = try rt.spawn(SmcSide.recvAdd, .{&c});
+    try t1.join();
+    try t2.join();
 }
