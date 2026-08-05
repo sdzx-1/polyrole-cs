@@ -169,7 +169,7 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
 
         pub const B = union(enum) {
             to_a: Data(void, A),
-            next: Data(void, Next),
+            next: Data(void, C),
 
             pub const info: TestInfo = .{ .agent = .server, .name = "B" };
 
@@ -177,6 +177,26 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
                 if (ctx.* >= 10) return .next;
                 ctx.* += 1;
                 return .to_a;
+            }
+        };
+
+        pub const C = union(enum) {
+            client_add: Data(void, @This()),
+            next: Data(void, Next),
+
+            pub const info: TestInfo = .{ .agent = .server, .name = "C" };
+
+            pub fn process(ctx: *i32) @This() {
+                if (ctx.* == 0) return .next;
+                ctx.* -= 1;
+                return .client_add;
+            }
+
+            pub fn preprocess(ctx: *i32, msg: @This()) !void {
+                switch (msg) {
+                    .client_add => ctx.* += 1,
+                    .next => {},
+                }
             }
         };
     };
@@ -189,7 +209,7 @@ test "simulate" {
     var client: i32 = 0;
     var server: i32 = 0;
     try R.simulate(&client, &server, P.A);
-    try testing.expectEqual(server, 10);
+    try testing.expectEqual(client, 10);
 }
 test "symmetric run" {
     const testing = std.testing;
@@ -233,7 +253,9 @@ test "symmetric run" {
 
     try R.symmetric_run(.server, &server_context, &stream_channel, P.A, null);
 
-    try testing.expectEqual(server_context, 10);
+    // 服务端跑完时客户端可能还在收 C 阶段的剩余消息,必须等客户端完成再断言。
+    try group.wait();
+    try testing.expectEqual(client_context, 10);
 }
 
 test "symmetric run over in-memory channel" {
@@ -268,7 +290,7 @@ test "symmetric run over in-memory channel" {
     try R.symmetric_run(.server, &server_context, &ch, P.A, null);
 
     try group.wait();
-    try testing.expectEqual(server_context, 10);
+    try testing.expectEqual(client_context, 10);
 }
 
 test "symmetric_run: recv timeout" {
@@ -398,5 +420,6 @@ test "tls channel: symmetric_run over encrypted channel" {
 
     try R_pp.symmetric_run(.server, &server_counter, &tc, P.A, null);
 
-    try testing.expectEqual(server_counter, 10);
+    try group.wait();
+    try testing.expectEqual(client_counter, 10);
 }
