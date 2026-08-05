@@ -60,11 +60,11 @@ pub const StreamChannel = struct {
 ///  - `send_end`（数据就绪，= full）：send 写入数据后放置一个
 ///    token，对端 recv 取走。
 ///
-/// MetaChannel 本身不提供 send/recv——由 `InMemoryChannel` 按方向引用：
-/// 本端 `send` 写入自己的 `meta_self`，对端 `recv` 从 `meta_peer` 读取。
-/// 所有权归调用方；配对的两个 MetaChannel 必须活得比引用它们的
+/// HalfChannel 本身不提供 send/recv——由 `InMemoryChannel` 按方向引用：
+/// 本端 `send` 写入自己的 `half_self`，对端 `recv` 从 `half_peer` 读取。
+/// 所有权归调用方；配对的两个 HalfChannel 必须活得比引用它们的
 /// InMemoryChannel 更久。
-pub const MetaChannel = struct {
+pub const HalfChannel = struct {
     /// send_start 的容量 1 缓冲（发送许可 token 槽位）。
     send_start_buf: [1]void = undefined,
     /// send_end 的容量 1 缓冲（数据就绪 token 槽位）。
@@ -113,14 +113,14 @@ pub const MetaChannel = struct {
 };
 
 /// 进程内内存通道的一端——不经过网络 I/O，全双工：两个配对的
-/// InMemoryChannel（交叉引用两个 MetaChannel）组成 client↔server
+/// InMemoryChannel（交叉引用两个 HalfChannel）组成 client↔server
 /// 双向消息管道，每个方向至多一条消息在途，方向互不影响。
 ///
-/// 方向由配对结构保证：`send` 只写入 `meta_self` 的发送侧并在
-/// `meta_peer` 放置就绪信号，`recv` 只读取 `meta_peer` 的发送侧——
+/// 方向由配对结构保证：`send` 只写入 `half_self` 的发送侧并在
+/// `half_peer` 放置就绪信号，`recv` 只读取 `half_peer` 的发送侧——
 /// 任一端永远不会收到自己发送的消息。
 ///
-/// 所有权：`meta_self`/`meta_peer` 为借用，调用方负责两个 MetaChannel
+/// 所有权：`half_self`/`half_peer` 为借用，调用方负责两个 HalfChannel
 /// 的分配与释放，且须保证它们活得比本通道久。
 ///
 /// 失败语义：`send` 编码失败（消息超过缓冲大小 → error.WriteFailed）时
@@ -131,28 +131,28 @@ pub const InMemoryChannel = struct {
     /// 从线上解码单个 `[]const u8` 切片的上限，语义同 `StreamChannel`。
     max_slice_len: usize,
     /// 本端工作区：send 的写入目标，recv 的暂存/解码缓冲。
-    meta_self: *MetaChannel,
+    half_self: *HalfChannel,
     /// 对端工作区：recv 的数据来源（对端 send 的产物）。
-    meta_peer: *MetaChannel,
+    half_peer: *HalfChannel,
 
-    /// 发送一条消息：等发送许可 → 编码进 meta_self.send_buff →
-    /// 在 meta_peer 放置数据就绪信号。
+    /// 发送一条消息：等发送许可 → 编码进 half_self.send_buff →
+    /// 在 half_peer 放置数据就绪信号。
     pub fn send(self: *const @This(), state_id: anytype, _: type, val: anytype) !void {
-        _ = try self.meta_self.send_start.receive();
-        var writer = Io.Writer.fixed(self.meta_self.send_buff);
+        _ = try self.half_self.send_start.receive();
+        var writer = Io.Writer.fixed(self.half_self.send_buff);
         try codec.encode(&writer, state_id, val);
-        self.meta_self.len = writer.buffered().len;
-        try self.meta_peer.send_end.send({});
+        self.half_self.len = writer.buffered().len;
+        try self.half_peer.send_end.send({});
     }
 
-    /// 接收一条消息：等本端就绪信号 → 从 meta_peer 拷贝已编码数据 →
+    /// 接收一条消息：等本端就绪信号 → 从 half_peer 拷贝已编码数据 →
     /// 归还对端发送许可 → 解码。
     pub fn recv(self: *const @This(), state_id: anytype, T: type) !T {
-        _ = try self.meta_self.send_end.receive();
-        const len = self.meta_peer.len;
-        @memcpy(self.meta_self.recv_buff[0..len], self.meta_peer.send_buff[0..len]);
-        try self.meta_peer.send_start.send({});
-        var reader = Io.Reader.fixed(self.meta_self.recv_buff[0..len]);
+        _ = try self.half_self.send_end.receive();
+        const len = self.half_peer.len;
+        @memcpy(self.half_self.recv_buff[0..len], self.half_peer.send_buff[0..len]);
+        try self.half_peer.send_start.send({});
+        var reader = Io.Reader.fixed(self.half_self.recv_buff[0..len]);
         const res = try codec.decode(&reader, state_id, T, self.max_slice_len);
         return res;
     }

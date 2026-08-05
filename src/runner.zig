@@ -267,22 +267,22 @@ test "symmetric run over in-memory channel" {
     const P = CreateTestProtocol("inmem", Exit);
     const R = Runner(P.A);
     const InMemoryChannel = root.channel.InMemoryChannel;
-    const MetaChannel = root.channel.MetaChannel;
+    const HalfChannel = root.channel.HalfChannel;
 
     var client_context: i32 = 0;
     var server_context: i32 = 0;
 
-    // InMemoryChannel 不经过网络 I/O：两个 MetaChannel 交叉配对成
+    // InMemoryChannel 不经过网络 I/O：两个 HalfChannel 交叉配对成
     // 全双工管道，ch1（客户端）与 ch2（服务端）各持一端。
-    var meta1: MetaChannel = undefined;
-    var meta2: MetaChannel = undefined;
-    try meta1.init(allocator, 1024);
-    try meta2.init(allocator, 1024);
-    defer meta1.deinit(allocator);
-    defer meta2.deinit(allocator);
+    var half1: HalfChannel = undefined;
+    var half2: HalfChannel = undefined;
+    try half1.init(allocator, 1024);
+    try half2.init(allocator, 1024);
+    defer half1.deinit(allocator);
+    defer half2.deinit(allocator);
 
-    const ch1: InMemoryChannel = .{ .max_slice_len = 1024, .meta_self = &meta1, .meta_peer = &meta2 };
-    const ch2: InMemoryChannel = .{ .max_slice_len = 1024, .meta_self = &meta2, .meta_peer = &meta1 };
+    const ch1: InMemoryChannel = .{ .max_slice_len = 1024, .half_self = &half1, .half_peer = &half2 };
+    const ch2: InMemoryChannel = .{ .max_slice_len = 1024, .half_self = &half2, .half_peer = &half1 };
 
     const S = struct {
         fn clientFn(chan: *const InMemoryChannel, ctx: *i32) !void {
