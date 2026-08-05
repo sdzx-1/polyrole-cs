@@ -174,7 +174,7 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
             pub const info: TestInfo = .{ .agent = .server, .name = "B" };
 
             pub fn process(ctx: *i32) @This() {
-                if (ctx.* >= 10) return .next;
+                if (ctx.* >= 1000) return .next;
                 ctx.* += 1;
                 return .to_a;
             }
@@ -209,7 +209,7 @@ test "simulate" {
     var client: i32 = 0;
     var server: i32 = 0;
     try R.simulate(&client, &server, P.A);
-    try testing.expectEqual(client, 10);
+    try testing.expectEqual(client, 1000);
 }
 test "symmetric run" {
     const testing = std.testing;
@@ -255,7 +255,7 @@ test "symmetric run" {
 
     // 服务端跑完时客户端可能还在收 C 阶段的剩余消息,必须等客户端完成再断言。
     try group.wait();
-    try testing.expectEqual(client_context, 10);
+    try testing.expectEqual(client_context, 1000);
 }
 
 test "symmetric run over in-memory channel" {
@@ -290,7 +290,7 @@ test "symmetric run over in-memory channel" {
     try R.symmetric_run(.server, &server_context, &ch, P.A, null);
 
     try group.wait();
-    try testing.expectEqual(client_context, 10);
+    try testing.expectEqual(client_context, 1000);
 }
 
 test "symmetric_run: recv timeout" {
@@ -421,5 +421,5 @@ test "tls channel: symmetric_run over encrypted channel" {
     try R_pp.symmetric_run(.server, &server_counter, &tc, P.A, null);
 
     try group.wait();
-    try testing.expectEqual(client_counter, 10);
+    try testing.expectEqual(client_counter, 1000);
 }
