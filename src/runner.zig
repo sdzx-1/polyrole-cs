@@ -236,6 +236,41 @@ test "symmetric run" {
     try testing.expectEqual(server_context, 10);
 }
 
+test "symmetric run over in-memory channel" {
+    const testing = std.testing;
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const allocator = testing.allocator;
+
+    const P = CreateTestProtocol("inmem", Exit);
+    const R = Runner(P.A);
+    const InMemoryChannel = root.channel.InMemoryChannel;
+
+    var client_context: i32 = 0;
+    var server_context: i32 = 0;
+
+    // InMemoryChannel 不经过网络 I/O：两端共享同一通道，
+    // 通过 send_start/send_end 信号量严格交替。
+    var ch: InMemoryChannel = undefined;
+    try ch.init(allocator, 1024, 4096);
+    defer ch.deinit(allocator);
+
+    const S = struct {
+        fn clientFn(chan: *InMemoryChannel, ctx: *i32) !void {
+            try R.symmetric_run(.client, ctx, chan, P.A, null);
+        }
+    };
+
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(S.clientFn, .{ &ch, &client_context });
+
+    try R.symmetric_run(.server, &server_context, &ch, P.A, null);
+
+    try group.wait();
+    try testing.expectEqual(server_context, 10);
+}
+
 test "symmetric_run: recv timeout" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
