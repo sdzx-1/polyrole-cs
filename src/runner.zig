@@ -267,27 +267,34 @@ test "symmetric run over in-memory channel" {
     const P = CreateTestProtocol("inmem", Exit);
     const R = Runner(P.A);
     const InMemoryChannel = root.channel.InMemoryChannel;
+    const MetaChannel = root.channel.MetaChannel;
 
     var client_context: i32 = 0;
     var server_context: i32 = 0;
 
-    // InMemoryChannel 不经过网络 I/O：两端共享同一通道，
-    // 通过 send_start/send_end 信号量严格交替。
-    var ch: InMemoryChannel = undefined;
-    try ch.init(allocator, 1024, 4096);
-    defer ch.deinit(allocator);
+    // InMemoryChannel 不经过网络 I/O：两个 MetaChannel 交叉配对成
+    // 全双工管道，ch1（客户端）与 ch2（服务端）各持一端。
+    var meta1: MetaChannel = undefined;
+    var meta2: MetaChannel = undefined;
+    try meta1.init(allocator, 1024);
+    try meta2.init(allocator, 1024);
+    defer meta1.deinit(allocator);
+    defer meta2.deinit(allocator);
+
+    const ch1: InMemoryChannel = .{ .max_slice_len = 1024, .meta_self = &meta1, .meta_peer = &meta2 };
+    const ch2: InMemoryChannel = .{ .max_slice_len = 1024, .meta_self = &meta2, .meta_peer = &meta1 };
 
     const S = struct {
-        fn clientFn(chan: *InMemoryChannel, ctx: *i32) !void {
+        fn clientFn(chan: *const InMemoryChannel, ctx: *i32) !void {
             try R.symmetric_run(.client, ctx, chan, P.A, null);
         }
     };
 
     var group: zio.Group = .init;
     defer group.cancel();
-    try group.spawn(S.clientFn, .{ &ch, &client_context });
+    try group.spawn(S.clientFn, .{ &ch1, &client_context });
 
-    try R.symmetric_run(.server, &server_context, &ch, P.A, null);
+    try R.symmetric_run(.server, &server_context, &ch2, P.A, null);
 
     try group.wait();
     try testing.expectEqual(client_context, 1000);

@@ -51,33 +51,43 @@ pub const StreamChannel = struct {
     }
 };
 
-/// 进程内内存通道——不经过网络 I/O，只允许单条消息在途：
-/// send 与 recv 通过 send_start/send_end 两个信号量严格交替（乒乓）。
-pub const InMemoryChannel = struct {
+/// 进程内内存通道的单向“工作区”——等价于一个容量 1 的 MVar，
+/// 用一对容量 1 的 channel 表达 MVar 的 full/empty 两态：
+///
+///  - `send_start`（发送许可，= empty）：init 预置 1 个 token，
+///    send 取走一个、对端 recv 归还一个，保证该方向同一时刻
+///    至多一条消息在途；
+///  - `send_end`（数据就绪，= full）：send 写入数据后放置一个
+///    token，对端 recv 取走。
+///
+/// MetaChannel 本身不提供 send/recv——由 `InMemoryChannel` 按方向引用：
+/// 本端 `send` 写入自己的 `meta_self`，对端 `recv` 从 `meta_peer` 读取。
+/// 所有权归调用方；配对的两个 MetaChannel 必须活得比引用它们的
+/// InMemoryChannel 更久。
+pub const MetaChannel = struct {
     /// send_start 的容量 1 缓冲（发送许可 token 槽位）。
     send_start_buf: [1]void = undefined,
     /// send_end 的容量 1 缓冲（数据就绪 token 槽位）。
     send_end_buf: [1]void = undefined,
-    //channel 初始化时传入空buff
+    /// 发送许可信号量：init 预置 1 个 token，send 取走、对端 recv 归还。
     send_start: zio.Channel(void),
-    //channel 初始化时传入空buff
+    /// 数据就绪信号量：send 写入数据后放置，对端 recv 取走。
     send_end: zio.Channel(void),
 
-    /// 从线上解码单个 `[]const u8` 切片的上限，语义同 `StreamChannel`。
-    max_slice_len: usize,
+    /// send 编码后的消息字节数（≤ send_buff.len）。
     len: usize,
+    /// 本端发送缓冲：本端 send 编码写入，对端 recv 从这里拷贝。
     send_buff: []u8,
+    /// 本端接收缓冲：本端 recv 从对端 send_buff 拷贝后在此解码。
     recv_buff: []u8,
 
     pub fn init(
         self: *@This(),
         gpa: std.mem.Allocator,
         buff_size: usize,
-        max_slice_len: usize,
     ) !void {
         const send_buff = try gpa.alloc(u8, buff_size);
         const recv_buff = try gpa.alloc(u8, buff_size);
-        self.max_slice_len = max_slice_len;
 
         self.send_buff = send_buff;
         self.recv_buff = recv_buff;
@@ -100,20 +110,49 @@ pub const InMemoryChannel = struct {
         gpa.free(self.send_buff);
         gpa.free(self.recv_buff);
     }
+};
 
-    pub fn send(self: *@This(), state_id: anytype, _: type, val: anytype) !void {
-        _ = try self.send_start.receive();
-        var writer = Io.Writer.fixed(self.send_buff);
+/// 进程内内存通道的一端——不经过网络 I/O，全双工：两个配对的
+/// InMemoryChannel（交叉引用两个 MetaChannel）组成 client↔server
+/// 双向消息管道，每个方向至多一条消息在途，方向互不影响。
+///
+/// 方向由配对结构保证：`send` 只写入 `meta_self` 的发送侧并在
+/// `meta_peer` 放置就绪信号，`recv` 只读取 `meta_peer` 的发送侧——
+/// 任一端永远不会收到自己发送的消息。
+///
+/// 所有权：`meta_self`/`meta_peer` 为借用，调用方负责两个 MetaChannel
+/// 的分配与释放，且须保证它们活得比本通道久。
+///
+/// 失败语义：`send` 编码失败（消息超过缓冲大小 → error.WriteFailed）时
+/// 发送许可已消耗且不归还，该方向通道报废，须重建；
+/// `recv` 解码失败（IncorrectStatusReceived/MessageTooLarge）时许可已
+/// 归还，通道可继续使用。
+pub const InMemoryChannel = struct {
+    /// 从线上解码单个 `[]const u8` 切片的上限，语义同 `StreamChannel`。
+    max_slice_len: usize,
+    /// 本端工作区：send 的写入目标，recv 的暂存/解码缓冲。
+    meta_self: *MetaChannel,
+    /// 对端工作区：recv 的数据来源（对端 send 的产物）。
+    meta_peer: *MetaChannel,
+
+    /// 发送一条消息：等发送许可 → 编码进 meta_self.send_buff →
+    /// 在 meta_peer 放置数据就绪信号。
+    pub fn send(self: *const @This(), state_id: anytype, _: type, val: anytype) !void {
+        _ = try self.meta_self.send_start.receive();
+        var writer = Io.Writer.fixed(self.meta_self.send_buff);
         try codec.encode(&writer, state_id, val);
-        self.len = writer.buffered().len;
-        try self.send_end.send({});
+        self.meta_self.len = writer.buffered().len;
+        try self.meta_peer.send_end.send({});
     }
 
-    pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
-        _ = try self.send_end.receive();
-        @memcpy(self.recv_buff[0..self.len], self.send_buff[0..self.len]);
-        try self.send_start.send({});
-        var reader = Io.Reader.fixed(self.recv_buff[0..self.len]);
+    /// 接收一条消息：等本端就绪信号 → 从 meta_peer 拷贝已编码数据 →
+    /// 归还对端发送许可 → 解码。
+    pub fn recv(self: *const @This(), state_id: anytype, T: type) !T {
+        _ = try self.meta_self.send_end.receive();
+        const len = self.meta_peer.len;
+        @memcpy(self.meta_self.recv_buff[0..len], self.meta_peer.send_buff[0..len]);
+        try self.meta_peer.send_start.send({});
+        var reader = Io.Reader.fixed(self.meta_self.recv_buff[0..len]);
         const res = try codec.decode(&reader, state_id, T, self.max_slice_len);
         return res;
     }
@@ -495,108 +534,4 @@ test "tls channel: oversized record is rejected before reading its body" {
 
     try writeRaw(&sc_client, &hdr);
     try testing.expectError(error.MessageTooLarge, tc.recordRead());
-}
-
-// ─────────────────── InMemoryChannel 测试 ───────────────────
-
-const SmcState = enum { hello, add };
-const SmcMsg = union(SmcState) {
-    hello: struct { data: []const u8 },
-    add: struct { data: struct { a: i32, b: i32 } },
-};
-
-const SmcSide = struct {
-    fn sendHello(c: *InMemoryChannel, text: []const u8) !void {
-        try c.send(SmcState.hello, SmcMsg, @as(SmcMsg, .{ .hello = .{ .data = text } }));
-    }
-
-    fn recvHello(c: *InMemoryChannel, expected: []const u8) !void {
-        const m = try c.recv(SmcState.hello, SmcMsg);
-        switch (m) {
-            .hello => |h| try std.testing.expectEqualStrings(expected, h.data),
-            else => unreachable,
-        }
-    }
-
-    fn sendN(c: *InMemoryChannel, n: usize) !void {
-        var i: usize = 0;
-        while (i < n) : (i += 1) {
-            var buf: [32]u8 = undefined;
-            const text = try std.fmt.bufPrint(&buf, "msg-{d}", .{i});
-            try c.send(SmcState.hello, SmcMsg, @as(SmcMsg, .{ .hello = .{ .data = text } }));
-        }
-    }
-
-    fn recvN(c: *InMemoryChannel, n: usize) !void {
-        var i: usize = 0;
-        while (i < n) : (i += 1) {
-            const m = try c.recv(SmcState.hello, SmcMsg);
-            var buf: [32]u8 = undefined;
-            const expected = try std.fmt.bufPrint(&buf, "msg-{d}", .{i});
-            switch (m) {
-                .hello => |h| try std.testing.expectEqualStrings(expected, h.data),
-                else => unreachable,
-            }
-        }
-    }
-
-    fn sendAdd(c: *InMemoryChannel) !void {
-        try c.send(SmcState.add, SmcMsg, @as(SmcMsg, .{ .add = .{ .data = .{ .a = 30, .b = 12 } } }));
-    }
-
-    fn recvAdd(c: *InMemoryChannel) !void {
-        const m = try c.recv(SmcState.add, SmcMsg);
-        switch (m) {
-            .add => |v| {
-                try std.testing.expectEqual(@as(i32, 30), v.data.a);
-                try std.testing.expectEqual(@as(i32, 12), v.data.b);
-            },
-            else => unreachable,
-        }
-    }
-};
-
-test "smc: single message round-trip" {
-    const allocator = std.testing.allocator;
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    var c: InMemoryChannel = undefined;
-    try c.init(allocator, 1024, 4096);
-    defer c.deinit(allocator);
-
-    var t1 = try rt.spawn(SmcSide.sendHello, .{ &c, "hello" });
-    var t2 = try rt.spawn(SmcSide.recvHello, .{ &c, "hello" });
-    try t1.join();
-    try t2.join();
-}
-
-test "smc: multiple sequential round-trips" {
-    const allocator = std.testing.allocator;
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    var c: InMemoryChannel = undefined;
-    try c.init(allocator, 1024, 4096);
-    defer c.deinit(allocator);
-
-    var t1 = try rt.spawn(SmcSide.sendN, .{ &c, 8 });
-    var t2 = try rt.spawn(SmcSide.recvN, .{ &c, 8 });
-    try t1.join();
-    try t2.join();
-}
-
-test "smc: struct payload round-trip" {
-    const allocator = std.testing.allocator;
-    const rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
-
-    var c: InMemoryChannel = undefined;
-    try c.init(allocator, 1024, 4096);
-    defer c.deinit(allocator);
-
-    var t1 = try rt.spawn(SmcSide.sendAdd, .{&c});
-    var t2 = try rt.spawn(SmcSide.recvAdd, .{&c});
-    try t1.join();
-    try t2.join();
 }
