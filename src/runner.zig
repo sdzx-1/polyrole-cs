@@ -310,6 +310,8 @@ pub fn Mux(comptime protocols: []const Protocol) type {
                 if (protocol_id >= protocol_count) return error.ProtocolIdTooLarge;
                 const payload_len: usize = @intCast(try self.reader.takeInt(u16, .big));
                 const current = &self.sub_channels[protocol_id];
+                if (payload_len > protocols[protocol_id].max_massage_size or
+                    payload_len > current.recv_buff.len) return error.MessageTooLarge;
                 try current.recv_start.receive();
                 current.len = payload_len;
                 const payload = try self.reader.take(payload_len);
