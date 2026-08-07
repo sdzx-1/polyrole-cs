@@ -6,6 +6,9 @@ const Role = root.Role;
 const Data = root.Data;
 const ProtocolInfo = root.ProtocolInfo;
 const Exit = root.Exit;
+const Io = std.Io;
+const codec = @import("codec.zig");
+const builtin = @import("builtin");
 
 fn returnsError(comptime fun: anytype) bool {
     const ret = @typeInfo(@TypeOf(fun)).@"fn".return_type.?;
@@ -147,6 +150,209 @@ pub fn Runner(
                         },
                     }
                 },
+            }
+        }
+    };
+}
+
+pub const Protocol = struct {
+    //enter state
+    enter: type,
+    //runner
+    runner: type,
+    //client context typpe
+    client_ct: type,
+    //server context type
+    server_ct: type,
+    //max massage size
+    max_massage_size: usize,
+    recv_timeout_ms: ?u64,
+};
+
+pub const SubChannel = struct {
+    id: usize,
+    len: usize,
+    send_buff: []u8,
+    recv_buff: []u8,
+
+    //send
+    send_start_buf: [1]void = undefined,
+    send_start: zio.Channel(void),
+
+    send_end: *zio.Channel(usize),
+
+    //recv
+    recv_start_buf: [1]void = undefined,
+    recv_start: zio.Channel(void),
+
+    recv_end_buf: [1]void = undefined,
+    recv_end: zio.Channel(void),
+
+    pub fn init(
+        self: *@This(),
+        gpa: std.mem.Allocator,
+        id: usize,
+        buff_size: usize,
+        send_end: *zio.Channel(usize),
+    ) !void {
+        self.id = id;
+        const send_buff = try gpa.alloc(u8, buff_size);
+        const recv_buff = try gpa.alloc(u8, buff_size);
+        self.send_buff = send_buff;
+        self.recv_buff = recv_buff;
+        self.send_start = .init(&self.send_start_buf);
+        self.recv_start = .init(&self.recv_start_buf);
+        self.recv_end = .init(&self.recv_end_buf);
+        self.send_end = send_end;
+        self.len = 0;
+        try self.send_start.send({});
+    }
+
+    pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
+        gpa.free(self.send_buff);
+        gpa.free(self.recv_buff);
+    }
+
+    pub fn send(self: *@This(), state_id: anytype, _: type, val: anytype) !void {
+        _ = try self.send_start.receive();
+        var writer = Io.Writer.fixed(self.send_buff);
+        try writer.writeByte(@intCast(self.id)); //协议id
+        try writer.writeInt(u16, 0, .big); //payload_len，先占位置，后面再修改
+        try codec.encode(&writer, state_id, val);
+        self.len = writer.buffered().len;
+        const payload_len: u16 = @intCast(self.len - 3); //payload_len = 总长度 - id(1) - payload_len(2)
+        const bytes: [2]u8 = @bitCast(payload_len);
+        //payload_len 传输时使用大端序, 需要判断本机的端序
+        switch (builtin.cpu.arch.endian()) {
+            .big => {
+                self.send_buff[1] = bytes[0];
+                self.send_buff[2] = bytes[1];
+            },
+            .little => {
+                self.send_buff[1] = bytes[1];
+                self.send_buff[2] = bytes[0];
+            },
+        }
+
+        try self.send_end.send(self.id);
+    }
+
+    pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
+        try self.recv_start.send({});
+        try self.recv_end.receive();
+        var reader = Io.Reader.fixed(self.recv_buff[0..self.len]);
+        //TODO: fix 4096
+        const res = try codec.decode(&reader, state_id, T, 4096);
+        return res;
+    }
+};
+
+pub fn Mux(comptime protocols: []const Protocol) type {
+    const protocol_count = protocols.len;
+
+    return struct {
+        send_end_buf: [protocol_count]usize,
+        send_end: zio.Channel(usize),
+
+        sub_channels: [protocol_count]SubChannel,
+
+        writer: *Io.Writer,
+        reader: *Io.Reader,
+
+        send_buff_collect_buff: [protocol_count][]const u8,
+        send_buff_collect: std.ArrayList([]const u8),
+
+        send_id_collect_buff: [protocol_count]usize,
+        send_id_collect: std.ArrayList(usize),
+
+        reader_handle: zio.JoinHandle(anyerror!void),
+        writer_handle: zio.JoinHandle(anyerror!void),
+
+        pub fn init(self: *@This(), gpa: std.mem.Allocator, writer: *Io.Writer, reader: *Io.Reader) !void {
+            self.send_end = .init(self.send_end_buf[0..]);
+
+            for (0..protocol_count) |id| {
+                try self.sub_channels[id].init(gpa, id, protocols[id].max_massage_size, &self.send_end);
+            }
+
+            self.writer = writer;
+            self.reader = reader;
+            self.send_buff_collect = .initBuffer(self.send_buff_collect_buff[0..]);
+            self.send_id_collect = .initBuffer(self.send_id_collect_buff[0..]);
+
+            self.send_buff_collect.clearRetainingCapacity();
+            self.send_id_collect.clearRetainingCapacity();
+
+            self.reader_handle = try zio.spawn(reader_loop, .{self});
+            self.writer_handle = try zio.spawn(writer_loop, .{self});
+        }
+
+        pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
+            for (0..protocols.len) |id| {
+                self.sub_channels[id].deinit(gpa);
+            }
+
+            self.reader_handle.cancel();
+            self.writer_handle.cancel();
+        }
+
+        pub fn run(
+            self: *@This(),
+            comptime role: Role,
+            ctxs: anytype,
+        ) !void {
+            var group: zio.Group = .init;
+            inline for (0..protocol_count) |id| {
+                const curr = protocols[id];
+                const S = struct {
+                    const Ctx = if (role == .client) curr.client_ct else curr.server_ct;
+                    pub fn foo(ctx: *Ctx, channel: *SubChannel) !void {
+                        try curr.runner.symmetric_run(role, ctx, channel, curr.enter, curr.recv_timeout_ms);
+                    }
+                };
+                try group.spawn(S.foo, .{ ctxs[id], &self.sub_channels[id] });
+            }
+            try group.wait();
+        }
+
+        //[protocol_id u8][payload_len u16 BE][payload ...]
+        pub fn reader_loop(self: *@This()) anyerror!void {
+            while (true) {
+                //TODO: add more check
+                const protocol_id: usize = @intCast(try self.reader.takeByte());
+                const payload_len: usize = @intCast(try self.reader.takeInt(u16, .big));
+                const current = &self.sub_channels[protocol_id];
+                try current.recv_start.receive();
+                current.len = payload_len;
+                const payload = try self.reader.take(payload_len);
+                @memcpy(current.recv_buff[0..payload_len], payload);
+                try current.recv_end.send({});
+            }
+        }
+
+        pub fn writer_loop(self: *@This()) anyerror!void {
+            while (true) {
+                self.send_buff_collect.clearRetainingCapacity();
+                self.send_id_collect.clearRetainingCapacity();
+                {
+                    const id = try self.send_end.receive();
+                    const curr = self.sub_channels[id];
+                    self.send_buff_collect.appendAssumeCapacity(curr.send_buff[0..curr.len]);
+                    self.send_id_collect.appendAssumeCapacity(id);
+                }
+
+                while (self.send_end.tryReceive()) |id| {
+                    const curr = self.sub_channels[id];
+                    self.send_buff_collect.appendAssumeCapacity(curr.send_buff[0..curr.len]);
+                    self.send_id_collect.appendAssumeCapacity(id);
+                } else |_| {}
+
+                for (self.send_id_collect.items) |id| {
+                    try self.sub_channels[id].send_start.send({});
+                }
+
+                try self.writer.writeVecAll(self.send_buff_collect.items);
+                try self.writer.flush();
             }
         }
     };
@@ -429,4 +635,101 @@ test "tls channel: symmetric_run over encrypted channel" {
 
     try group.wait();
     try testing.expectEqual(client_counter, 1000);
+}
+
+test "mux test" {
+    const testing = std.testing;
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const allocator = testing.allocator;
+
+    const P1 = CreateTestProtocol("p1", Exit);
+    const R1 = Runner(P1.A);
+
+    const P2 = CreateTestProtocol("p2", Exit);
+    const R2 = Runner(P2.A);
+
+    var client_context: i32 = 0;
+    var server_context: i32 = 0;
+
+    var client_context1: i32 = 0;
+    var server_context1: i32 = 0;
+
+    const protocol1: Protocol = .{
+        .enter = P1.A,
+        .runner = R1,
+        .client_ct = i32,
+        .server_ct = i32,
+        .max_massage_size = 1024,
+        .recv_timeout_ms = null,
+    };
+
+    const protocol2: Protocol = .{
+        .enter = P2.A,
+        .runner = R2,
+        .client_ct = i32,
+        .server_ct = i32,
+        .max_massage_size = 1024,
+        .recv_timeout_ms = null,
+    };
+
+    const TmpMux = Mux(&.{
+        protocol1,
+        protocol2,
+    });
+
+    const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try localhost.listen(.{});
+    defer server.close();
+
+    const S = struct {
+        fn clientFn(
+            server_address: zio.net.Address,
+            gpa: std.mem.Allocator,
+            ctxs: struct { *i32, *i32 },
+        ) !void {
+            var stream = try server_address.connect(.{});
+            defer stream.close();
+
+            const rbuff = try gpa.alloc(u8, 1024);
+            defer gpa.free(rbuff);
+            const wbuff = try gpa.alloc(u8, 1024);
+            defer gpa.free(wbuff);
+
+            var stream_reader = stream.reader(rbuff);
+            var stream_writer = stream.writer(wbuff);
+
+            var mux: TmpMux = undefined;
+            try mux.init(gpa, &stream_writer.interface, &stream_reader.interface);
+            defer mux.deinit(gpa);
+
+            try mux.run(.client, ctxs);
+        }
+    };
+
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(S.clientFn, .{ server.socket.address, allocator, .{ &client_context, &client_context1 } });
+
+    var stream = try server.accept(.{});
+    defer stream.close();
+
+    const rbuff = try allocator.alloc(u8, 1024);
+    defer allocator.free(rbuff);
+    const wbuff = try allocator.alloc(u8, 1024);
+    defer allocator.free(wbuff);
+
+    var stream_reader = stream.reader(rbuff);
+    var stream_writer = stream.writer(wbuff);
+
+    var mux: TmpMux = undefined;
+    try mux.init(allocator, &stream_writer.interface, &stream_reader.interface);
+    defer mux.deinit(allocator);
+
+    try mux.run(.server, .{ &server_context, &server_context1 });
+
+    // 服务端跑完时客户端可能还在收 C 阶段的剩余消息,必须等客户端完成再断言。
+    try group.wait();
+    try testing.expectEqual(client_context, 1000);
+    try testing.expectEqual(client_context1, 1000);
 }
