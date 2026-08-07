@@ -306,8 +306,8 @@ pub fn Mux(comptime protocols: []const Protocol) type {
         //[protocol_id u8][payload_len u16 BE][payload ...]
         pub fn reader_loop(self: *@This()) anyerror!void {
             while (true) {
-                //TODO: add more check
                 const protocol_id: usize = @intCast(try self.reader.takeByte());
+                if (protocol_id >= protocol_count) return error.ProtocolIdTooLarge;
                 const payload_len: usize = @intCast(try self.reader.takeInt(u16, .big));
                 const current = &self.sub_channels[protocol_id];
                 try current.recv_start.receive();
