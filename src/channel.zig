@@ -170,10 +170,10 @@ pub const InMemoryChannel = struct {
 /// 每个方向有独立的计数器，从 0 开始。
 ///
 /// 并发契约：
-///  - 发送路径（send/recordWrite）与接收路径（recv/recordRead）状态完全独立
+///  - 发送路径（send）与接收路径（recv/recordRead）状态完全独立
 ///    （各自的缓冲区与计数器），可在不同 fiber 上并发执行；
 ///  - 多个发送不得并发——`write_counter` 与编码缓冲由调用方串行化
-///    （Mux 通过 `write_mu` 保证，`symmetric_run` 单 fiber 天然满足）。
+///    （`symmetric_run` 单 fiber 天然满足）。
 pub const TlsChannel = struct {
     /// 借用——调用方拥有 StreamChannel，必须在 TlsChannel 之后 deinit 它。
     inner: *StreamChannel,
@@ -246,20 +246,6 @@ pub const TlsChannel = struct {
         return try codec.decode(&reader, state_id, T);
     }
 
-    /// 记录模式写入：将一条完整 Mux 帧作为单个记录加密。
-    ///
-    /// 帧体是 `MultiplexChannel` 的整帧（`[seg_count][段...]`），
-    /// 由 Mux 的 writer 打包后整体交给本层。用于通过 `transport()`
-    /// 在 TLS 之上叠加 Mux。
-    pub fn recordWriteFrame(self: *@This(), frame: []const u8) !void {
-        const frame_len = frame.len;
-        std.debug.assert(frame_len <= std.math.maxInt(u16));
-        std.debug.assert(frame_len + 2 <= self.encode_buf.len);
-        std.mem.writeInt(u16, self.encode_buf[0..2], @intCast(frame_len), .big);
-        @memcpy(self.encode_buf[2..][0..frame_len], frame);
-        try self.sealAndSend(self.encode_buf[0 .. 2 + frame_len]);
-    }
-
     /// 记录模式读取：读取一个记录并返回其明文。
     ///
     /// 返回的切片布局为 `[frame_len(2 BE) || frame]`，在下次读取本通道之前有效。
@@ -324,26 +310,6 @@ pub const TlsChannel = struct {
         try sw.flush();
     }
 };
-
-// ─────────────────── Mux 传输适配器 ───────────────────
-
-fn tlsWriteFrame(ctx: *anyopaque, frame: []const u8) anyerror!void {
-    const tc: *TlsChannel = @ptrCast(@alignCast(ctx));
-    try tc.recordWriteFrame(frame);
-}
-
-fn tlsReadFrame(ctx: *anyopaque) anyerror![]const u8 {
-    const tc: *TlsChannel = @ptrCast(@alignCast(ctx));
-    const plain = try tc.recordRead();
-    const frame_len = std.mem.readInt(u16, plain[0..2], .big);
-    if (plain.len != frame_len + 2) return error.BadLength;
-    return plain[2..][0..frame_len];
-}
-
-fn tlsShutdownReceive(ctx: *anyopaque) void {
-    const tc: *TlsChannel = @ptrCast(@alignCast(ctx));
-    tc.inner.stream.socket.shutdown(.receive) catch {};
-}
 
 // ─────────────────── 记录层错误路径测试 ───────────────────
 
