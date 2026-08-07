@@ -260,7 +260,7 @@ pub fn Mux(comptime protocols: []const Protocol) type {
             self.send_end = .init(self.send_end_buf[0..]);
 
             for (0..protocol_count) |id| {
-                try self.sub_channels[id].init(gpa, id, protocols[id].max_massage_size, &self.send_end);
+                try self.sub_channels[id].init(gpa, id, protocols[id].max_massage_size + 3, &self.send_end);
             }
 
             self.writer = writer;
