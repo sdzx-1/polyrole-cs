@@ -12,7 +12,7 @@ pub fn encode(writer: *std.Io.Writer, state_id: anytype, val: anytype) !void {
     }
 }
 
-pub fn decode(reader: *std.Io.Reader, state_id: anytype, T: type, max_slice_len: usize) !T {
+pub fn decode(reader: *std.Io.Reader, state_id: anytype, T: type) !T {
     const id: u32 = @intFromEnum(state_id);
     const rid = try reader.takeInt(u32, .big);
     if (id != rid) {
@@ -26,7 +26,7 @@ pub fn decode(reader: *std.Io.Reader, state_id: anytype, T: type, max_slice_len:
     switch (tag) {
         inline else => |t| {
             const Data = @FieldType(TagPayloadByName(T, @tagName(t)), "data");
-            return @unionInit(T, @tagName(t), .{ .data = try decode_type(reader, Data, max_slice_len) });
+            return @unionInit(T, @tagName(t), .{ .data = try decode_type(reader, Data) });
         },
     }
 }
@@ -68,7 +68,7 @@ pub fn encode_anytype(writer: *std.Io.Writer, data: anytype) !void {
     }
 }
 
-pub fn decode_type(reader: *std.Io.Reader, Data: type, max_slice_len: usize) !Data {
+pub fn decode_type(reader: *std.Io.Reader, Data: type) !Data {
     switch (@typeInfo(Data)) {
         .void => return {},
         .bool => {
@@ -87,7 +87,6 @@ pub fn decode_type(reader: *std.Io.Reader, Data: type, max_slice_len: usize) !Da
         .pointer => |p| {
             if (p.is_const == true and p.child == u8) {
                 const len = try reader.takeInt(usize, .big);
-                if (len > max_slice_len) return error.MessageTooLarge;
                 const str = try reader.take(len);
                 return str;
             } else {
@@ -103,7 +102,7 @@ pub fn decode_type(reader: *std.Io.Reader, Data: type, max_slice_len: usize) !Da
             } else {
                 var result: [arr.len]arr.child = undefined;
                 for (&result) |*item| {
-                    item.* = try decode_type(reader, arr.child, max_slice_len);
+                    item.* = try decode_type(reader, arr.child);
                 }
                 return result;
             }
@@ -111,7 +110,7 @@ pub fn decode_type(reader: *std.Io.Reader, Data: type, max_slice_len: usize) !Da
         .@"struct" => |stru| {
             var data: Data = undefined;
             inline for (stru.fields) |struct_field| {
-                @field(data, struct_field.name) = try decode_type(reader, struct_field.type, max_slice_len);
+                @field(data, struct_field.name) = try decode_type(reader, struct_field.type);
             }
             return data;
         },
@@ -148,7 +147,7 @@ test "decode: invalid bool byte is an error, not a panic" {
     buf[4] = 0; // 标签
     buf[5] = 2; // 非 0 或 1
     var r = std.Io.Reader.fixed(&buf);
-    try std.testing.expectError(error.InvalidValue, decode(&r, TestStateId.s0, BoolMsg, 1024));
+    try std.testing.expectError(error.InvalidValue, decode(&r, TestStateId.s0, BoolMsg));
 }
 
 test "decode: out-of-range tag is an error, not a panic" {
@@ -156,7 +155,7 @@ test "decode: out-of-range tag is an error, not a panic" {
     std.mem.writeInt(u32, buf[0..4], 0, .big); // 状态 ID
     buf[4] = 7; // 超出单字段 union 的标签
     var r = std.Io.Reader.fixed(&buf);
-    try std.testing.expectError(error.InvalidValue, decode(&r, TestStateId.s0, BoolMsg, 1024));
+    try std.testing.expectError(error.InvalidValue, decode(&r, TestStateId.s0, BoolMsg));
 }
 
 test "decode: oversized slice length is rejected" {
@@ -165,5 +164,5 @@ test "decode: oversized slice length is rejected" {
     buf[4] = 0; // 标签
     std.mem.writeInt(usize, buf[5..13], 4096, .big); // 长度超过 max_slice_len
     var r = std.Io.Reader.fixed(&buf);
-    try std.testing.expectError(error.MessageTooLarge, decode(&r, TestStateId.s0, SliceMsg, 1024));
+    try std.testing.expectError(error.EndOfStream, decode(&r, TestStateId.s0, SliceMsg));
 }

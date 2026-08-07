@@ -45,7 +45,7 @@ pub const StreamChannel = struct {
     }
 
     pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
-        const res = try codec.decode(&self.stream_reader.interface, state_id, T, self.max_slice_len);
+        const res = try codec.decode(&self.stream_reader.interface, state_id, T);
         return res;
     }
 };
@@ -152,7 +152,7 @@ pub const InMemoryChannel = struct {
         @memcpy(self.half_self.recv_buff[0..len], self.half_peer.send_buff[0..len]);
         try self.half_peer.send_start.send({});
         var reader = Io.Reader.fixed(self.half_self.recv_buff[0..len]);
-        const res = try codec.decode(&reader, state_id, T, self.max_slice_len);
+        const res = try codec.decode(&reader, state_id, T);
         return res;
     }
 };
@@ -243,7 +243,7 @@ pub const TlsChannel = struct {
         const plain = try self.recordRead();
         const msg_len = std.mem.readInt(u16, plain[0..2], .big);
         var reader = Io.Reader.fixed(plain[2..][0..msg_len]);
-        return try codec.decode(&reader, state_id, T, self.decode_buf.len);
+        return try codec.decode(&reader, state_id, T);
     }
 
     /// 记录模式写入：将一条完整 Mux 帧作为单个记录加密。

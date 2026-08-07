@@ -221,19 +221,8 @@ pub const SubChannel = struct {
         try codec.encode(&writer, state_id, val);
         self.len = writer.buffered().len;
         const payload_len: u16 = @intCast(self.len - 3); //payload_len = 总长度 - id(1) - payload_len(2)
-        const bytes: [2]u8 = @bitCast(payload_len);
         //payload_len 传输时使用大端序, 需要判断本机的端序
-        switch (builtin.cpu.arch.endian()) {
-            .big => {
-                self.send_buff[1] = bytes[0];
-                self.send_buff[2] = bytes[1];
-            },
-            .little => {
-                self.send_buff[1] = bytes[1];
-                self.send_buff[2] = bytes[0];
-            },
-        }
-
+        std.mem.writeInt(u16, self.send_buff[1..3], payload_len, .big);
         try self.send_end.send(self.id);
     }
 
@@ -241,8 +230,7 @@ pub const SubChannel = struct {
         try self.recv_start.send({});
         try self.recv_end.receive();
         var reader = Io.Reader.fixed(self.recv_buff[0..self.len]);
-        //TODO: fix 4096
-        const res = try codec.decode(&reader, state_id, T, 4096);
+        const res = try codec.decode(&reader, state_id, T);
         return res;
     }
 };
