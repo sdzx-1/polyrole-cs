@@ -247,11 +247,10 @@ pub fn Mux(comptime protocols: []const Protocol) type {
         writer: *Io.Writer,
         reader: *Io.Reader,
 
-        send_buff_collect_buff: [protocol_count][]const u8,
-        send_buff_collect: std.ArrayList([]const u8),
-
         send_id_collect_buff: [protocol_count]usize,
         send_id_collect: std.ArrayList(usize),
+
+        send_buf: []u8,
 
         reader_handle: zio.JoinHandle(anyerror!void),
         writer_handle: zio.JoinHandle(anyerror!void),
@@ -259,16 +258,18 @@ pub fn Mux(comptime protocols: []const Protocol) type {
         pub fn init(self: *@This(), gpa: std.mem.Allocator, writer: *Io.Writer, reader: *Io.Reader) !void {
             self.send_end = .init(self.send_end_buf[0..]);
 
+            var total: usize = 0;
             for (0..protocol_count) |id| {
-                try self.sub_channels[id].init(gpa, id, protocols[id].max_massage_size + 3, &self.send_end);
+                const buff_size = protocols[id].max_massage_size + 3;
+                try self.sub_channels[id].init(gpa, id, buff_size, &self.send_end);
+                total += buff_size;
             }
+
+            self.send_buf = try gpa.alloc(u8, total);
 
             self.writer = writer;
             self.reader = reader;
-            self.send_buff_collect = .initBuffer(self.send_buff_collect_buff[0..]);
             self.send_id_collect = .initBuffer(self.send_id_collect_buff[0..]);
-
-            self.send_buff_collect.clearRetainingCapacity();
             self.send_id_collect.clearRetainingCapacity();
 
             self.reader_handle = try zio.spawn(reader_loop, .{self});
@@ -279,6 +280,7 @@ pub fn Mux(comptime protocols: []const Protocol) type {
             for (0..protocols.len) |id| {
                 self.sub_channels[id].deinit(gpa);
             }
+            gpa.free(self.send_buf);
 
             self.reader_handle.cancel();
             self.writer_handle.cancel();
@@ -322,26 +324,30 @@ pub fn Mux(comptime protocols: []const Protocol) type {
 
         pub fn writer_loop(self: *@This()) anyerror!void {
             while (true) {
-                self.send_buff_collect.clearRetainingCapacity();
                 self.send_id_collect.clearRetainingCapacity();
                 {
                     const id = try self.send_end.receive();
-                    const curr = self.sub_channels[id];
-                    self.send_buff_collect.appendAssumeCapacity(curr.send_buff[0..curr.len]);
                     self.send_id_collect.appendAssumeCapacity(id);
                 }
 
                 while (self.send_end.tryReceive()) |id| {
-                    const curr = self.sub_channels[id];
-                    self.send_buff_collect.appendAssumeCapacity(curr.send_buff[0..curr.len]);
                     self.send_id_collect.appendAssumeCapacity(id);
-                } else |_| {}
-
-                for (self.send_id_collect.items) |id| {
-                    try self.sub_channels[id].send_start.send({});
+                } else |err| {
+                    switch (err) {
+                        error.ChannelEmpty => {},
+                        error.ChannelClosed => return err,
+                    }
                 }
 
-                try self.writer.writeVecAll(self.send_buff_collect.items);
+                var pos: usize = 0;
+                for (self.send_id_collect.items) |id| {
+                    const curr = &self.sub_channels[id];
+                    const len = curr.len;
+                    @memcpy(self.send_buf[pos .. pos + len], curr.send_buff[0..len]);
+                    pos += len;
+                    try curr.send_start.send({});
+                }
+                try self.writer.writeAll(self.send_buf[0..pos]);
                 try self.writer.flush();
             }
         }
