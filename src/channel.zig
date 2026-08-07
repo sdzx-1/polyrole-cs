@@ -3,7 +3,6 @@ const Io = std.Io;
 const codec = @import("codec.zig");
 const crypto = std.crypto;
 const zio = @import("zio");
-const family_mux = @import("family_mux_channel.zig");
 const Stream = zio.net.Stream;
 
 /// 流通道
@@ -298,25 +297,6 @@ pub const TlsChannel = struct {
         self.read_counter += 1;
 
         return self.decode_buf[0 .. 2 + msg_len];
-    }
-
-    /// 将已建立的加密会话暴露为 Mux 传输层。
-    ///
-    /// `MultiplexChannel` 直接叠在 TLS 记录层之上：
-    /// 每条 mux 帧作为一条被认证的记录传输，因此整个协议族
-    /// 共享一次握手和一套密钥。
-    ///
-    /// 返回的传输层不拥有流；调用方保留对 TlsChannel 及其底层
-    /// StreamChannel 的所有权。
-    pub fn transport(self: *@This()) family_mux.Transport {
-        return .{
-            .context = self,
-            .stream = self.inner.stream,
-            .owns_stream = false,
-            .writeFrame = tlsWriteFrame,
-            .readFrame = tlsReadFrame,
-            .shutdownReceive = tlsShutdownReceive,
-        };
     }
 
     /// 原子性地推进计数器并发送一条 AEAD 记录。
@@ -639,8 +619,8 @@ test "smc: server sends first - client never receives its own message" {
         }
     };
 
-    var t1 = try rt.spawn(Side.serverFirst, .{ &ch_s });
-    var t2 = try rt.spawn(Side.clientLater, .{ &ch_c });
+    var t1 = try rt.spawn(Side.serverFirst, .{&ch_s});
+    var t2 = try rt.spawn(Side.clientLater, .{&ch_c});
     try t1.join();
     try t2.join();
 }
