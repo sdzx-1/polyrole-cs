@@ -8,19 +8,21 @@ Simple TLS 是一个基于 polyrole-cs 状态机框架实现的轻量级握手�
 
 - **三消息握手**：`ClientHello → ServerHello → ClientFinished → Exit`，无数据阶段。
 - **前向安全**：通过 ephemeral-ephemeral X25519 ECDH 实现，会话密钥不可回溯。
-- **双向身份认证**：Ed25519 签名证明身份，HMAC 证明正确的 `shared_secret` 派生。
+- **Server 单向身份认证**：Server 用 Ed25519 签名证明身份（HTTPS 模型，Client 匿名）；双方 HMAC 证明正确的 `shared_secret` 派生。
 - **Transcript 链式哈希**：每一步都包含前一步的哈希，防止截断、重排和中间人插入。
 
 ---
 
 ## 2. 前置条件
 
-双方通过 **带外方式** 已知对方的 Ed25519 公钥（等同于 TLS 中预共享的信任锚）：
+Client 通过**带外方式**已知 Server 的 Ed25519 公钥（等同于 TLS 中预共享的信任锚，
+或证书固定）。Server **无需知道** Client 的任何身份信息——本协议是单向认证
+（HTTPS 模型）：Server 服务任意客户端，客户端负责认证 Server。
 
 | 角色   | 持有                           |
 |--------|--------------------------------|
-| Client | `client_keypair` + `server_public_key` |
-| Server | `server_keypair` + `client_public_key` |
+| Client | `server_public_key` |
+| Server | `server_keypair` |
 
 不需要证书交换或 PKI。
 
@@ -208,11 +210,12 @@ Client                                     Server
 
 ### 5.3 第三步 — ClientFinished（Client → Server）
 
-Client 完成签名、MAC 和最终密钥派生，握手结束。
+Client 完成 MAC 计算和最终密钥派生，握手结束。**不携带身份签名**——Client 是匿名的，
+Server 不需要 Client 公钥（单向认证）。
 
 **执行者**：Client（`process`）
 
-**Payload**：`{ signature: [64]u8, mac: [32]u8 }`
+**Payload**：`{ mac: [32]u8 }`
 
 **唯一转移**：`close: Data(ClientFinishedPayload, Exit)` — 握手后直接退出，无数据状态。
 
@@ -227,18 +230,14 @@ const t1 = sha256(own_nonce ++ own_epk ++ peer_nonce ++ peer_epk);
 const t2 = sha256(t1 ++ peer_signature);    // peer_signature 来自 ServerHello
 const t3 = sha256(t2 ++ peer_mac);          // peer_mac 来自 ServerHello
 
-// 3. 签名 t3
-const signature = try sign(client_id_keypair, t3);
+// 3. MAC 绑定完整 transcript
+const mac = hmacSha256(handshake_key, "client_fin", t3);
 
-// 4. t4 → MAC
-const t4 = sha256(t3 ++ signature);
-const mac = hmacSha256(handshake_key, "client_fin", t4);
-
-// 5. 保存应用密钥，供 TlsChannel 使用
+// 4. 保存应用密钥，供 TlsChannel 使用
 ctx.write_key = keys.client_write_key;
 ctx.read_key = keys.server_write_key;
 
-return .{ .close = .{ .data = .{ .signature = signature, .mac = mac } } };
+return .{ .close = .{ .data = .{ .mac = mac } } };
 ```
 
 **Transcript 构造**：
@@ -247,19 +246,14 @@ return .{ .close = .{ .data = .{ .signature = signature, .mac = mac } } };
 t3 = SHA256(t2 || mac_s)
      └── 绑定 Server 的 MAC，证明 Server 的 Finished 消息是真实的
 
-sig_c = Ed25519.Sign(client_id_sk, t3)
-     └── 证明 Client 持有 client_id_sk（身份认证）
-
-t4 = SHA256(t3 || sig_c)
-
-mac_c = HMAC-SHA256(handshake_key, "client_fin" || t4)
-     └── 证明 Client 计算出了正确的 shared_secret
+mac_c = HMAC-SHA256(handshake_key, "client_fin" || t3)
+     └── 证明 Client 计算出了正确的 shared_secret（会话持有证明，非身份）
      └── 标签 "client_fin" 与 server_fin 不同，防止域混淆
 ```
 
 #### preprocess（Server 端）
 
-Server 验证 Client 的签名和 MAC，然后派生应用密钥：
+Server 验证 Client 的 MAC，然后派生应用密钥（无需 Client 公钥）：
 
 ```zig
 // 1. 重建 transcript 链
@@ -267,14 +261,10 @@ const t1 = sha256(peer_nonce ++ peer_epk ++ own_nonce ++ own_epk);
 const t2 = sha256(t1 ++ own_signature);     // ServerHello 中保存的 own_signature
 const t3 = sha256(t2 ++ own_mac);           // ServerHello 中保存的 own_mac
 
-// 2. 验证 Client 签名
-try verifySignature(signature, t3, client_id_pk);
+// 2. 验证 MAC（t3 已被 Server 签名覆盖，MAC 通过即证明 Client 持有 shared_secret）
+try verifyHmac(handshake_key, "client_fin", t3, mac);
 
-// 3. t4 → 验证 MAC
-const t4 = sha256(t3 ++ signature);
-try verifyHmac(handshake_key, "client_fin", t4, mac);
-
-// 4. 派生应用密钥
+// 3. 派生应用密钥
 const keys = types.deriveKeys(shared_secret);
 ctx.read_key = keys.client_write_key;
 ctx.write_key = keys.server_write_key;
@@ -285,17 +275,7 @@ ctx.write_key = keys.server_write_key;
 ```
 Client                                     Server
   │                                          │
-  │  sig_c, mac_c                            │
-  ├─────────────────────────────────────────▶│
-  │                                          │
-  │                                          │ 1. 重建 t1,t2,t3
-  return .close → Exit                       │ 2. 验证 sig_c
-                                             │ 3. 重建 t4, 验证 mac_c
-                                             │ 4. 派生 read/write key
-```
-
----
-
+  │  mac_c                                   │
 ## 6. 密钥派生 (HKDF-SHA256)
 
 使用 RFC 5869 两阶段模式，从 `shared_secret` 派生三把独立密钥：
@@ -390,8 +370,8 @@ mac_c = HMAC(hk, "client_fin" || t4)
 
 | 属性 | 实现机制 |
 |------|---------|
-| **Client 身份认证** | Ed25519 签名 `sig_c` 绑定 `t3`（包含 `mac_s`），间接证明 Client 也计算出了正确的 `shared_secret` |
 | **Server 身份认证** | Ed25519 签名 `sig_s` 绑定 `t1`（包含双方 nonce），证明 Server 控制 `server_id_sk` |
+| **Client 会话持有证明** | `ClientFinished` 的 HMAC 绑定完整 transcript（含 `mac_s`），证明 Client 也计算出了正确的 `shared_secret` |
 | **前向安全 (PFS)** | `shared_secret = X25519(esk_c, esk_s)`。临时密钥在握手后不可恢复（内存由调用方管理） |
 | **密钥机密性** | `shared_secret` 从未在网络上传输，由各自独立计算 |
 | **防重放** | 每次会话生成新的 CSPRNG nonce，杜绝跨会话重放 |
@@ -403,8 +383,9 @@ mac_c = HMAC(hk, "client_fin" || t4)
 
 | 属性 | 说明 |
 |------|------|
+| **Client 身份认证** | Client 是匿名的——Server 不验证 Client 身份（单向认证）。任何能完成握手的一方都是合法会话方；若需要认证 Client，须在应用层实现 |
 | **后妥协安全 (PCS)** | 身份密钥泄露后，攻击者可冒充该身份发起未来会话（但不解密历史会话） |
-| **证书/信任链** | 双方公钥通过带外方式预共享，无 PKI |
+| **证书/信任链** | Server 公钥通过带外方式预共享，无 PKI |
 
 ---
 

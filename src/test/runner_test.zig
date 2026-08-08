@@ -211,10 +211,7 @@ test "tls channel: symmetric_run over encrypted channel" {
 
     var kp_seed: [crypto.sign.Ed25519.KeyPair.seed_length]u8 = undefined;
     try zio.randomSecure(&kp_seed);
-    const kp_c = try crypto.sign.Ed25519.KeyPair.generateDeterministic(kp_seed);
-    try zio.randomSecure(&kp_seed);
     const kp_s = try crypto.sign.Ed25519.KeyPair.generateDeterministic(kp_seed);
-
 
     const P = CreateTestProtocol("tls_proto", Exit);
     const R_pp = Runner(P.A);
@@ -230,7 +227,6 @@ test "tls channel: symmetric_run over encrypted channel" {
     const ClientTask = struct {
         fn run(
             addr: zio.net.Address,
-            kp: crypto.sign.Ed25519.KeyPair,
             peer_pk: crypto.sign.Ed25519.PublicKey,
             counter: *i32,
         ) !void {
@@ -238,7 +234,7 @@ test "tls channel: symmetric_run over encrypted channel" {
             defer stream.close();
 
             // 阶段 1：TLS 握手
-            var tls_ctx = tls.ClientContext.init(kp, peer_pk);
+            var tls_ctx = tls.ClientContext.init(peer_pk);
 
             var sc: StreamChannel = undefined;
             try sc.init(allocator, stream, 256, 256, 4096);
@@ -261,7 +257,6 @@ test "tls channel: symmetric_run over encrypted channel" {
     defer group.cancel();
     try group.spawn(ClientTask.run, .{
         listener.socket.address,
-        kp_c,
         kp_s.public_key,
         &client_counter,
     });
@@ -270,7 +265,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     defer stream.close();
 
     // 阶段 1：TLS 握手
-    var tls_ctx = tls.ServerContext.init(kp_s, kp_c.public_key);
+    var tls_ctx = tls.ServerContext.init(kp_s);
     var sc: StreamChannel = undefined;
     try sc.init(allocator, stream, 256, 256, 4096);
     defer sc.deinit(allocator);
@@ -390,8 +385,6 @@ test "mux test encrypted" {
 
     var kp_seed: [crypto.sign.Ed25519.KeyPair.seed_length]u8 = undefined;
     try zio.randomSecure(&kp_seed);
-    const kp_c = try crypto.sign.Ed25519.KeyPair.generateDeterministic(kp_seed);
-    try zio.randomSecure(&kp_seed);
     const kp_s = try crypto.sign.Ed25519.KeyPair.generateDeterministic(kp_seed);
 
     const R_tls = Runner(tls.ClientHello);
@@ -440,7 +433,6 @@ test "mux test encrypted" {
             server_address: zio.net.Address,
             gpa: std.mem.Allocator,
             ctxs: struct { *i32, *i32 },
-            kp: crypto.sign.Ed25519.KeyPair,
             peer_pk: crypto.sign.Ed25519.PublicKey,
         ) !void {
             var stream = try server_address.connect(.{});
@@ -451,7 +443,7 @@ test "mux test encrypted" {
             defer sc.deinit(gpa);
 
             // 阶段 1：TLS 握手
-            var tls_ctx = tls.ClientContext.init(kp, peer_pk);
+            var tls_ctx = tls.ClientContext.init(peer_pk);
             try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello, null);
 
             // 阶段 2：加密 Mux——复用 sc，密钥来自握手
@@ -470,7 +462,6 @@ test "mux test encrypted" {
         server.socket.address,
         allocator,
         .{ &client_context, &client_context1 },
-        kp_c,
         kp_s.public_key,
     });
 
@@ -482,7 +473,7 @@ test "mux test encrypted" {
     defer sc.deinit(allocator);
 
     // 阶段 1：TLS 握手
-    var tls_ctx = tls.ServerContext.init(kp_s, kp_c.public_key);
+    var tls_ctx = tls.ServerContext.init(kp_s);
     try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello, null);
 
     // 阶段 2：加密 Mux——复用 sc，密钥来自握手

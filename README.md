@@ -331,13 +331,13 @@ pub fn process(ctx: *Ctx) !@This() {
 
 项目包含一个自定的简易加密握手实现，展示了 polyrole-cs 的完整用法。
 
-**前提**：Client 和 Server 已通过带外方式互知对方的 Ed25519 公钥——无需证书交换或 PKI。双方各自持有自己的身份密钥对，并信任对方的公钥。
+**前提**：Client 预先知道（带外/信任锚/证书固定）Server 的 Ed25519 公钥；Server **无需知道** Client 的身份——单向认证（HTTPS 模型），Server 可同时服务任意数量的客户端。
 
-**握手流程**：三条消息完成密钥协商和双向认证，不包含数据阶段。
+**握手流程**：三条消息完成密钥协商和 Server 认证，不包含数据阶段。
 
 - `ClientHello → ServerHello → ClientFinished → Exit`
 - X25519 临时密钥协商（ephemeral-ephemeral，提供前向安全）
-- Ed25519 身份签名 + HMAC 双向认证
+- Server 的 Ed25519 身份签名 + 双方 HMAC（ClientFinished 为会话持有证明，不携带 Client 身份）
 - Transcript 链式 SHA256 哈希防篡改
 - HKDF-SHA256 派生三把独立密钥
 
@@ -346,10 +346,10 @@ pub fn process(ctx: *Ctx) !@This() {
 ```zig
 const tls = polyrole.tls;
 
-// client_kp / server_pk 为 Client 持有的密钥对和 Server 公钥
-// server_kp / client_pk 为 Server 持有的密钥对和 Client 公钥
-var client_ctx = tls.ClientContext.init(client_kp, server_pk);
-var server_ctx = tls.ServerContext.init(server_kp, client_pk);
+// server_pk 为 Client 预置的 Server 公钥
+// server_kp 为 Server 持有的身份密钥对（Client 公钥不再需要）
+var client_ctx = tls.ClientContext.init(server_pk);
+var server_ctx = tls.ServerContext.init(server_kp);
 
 const R = polyrole.runner.Runner(tls.ClientHello);
 try R.simulate(&client_ctx, &server_ctx, tls.ClientHello);

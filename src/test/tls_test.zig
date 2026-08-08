@@ -30,10 +30,9 @@ test "hkdf" {
 
 // 纯握手：客户端和服务端完成三次握手后正常退出
 test "simulate handshake only" {
-    const kp_c = try ed25519KeyPair();
     const kp_s = try ed25519KeyPair();
-    var client = types.ClientContext.init(kp_c, kp_s.public_key);
-    var server = types.ServerContext.init(kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(kp_s.public_key);
+    var server = types.ServerContext.init(kp_s);
 
     const R = Runner(tls.ClientHello);
     try R.simulate(&client, &server, tls.ClientHello);
@@ -49,10 +48,9 @@ test "symmetric run handshake" {
     defer rt.deinit();
     const allocator = testing.allocator;
 
-    const kp_c = try ed25519KeyPair();
     const kp_s = try ed25519KeyPair();
-    var client = types.ClientContext.init(kp_c, kp_s.public_key);
-    var server = types.ServerContext.init(kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(kp_s.public_key);
+    var server = types.ServerContext.init(kp_s);
 
     const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var listener = try localhost.listen(.{});
@@ -93,10 +91,9 @@ test "symmetric run handshake" {
 // 篡改服务端签名：客户端验证 ServerHello 签名时应返回 SignatureInvalid
 test "handshake: tampered server signature → SignatureInvalid" {
     const testing = std.testing;
-    const kp_c = try ed25519KeyPair();
     const kp_s = try ed25519KeyPair();
-    var client = types.ClientContext.init(kp_c, kp_s.public_key);
-    var server = types.ServerContext.init(kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(kp_s.public_key);
+    var server = types.ServerContext.init(kp_s);
 
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
@@ -111,10 +108,9 @@ test "handshake: tampered server signature → SignatureInvalid" {
 // 篡改服务端 MAC：签名正确但 HMAC 不匹配，应返回 HmacInvalid
 test "handshake: tampered server MAC → HmacInvalid" {
     const testing = std.testing;
-    const kp_c = try ed25519KeyPair();
     const kp_s = try ed25519KeyPair();
-    var client = types.ClientContext.init(kp_c, kp_s.public_key);
-    var server = types.ServerContext.init(kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(kp_s.public_key);
+    var server = types.ServerContext.init(kp_s);
 
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
@@ -126,33 +122,12 @@ test "handshake: tampered server MAC → HmacInvalid" {
     try testing.expectError(error.HmacInvalid, err);
 }
 
-// 篡改客户端签名：服务端验证 ClientFinished 签名时应返回 SignatureInvalid
-test "handshake: tampered client signature → SignatureInvalid" {
-    const testing = std.testing;
-    const kp_c = try ed25519KeyPair();
-    const kp_s = try ed25519KeyPair();
-    var client = types.ClientContext.init(kp_c, kp_s.public_key);
-    var server = types.ServerContext.init(kp_s, kp_c.public_key);
-
-    const ch = try tls.ClientHello.process(&client);
-    tls.ClientHello.preprocess(&server, ch);
-    const sh = try tls.ServerHello.process(&server);
-    try tls.ServerHello.preprocess(&client, sh);
-
-    var cf = try tls.ClientFinished.process(&client);
-    cf.close.data.signature = [_]u8{0} ** 64;
-
-    const err = tls.ClientFinished.preprocess(&server, cf);
-    try testing.expectError(error.SignatureInvalid, err);
-}
-
 // 服务端提供全零临时公钥 → X25519 scalarmult 返回错误 → 映射为 DhFailed
 test "handshake: invalid ephemeral public key → DhFailed" {
     const testing = std.testing;
-    const kp_c = try ed25519KeyPair();
     const kp_s = try ed25519KeyPair();
-    var client = types.ClientContext.init(kp_c, kp_s.public_key);
-    var server = types.ServerContext.init(kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(kp_s.public_key);
+    var server = types.ServerContext.init(kp_s);
 
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
@@ -167,10 +142,9 @@ test "handshake: invalid ephemeral public key → DhFailed" {
 // 多会话复用：两轮握手产生不同的 write_key，验证 session 隔离
 test "simulate multiple sessions with same contexts" {
     const testing = std.testing;
-    const kp_c = try ed25519KeyPair();
     const kp_s = try ed25519KeyPair();
-    var client = types.ClientContext.init(kp_c, kp_s.public_key);
-    var server = types.ServerContext.init(kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(kp_s.public_key);
+    var server = types.ServerContext.init(kp_s);
 
     const R = Runner(tls.ClientHello);
 
@@ -190,10 +164,9 @@ test "simulate multiple sessions with same contexts" {
 // 篡改客户端 MAC：客户端签名正确但 HMAC 不匹配，应返回 HmacInvalid
 test "handshake: tampered client MAC → HmacInvalid" {
     const testing = std.testing;
-    const kp_c = try ed25519KeyPair();
     const kp_s = try ed25519KeyPair();
-    var client = types.ClientContext.init(kp_c, kp_s.public_key);
-    var server = types.ServerContext.init(kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(kp_s.public_key);
+    var server = types.ServerContext.init(kp_s);
 
     const ch = try tls.ClientHello.process(&client);
     tls.ClientHello.preprocess(&server, ch);
@@ -207,39 +180,14 @@ test "handshake: tampered client MAC → HmacInvalid" {
     try testing.expectError(error.HmacInvalid, err);
 }
 
-// Client 使用错误身份密钥（非 server 信任的公钥对应的私钥）
-// → server 端 ClientFinished.preprocess 签名验证失败 → SignatureInvalid
-test "handshake: wrong client identity key → SignatureInvalid" {
-    const testing = std.testing;
-    const kp_c = try ed25519KeyPair();
-    const kp_c_rogue = try ed25519KeyPair();
-    const kp_s = try ed25519KeyPair();
-
-    // Server 信任 kp_c，但 client 用 kp_c_rogue 签名
-    var client = types.ClientContext.init(kp_c_rogue, kp_s.public_key);
-    var server = types.ServerContext.init(kp_s, kp_c.public_key);
-
-    const ch = try tls.ClientHello.process(&client);
-    tls.ClientHello.preprocess(&server, ch);
-    const sh = try tls.ServerHello.process(&server);
-    try tls.ServerHello.preprocess(&client, sh);
-
-    const err = tls.ClientFinished.process(&client);
-    // 签名本身不会失败，但 server 验证时用 kp_c.public_key 验证 kp_c_rogue 的签名
-    const cf = try err;
-    const verify_err = tls.ClientFinished.preprocess(&server, cf);
-    try testing.expectError(error.SignatureInvalid, verify_err);
-}
-
 // MITM 替换 Client 临时公钥 → Server 签名基于不同的 t1
 // → Client 重建 t1 不匹配 → SignatureInvalid
 test "handshake: swapped client ephemeral pk → SignatureInvalid" {
     const testing = std.testing;
-    const kp_c = try ed25519KeyPair();
     const kp_s = try ed25519KeyPair();
 
-    var client = types.ClientContext.init(kp_c, kp_s.public_key);
-    var server = types.ServerContext.init(kp_s, kp_c.public_key);
+    var client = types.ClientContext.init(kp_s.public_key);
+    var server = types.ServerContext.init(kp_s);
 
     var ch = try tls.ClientHello.process(&client);
     // MITM 替换临时公钥
@@ -260,14 +208,13 @@ test "handshake: swapped client ephemeral pk → SignatureInvalid" {
 // 将第一次的 ServerHello 重放到第二次 → t1 不匹配 → SignatureInvalid
 test "handshake: replayed ServerHello from previous session → SignatureInvalid" {
     const testing = std.testing;
-    const kp_c = try ed25519KeyPair();
     const kp_s = try ed25519KeyPair();
 
-    var client = types.ClientContext.init(kp_c, kp_s.public_key);
+    var client = types.ClientContext.init(kp_s.public_key);
 
     // Round 1: 生成 ServerHello
     const ch1 = try tls.ClientHello.process(&client);
-    var s1 = types.ServerContext.init(kp_s, kp_c.public_key);
+    var s1 = types.ServerContext.init(kp_s);
     tls.ClientHello.preprocess(&s1, ch1);
     const sh1 = try tls.ServerHello.process(&s1);
     try tls.ServerHello.preprocess(&client, sh1);
@@ -282,15 +229,13 @@ test "handshake: replayed ServerHello from previous session → SignatureInvalid
 test "simulate: two handshakes with different keypairs produce different keys" {
     const testing = std.testing;
 
-    const kp_c1 = try ed25519KeyPair();
     const kp_s1 = try ed25519KeyPair();
-    const kp_c2 = try ed25519KeyPair();
     const kp_s2 = try ed25519KeyPair();
 
-    var c1 = types.ClientContext.init(kp_c1, kp_s1.public_key);
-    var s1 = types.ServerContext.init(kp_s1, kp_c1.public_key);
-    var c2 = types.ClientContext.init(kp_c2, kp_s2.public_key);
-    var s2 = types.ServerContext.init(kp_s2, kp_c2.public_key);
+    var c1 = types.ClientContext.init(kp_s1.public_key);
+    var s1 = types.ServerContext.init(kp_s1);
+    var c2 = types.ClientContext.init(kp_s2.public_key);
+    var s2 = types.ServerContext.init(kp_s2);
 
     const R = Runner(tls.ClientHello);
 

@@ -35,7 +35,6 @@ const ServerHelloPayload = struct {
 };
 
 const ClientFinishedPayload = struct {
-    signature: [64]u8,
     mac: [32]u8,
 };
 
@@ -170,15 +169,12 @@ pub const ClientFinished = union(enum) {
         const t1 = sha256(.{ &ctx.own_nonce, &ctx.own_ephemeral_pk, &ctx.peer_nonce, &ctx.peer_ephemeral_pk });
         const t2 = sha256(.{ &t1, &ctx.peer_signature });
         const t3 = sha256(.{ &t2, &ctx.peer_mac });
-        const signature = try sign(ctx.id_keypair, &t3);
-        const t4 = sha256(.{ &t3, &signature });
-        const mac = hmacSha256(&ctx.handshake_key, "client_fin", &t4);
+        const mac = hmacSha256(&ctx.handshake_key, "client_fin", &t3);
 
         ctx.write_key = keys.client_write_key;
         ctx.read_key = keys.server_write_key;
 
         return .{ .close = .{ .data = .{
-            .signature = signature,
             .mac = mac,
         } } };
     }
@@ -189,9 +185,7 @@ pub const ClientFinished = union(enum) {
         const t1 = sha256(.{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &ctx.own_nonce, &ctx.own_ephemeral_pk });
         const t2 = sha256(.{ &t1, &ctx.own_signature });
         const t3 = sha256(.{ &t2, &ctx.own_mac });
-        try verifySignature(payload.signature, &t3, ctx.peer_id_public);
-        const t4 = sha256(.{ &t3, &payload.signature });
-        try verifyHmac(&ctx.handshake_key, "client_fin", &t4, payload.mac);
+        try verifyHmac(&ctx.handshake_key, "client_fin", &t3, payload.mac);
 
         const keys = types.deriveKeys(ctx.shared_secret);
         ctx.read_key = keys.client_write_key;

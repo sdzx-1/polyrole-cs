@@ -13,7 +13,9 @@ The caller then creates a `TlsChannel` using these keys to encrypt arbitrary
 protocol traffic. The handshake protocol itself has no data phase — it exits
 immediately after key derivation.
 
-Both parties know each other's Ed25519 public key out-of-band. No
+The client knows the server's Ed25519 public key out-of-band (trust anchor /
+certificate pinning); the server authenticates itself but does not know the
+client — server-authenticated (HTTPS-style) one-way authentication. No
 certificate exchange.
 
 ## State Machine
@@ -226,8 +228,8 @@ to `TlsChannel`, not the handshake protocol.
 
 | Property | Mechanism |
 |---|---|
-| **Client authentication** | Ed25519 signature over `transcript_3` proves possession of `client_id_sk`. HMAC proves correct `shared_secret`. |
 | **Server authentication** | Ed25519 signature over `transcript_1` proves possession of `server_id_sk`. HMAC proves correct `shared_secret`. |
+| **Client session proof** | `ClientFinished` HMAC over the full transcript proves the client computed the correct `shared_secret` (no client identity — anonymous client, HTTPS model). |
 | **Forward secrecy** | `shared_secret = X25519(esk_c, esk_s)` — ephemeral keys discarded after session. |
 | **Key confidentiality** | `shared_secret` never transmitted — both sides compute it from ephemeral public keys. |
 | **Replay protection** | Fresh CSPRNG nonces per session. HMAC binds the full transcript. |

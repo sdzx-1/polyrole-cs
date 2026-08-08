@@ -2,9 +2,7 @@ const std = @import("std");
 const crypto = std.crypto;
 
 pub const ClientContext = struct {
-    /// 自己的 Ed25519 身份密钥对
-    id_keypair: crypto.sign.Ed25519.KeyPair,
-    /// 服务端的 Ed25519 身份公钥
+    /// 服务端的 Ed25519 身份公钥（客户端预置/带外信任）
     peer_id_public: crypto.sign.Ed25519.PublicKey,
 
     /// 自己的临时 X25519 私钥（在 ClientHello 中生成）
@@ -34,9 +32,8 @@ pub const ClientContext = struct {
     /// 派生的应用密钥（用于 TlsChannel 读取）
     read_key: [32]u8,
 
-    pub fn init(id_keypair: crypto.sign.Ed25519.KeyPair, peer_id_public: crypto.sign.Ed25519.PublicKey) ClientContext {
+    pub fn init(peer_id_public: crypto.sign.Ed25519.PublicKey) ClientContext {
         return .{
-            .id_keypair = id_keypair,
             .peer_id_public = peer_id_public,
             .ephemeral_sk = undefined,
             .own_ephemeral_pk = undefined,
@@ -65,8 +62,6 @@ pub const ClientContext = struct {
 pub const ServerContext = struct {
     /// 自己的 Ed25519 身份密钥对
     id_keypair: crypto.sign.Ed25519.KeyPair,
-    /// 客户端的 Ed25519 身份公钥
-    peer_id_public: crypto.sign.Ed25519.PublicKey,
 
     /// 自己的临时 X25519 私钥（在 ServerHello 中生成）
     ephemeral_sk: [32]u8,
@@ -94,10 +89,9 @@ pub const ServerContext = struct {
     /// 派生的应用密钥（用于 TlsChannel 写入）
     write_key: [32]u8,
 
-    pub fn init(id_keypair: crypto.sign.Ed25519.KeyPair, peer_id_public: crypto.sign.Ed25519.PublicKey) ServerContext {
+    pub fn init(id_keypair: crypto.sign.Ed25519.KeyPair) ServerContext {
         return .{
             .id_keypair = id_keypair,
-            .peer_id_public = peer_id_public,
             .ephemeral_sk = undefined,
             .own_ephemeral_pk = undefined,
             .peer_ephemeral_pk = undefined,
