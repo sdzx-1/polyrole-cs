@@ -120,7 +120,7 @@ test "symmetric run" {
     try testing.expectEqual(client_context, 1000);
 }
 
-// 通过 TCP 流通道对称运行协议（客户端/服务端各一端）
+// 通过进程内内存通道对称运行协议（不经过网络 I/O）
 test "symmetric run over in-memory channel" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
@@ -380,7 +380,7 @@ test "mux test" {
     try testing.expectEqual(client_context1, 1000);
 }
 
-// 多协议复用传输（明文模式）：两个协议共享一条 TCP 流
+// 多协议复用传输（加密模式）：TLS 握手派生密钥，批记录整体加密
 test "mux test encrypted" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
