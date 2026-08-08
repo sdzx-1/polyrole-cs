@@ -333,7 +333,6 @@ All tests live in `src/test/` (run with `zig build test`):
 |----------|-------------|
 | `README.md` | Framework overview and usage guide (Chinese) |
 | `README_EN.md` | This file: English overview and usage guide |
-| `desigen.md` | Design notes for the Mux transport (wb/rb buffer model, frame aggregation constraints) |
 | `src/protocol/tls/README.md` | Minimal TLS handshake protocol design (Chinese) |
 | `src/protocol/tls/design.md` | Minimal TLS handshake protocol design (English) |
 

@@ -290,7 +290,7 @@ try R.symmetric_run(.server, &server_ctx, &ch, tls.ClientHello, 10_000);
 | 文档 | 说明 |
 |------|------|
 | `README.md` | 本文件：框架概览与使用指南 |
-| `desigen.md` | Mux 传输层的设计笔记（wb/rb 缓冲模型、frame 聚合约束） |
+| `README_EN.md` | 英文版框架概览与使用指南 |
 | `src/protocol/tls/README.md` | 简易 TLS 握手协议设计（中文） |
 | `src/protocol/tls/design.md` | 简易 TLS 握手协议设计（英文） |
 
