@@ -174,9 +174,7 @@ pub const StateMap = struct {
 
         comptime {
             const result = reachableStates(State_);
-            const TagInt = std.math.IntFittingRange(0, result.states.len - 1);
-
-            return .{
+            const TagInt = std.math.IntFittingRange(0, result.states.len - 1);            return .{
                 .states = result.states,
                 .state_machine_names = result.state_machine_names,
                 .StateId = @Enum(
@@ -209,9 +207,3 @@ pub const StateMap = struct {
         return @field(self.StateId, @typeName(State));
     }
 };
-
-comptime {
-    _ = @import("runner.zig");
-    _ = @import("protocol/tls/test.zig");
-    _ = @import("protocol/net_monitor/test.zig");
-}

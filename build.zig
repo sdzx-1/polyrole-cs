@@ -18,8 +18,18 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zio", .module = zio.module("zio") },
+            .{ .name = "polyrole_cs", .module = mod },
+        },
+    });
+
     const mod_tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = test_mod,
         .use_llvm = true,
     });
 

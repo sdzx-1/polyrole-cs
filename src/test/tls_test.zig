@@ -1,10 +1,10 @@
 const std = @import("std");
 const crypto = std.crypto;
 const zio = @import("zio");
-const polyrole = @import("../../root.zig");
+const polyrole = @import("polyrole_cs");
 const Runner = polyrole.runner.Runner;
-const tls = @import("root.zig");
-const types = @import("context.zig");
+const tls = polyrole.tls;
+const types = polyrole.tls;
 
 fn ed25519KeyPair() !crypto.sign.Ed25519.KeyPair {
     var seed: [crypto.sign.Ed25519.KeyPair.seed_length]u8 = undefined;
@@ -19,7 +19,12 @@ fn x25519KeyPair() !crypto.dh.X25519.KeyPair {
 }
 
 test "hkdf" {
-    _ = @import("context.zig");
+    const testing = std.testing;
+    const ikm = [_]u8{0x0b} ** 32;
+    const salt = [_]u8{0} ** 32;
+    const prk = types.hkdf_extract(salt, ikm);
+    const key = types.hkdf_expand(prk, "test");
+    try testing.expect(key.len == 32);
 }
 
 // 纯握手：客户端和服务端完成三次握手后正常退出

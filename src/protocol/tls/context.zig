@@ -123,7 +123,7 @@ pub const ServerContext = struct {
 };
 
 /// HKDF-Extract：prk = HMAC-SHA256(salt, ikm)
-fn hkdf_extract(salt: [32]u8, ikm: [32]u8) [32]u8 {
+pub fn hkdf_extract(salt: [32]u8, ikm: [32]u8) [32]u8 {
     var out: [32]u8 = undefined;
     crypto.auth.hmac.sha2.HmacSha256.create(&out, &ikm, &salt);
     return out;
@@ -134,7 +134,7 @@ fn hkdf_extract(salt: [32]u8, ikm: [32]u8) [32]u8 {
 /// 目前仅支持单次迭代（一次 HMAC 调用）。返回类型 `[32]u8` 在类型层面
 /// 强制这一点——如果将来需要更大输出，调用方必须实现 RFC 5869 §2.3
 /// 的多轮迭代链。
-inline fn hkdf_expand(prk: [32]u8, info: []const u8) [32]u8 {
+pub inline fn hkdf_expand(prk: [32]u8, info: []const u8) [32]u8 {
     var buf: [info.len + 1]u8 = undefined;
     @memcpy(buf[0..info.len], info);
     buf[info.len] = 0x01;
@@ -143,14 +143,6 @@ inline fn hkdf_expand(prk: [32]u8, info: []const u8) [32]u8 {
     return out;
 }
 
-test "hkdf" {
-    const testing = std.testing;
-    const ikm = [_]u8{0x0b} ** 32;
-    const salt = [_]u8{0} ** 32;
-    const prk = hkdf_extract(salt, ikm);
-    const key = hkdf_expand(prk, "test");
-    try testing.expect(key.len == 32);
-}
 
 pub fn deriveKeys(shared_secret: [32]u8) struct {
     handshake_key: [32]u8,

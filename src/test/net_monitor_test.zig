@@ -1,9 +1,9 @@
 const std = @import("std");
 const zio = @import("zio");
-const polyrole = @import("../../root.zig");
+const polyrole = @import("polyrole_cs");
 const Runner = polyrole.runner.Runner;
-const nm = @import("root.zig");
-const types = @import("context.zig");
+const nm = polyrole.net_monitor;
+const types = polyrole.net_monitor;
 
 test "模拟：基本流程" {
     const testing = std.testing;
