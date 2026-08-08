@@ -320,7 +320,7 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
             try group.wait();
         }
 
-        //[protocol_id u8][payload_len u16 BE][payload ...]
+        //[total_len u32 BE][protocol_id u8][payload_len u16 BE][payload ...]
         pub fn reader_loop(self: *@This()) anyerror!void {
             while (true) {
                 if (comptime encrypt) {
@@ -398,4 +398,3 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
         }
     };
 }
-
