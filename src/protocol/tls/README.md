@@ -340,13 +340,7 @@ mac_s = HMAC(hk, "server_fin" || t2)
 t3 = SHA256( t2 || mac_s )
        │
        ▼
-sig_c = Sign(client_sk, t3)
-       │
-       ▼
-t4 = SHA256( t3 || sig_c )
-       │
-       ▼
-mac_c = HMAC(hk, "client_fin" || t4)
+mac_c = HMAC(hk, "client_fin" || t3)
 ```
 
 **每一步的安全含义**：
@@ -358,9 +352,9 @@ mac_c = HMAC(hk, "client_fin" || t4)
 | t2 | t1 + sig_s | 篡改 Server 签名 |
 | mac_s | t2 + shared_secret | 双方 shared_secret 不一致 |
 | t3 | t2 + mac_s | 跳过 Server MAC 验证 |
-| sig_c | t3 + client_id | Client 身份冒充 |
-| t4 | t3 + sig_c | 篡改 Client 签名 |
-| mac_c | t4 + shared_secret | 双方 shared_secret 不一致（二次确认） |
+| mac_c | t3 + shared_secret | Client 未正确派生 shared_secret（会话持有证明，非身份） |
+
+任何一方如果 `shared_secret` 计算错误，或者 transcript 被篡改，对应的 MAC 验证会立即失败。
 
 任何一方如果 `shared_secret` 计算错误，或者 transcript 被篡改，对应的 MAC 验证会立即失败。
 

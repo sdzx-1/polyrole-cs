@@ -124,19 +124,18 @@ proves it computed the correct `shared_secret`.
 
 | Name | Type | Description |
 |------|------|-------------|
-| `signature` | `[64]u8` | `Ed25519.sign(client_id_sk, transcript_3)` |
-| `mac` | `[32]u8` | `HMAC-SHA256(handshake_key, "client_fin" \|\| transcript_4)` |
+| `mac` | `[32]u8` | `HMAC-SHA256(handshake_key, "client_fin" \|\| transcript_3)` |
 
 **Transcript chain (continued):**
 
 ```
 transcript_3 = SHA256(transcript_2 ++ server_mac)
-transcript_4 = SHA256(transcript_3 ++ signature)
 ```
 
 `transcript_3` binds the server's MAC (proving the server's Finished message
-was authentic). `transcript_4` includes the client signature, MAC'd to prove
-the client also computed the correct `shared_secret`.
+was authentic). The client MAC over `transcript_3` proves the client computed
+the correct `shared_secret` — a session-possession proof, not an identity
+proof (server-only authentication, HTTPS model).
 
 **Variant — single transition:**
 
@@ -151,17 +150,15 @@ exchange happens through `TlsChannel`, not through protocol-internal data
 states.
 
 **process (client):**
-1. Compute `transcript_3`, `transcript_4` (using stored `peer_signature`, `peer_mac`).
-2. Sign `transcript_3` with `client_id_sk`.
-3. MAC `transcript_4` with `handshake_key`.
-4. Derive `write_key`, `read_key` via HKDF from `shared_secret`.
-5. Return `.close` variant — Runner transitions to `Exit`.
+1. Compute `transcript_3` (using stored `peer_signature`, `peer_mac`).
+2. MAC `transcript_3` with `handshake_key`.
+3. Derive `write_key`, `read_key` via HKDF from `shared_secret`.
+4. Return `.close` variant — Runner transitions to `Exit`.
 
 **preprocess (server):**
-1. Compute `transcript_3`, `transcript_4` (using stored `own_signature`, `own_mac`).
-2. Verify client signature. Failure → `error.SignatureInvalid`.
-3. Verify client MAC. Failure → `error.HmacInvalid`.
-4. Derive `read_key`, `write_key` via HKDF from `shared_secret`.
+1. Compute `transcript_3` (using stored `own_signature`, `own_mac`).
+2. Verify client MAC. Failure → `error.HmacInvalid`.
+3. Derive `read_key`, `write_key` via HKDF from `shared_secret`.
 
 ## Key Derivation
 
@@ -248,12 +245,10 @@ Step 2:  ServerHello sent     → { sn, epk_s, sig_s, mac_s }
          t2 = SHA256(t1 ++ sig_s)
          mac_s = HMAC(hk, "server_fin" ++ t2)
 
-Step 3:  ClientFinished sent  → { sig_c, mac_c }
+Step 3:  ClientFinished sent  → { mac_c }
 
          t3 = SHA256(t2 ++ mac_s)
-         sig_c = Sign(client_id_sk, t3)
-         t4 = SHA256(t3 ++ sig_c)
-         mac_c = HMAC(hk, "client_fin" ++ t4)
+         mac_c = HMAC(hk, "client_fin" ++ t3)
 ```
 
 cn = client_nonce, epk_c = client ephemeral pk,

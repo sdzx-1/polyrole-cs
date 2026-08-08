@@ -5,6 +5,8 @@ const polyrole = @import("polyrole_cs");
 const Runner = polyrole.runner.Runner;
 const tls = polyrole.tls;
 const types = polyrole.tls;
+const InMemoryChannel = polyrole.channel.InMemoryChannel;
+const HalfChannel = polyrole.channel.HalfChannel;
 
 fn ed25519KeyPair() !crypto.sign.Ed25519.KeyPair {
     var seed: [crypto.sign.Ed25519.KeyPair.seed_length]u8 = undefined;
@@ -249,4 +251,180 @@ test "simulate: two handshakes with different keypairs produce different keys" {
     s1.deinit();
     c2.deinit();
     s2.deinit();
+}
+
+// ─────────────────── ClientFinished 负向测试 ───────────────────
+
+fn testSha256(parts: []const []const u8) [32]u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    for (parts) |p| h.update(p);
+    return h.finalResult();
+}
+
+fn testHmacSha256(key: *const [32]u8, label: []const u8, msg: *const [32]u8) [32]u8 {
+    var buf: [64]u8 = undefined;
+    @memcpy(buf[0..label.len], label);
+    @memcpy(buf[label.len..][0..msg.len], msg);
+    var out: [32]u8 = undefined;
+    std.crypto.auth.hmac.sha2.HmacSha256.create(&out, buf[0 .. label.len + msg.len], key);
+    return out;
+}
+
+/// 包装 InMemoryChannel，可在 server 端 recv ClientFinished 时注入篡改消息。
+const InjectChannel = struct {
+    inner: *InMemoryChannel,
+    server_ctx: *types.ServerContext,
+    /// 注入用 "server_fin" 标签（错误域）计算的 mac
+    inject_wrong_label: bool = false,
+    /// 注入旧会话捕获的完整 ClientFinished 消息
+    inject_old_finished: ?tls.ClientFinished = null,
+
+    pub fn send(self: *@This(), state_id: anytype, T: type, val: anytype) !void {
+        try self.inner.send(state_id, T, val);
+    }
+
+    pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
+        if (comptime T == tls.ClientFinished) {
+            if (self.inject_old_finished) |f| return f;
+            if (self.inject_wrong_label) {
+                const ctx = self.server_ctx;
+                const t1 = testSha256(&[_][]const u8{ &ctx.peer_nonce, &ctx.peer_ephemeral_pk, &ctx.own_nonce, &ctx.own_ephemeral_pk });
+                const t2 = testSha256(&[_][]const u8{ &t1, &ctx.own_signature });
+                const t3 = testSha256(&[_][]const u8{ &t2, &ctx.own_mac });
+                const wrong = testHmacSha256(&ctx.handshake_key, "server_fin", &t3);
+                return .{ .close = .{ .data = .{ .mac = wrong } } };
+            }
+        }
+        return self.inner.recv(state_id, T);
+    }
+};
+
+/// 包装 InMemoryChannel，在 client 端捕获其发送的 ClientFinished 消息。
+const CaptureChannel = struct {
+    inner: *InMemoryChannel,
+    captured_finished: ?tls.ClientFinished = null,
+
+    pub fn send(self: *@This(), state_id: anytype, T: type, val: anytype) !void {
+        if (comptime T == tls.ClientFinished) {
+            self.captured_finished = val;
+        }
+        try self.inner.send(state_id, T, val);
+    }
+
+    pub fn recv(self: *@This(), state_id: anytype, T: type) !T {
+        return self.inner.recv(state_id, T);
+    }
+};
+
+const ChannelPair = struct {
+    a: InMemoryChannel,
+    b: InMemoryChannel,
+    h1: *HalfChannel,
+    h2: *HalfChannel,
+    gpa: std.mem.Allocator,
+
+    fn deinit(self: *@This()) void {
+        self.h1.deinit(self.gpa);
+        self.h2.deinit(self.gpa);
+        self.gpa.destroy(self.h1);
+        self.gpa.destroy(self.h2);
+    }
+};
+
+/// HalfChannel 必须堆分配——InMemoryChannel 持有其指针，栈上生命周期不足。
+fn makeHandshakeChannelPair(gpa: std.mem.Allocator) !ChannelPair {
+    const h1 = try gpa.create(HalfChannel);
+    errdefer gpa.destroy(h1);
+    const h2 = try gpa.create(HalfChannel);
+    errdefer gpa.destroy(h2);
+    try h1.init(gpa, 512);
+    try h2.init(gpa, 512);
+    return .{
+        .a = InMemoryChannel{ .max_slice_len = 4096, .half_self = h1, .half_peer = h2 },
+        .b = InMemoryChannel{ .max_slice_len = 4096, .half_self = h2, .half_peer = h1 },
+        .h1 = h1,
+        .h2 = h2,
+        .gpa = gpa,
+    };
+}
+
+test "handshake: replayed ClientFinished from previous session is rejected" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const kp_s = try ed25519KeyPair();
+
+    const R = Runner(tls.ClientHello);
+
+    const ClientRunner = struct {
+        fn run(ch: *CaptureChannel, ctx: *types.ClientContext) !void {
+            try R.symmetric_run(.client, ctx, ch, tls.ClientHello, null);
+        }
+    };
+
+    // 会话 1：完整握手，捕获 client 发送的 ClientFinished
+    var ch_pair1 = try makeHandshakeChannelPair(allocator);
+    defer ch_pair1.deinit();
+    var c1 = types.ClientContext.init(kp_s.public_key);
+    var s1 = types.ServerContext.init(kp_s);
+    var cap_ch = CaptureChannel{ .inner = &ch_pair1.a };
+    defer c1.deinit();
+    defer s1.deinit();
+
+    var client_task = try zio.spawn(ClientRunner.run, .{ &cap_ch, &c1 });
+    try R.symmetric_run(.server, &s1, &ch_pair1.b, tls.ClientHello, null);
+    try client_task.join();
+
+    const old_finished = cap_ch.captured_finished.?;
+
+    // 会话 2：把旧 ClientFinished 注入 server 端 → 跨会话重放被拒绝
+    var ch_pair2 = try makeHandshakeChannelPair(allocator);
+    defer ch_pair2.deinit();
+    var c2 = types.ClientContext.init(kp_s.public_key);
+    var s2 = types.ServerContext.init(kp_s);
+    defer c2.deinit();
+    defer s2.deinit();
+    var inj_ch = InjectChannel{
+        .inner = &ch_pair2.b,
+        .server_ctx = &s2,
+        .inject_old_finished = old_finished,
+    };
+
+    var cap_ch2 = CaptureChannel{ .inner = &ch_pair2.a };
+    var client_task2 = try zio.spawn(ClientRunner.run, .{ &cap_ch2, &c2 });
+    try testing.expectError(error.HmacInvalid, R.symmetric_run(.server, &s2, &inj_ch, tls.ClientHello, null));
+    try client_task2.join();
+}
+
+test "handshake: client_fin MAC domain separation" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+    const kp_s = try ed25519KeyPair();
+
+    const R = Runner(tls.ClientHello);
+
+    var ch_pair = try makeHandshakeChannelPair(allocator);
+    defer ch_pair.deinit();
+    var c = types.ClientContext.init(kp_s.public_key);
+    var s = types.ServerContext.init(kp_s);
+    defer c.deinit();
+    defer s.deinit();
+    const ClientRunner = struct {
+        fn run(ch: *InMemoryChannel, ctx: *types.ClientContext) !void {
+            try R.symmetric_run(.client, ctx, ch, tls.ClientHello, null);
+        }
+    };
+
+    var inj_ch = InjectChannel{
+        .inner = &ch_pair.b,
+        .server_ctx = &s,
+        .inject_wrong_label = true,
+    };
+
+    var client_task = try zio.spawn(ClientRunner.run, .{ &ch_pair.a, &c });
+    try testing.expectError(error.HmacInvalid, R.symmetric_run(.server, &s, &inj_ch, tls.ClientHello, null));
+    try client_task.join();
 }
