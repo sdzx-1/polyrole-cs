@@ -774,6 +774,16 @@ test "mux test encrypted" {
     defer rt.deinit();
     const allocator = testing.allocator;
     const StreamChannel = root.channel.StreamChannel;
+    const crypto = std.crypto;
+    const tls = @import("protocol/tls.zig");
+
+    var kp_seed: [crypto.sign.Ed25519.KeyPair.seed_length]u8 = undefined;
+    try zio.randomSecure(&kp_seed);
+    const kp_c = try crypto.sign.Ed25519.KeyPair.generateDeterministic(kp_seed);
+    try zio.randomSecure(&kp_seed);
+    const kp_s = try crypto.sign.Ed25519.KeyPair.generateDeterministic(kp_seed);
+
+    const R_tls = Runner(tls.ClientHello);
 
     const P1 = CreateTestProtocol("p1", Exit);
     const R1 = Runner(P1.A);
@@ -810,9 +820,6 @@ test "mux test encrypted" {
         protocol2,
     }, true);
 
-    const key = [_]u8{0x42} ** 32;
-    const keys: MuxKeys = .{ .write_key = key, .read_key = key };
-
     const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var server = try localhost.listen(.{});
     defer server.close();
@@ -822,16 +829,24 @@ test "mux test encrypted" {
             server_address: zio.net.Address,
             gpa: std.mem.Allocator,
             ctxs: struct { *i32, *i32 },
+            kp: crypto.sign.Ed25519.KeyPair,
+            peer_pk: crypto.sign.Ed25519.PublicKey,
         ) !void {
             var stream = try server_address.connect(.{});
             defer stream.close();
 
             var sc: StreamChannel = undefined;
-            try sc.init(gpa, stream, 1024, 1024, 4096);
+            try sc.init(gpa, stream, 256, 256, 4096);
             defer sc.deinit(gpa);
 
+            // 阶段 1：TLS 握手
+            var tls_ctx = tls.ClientContext.init(kp, peer_pk);
+            try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello, null);
+
+            // 阶段 2：加密 Mux——复用 sc，密钥来自握手
             var mux: TmpMux = undefined;
-            try mux.init(gpa, &sc, keys);
+            try mux.init(gpa, &sc, .{ .write_key = tls_ctx.write_key, .read_key = tls_ctx.read_key });
+            tls_ctx.deinit();
             defer mux.deinit(gpa);
 
             try mux.run(.client, ctxs);
@@ -840,17 +855,29 @@ test "mux test encrypted" {
 
     var group: zio.Group = .init;
     defer group.cancel();
-    try group.spawn(S.clientFn, .{ server.socket.address, allocator, .{ &client_context, &client_context1 } });
+    try group.spawn(S.clientFn, .{
+        server.socket.address,
+        allocator,
+        .{ &client_context, &client_context1 },
+        kp_c,
+        kp_s.public_key,
+    });
 
     var stream = try server.accept(.{});
     defer stream.close();
 
     var sc: StreamChannel = undefined;
-    try sc.init(allocator, stream, 1024, 1024, 4096);
+    try sc.init(allocator, stream, 256, 256, 4096);
     defer sc.deinit(allocator);
 
+    // 阶段 1：TLS 握手
+    var tls_ctx = tls.ServerContext.init(kp_s, kp_c.public_key);
+    try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello, null);
+
+    // 阶段 2：加密 Mux——复用 sc，密钥来自握手
     var mux: TmpMux = undefined;
-    try mux.init(allocator, &sc, keys);
+    try mux.init(allocator, &sc, .{ .write_key = tls_ctx.write_key, .read_key = tls_ctx.read_key });
+    tls_ctx.deinit();
     defer mux.deinit(allocator);
 
     try mux.run(.server, .{ &server_context, &server_context1 });
