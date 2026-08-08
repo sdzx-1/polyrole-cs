@@ -18,6 +18,7 @@ fn x25519KeyPair() !crypto.dh.X25519.KeyPair {
     return try crypto.dh.X25519.KeyPair.generateDeterministic(seed);
 }
 
+// HKDF-Extract/Expand 密钥派生函数正确性
 test "hkdf" {
     const testing = std.testing;
     const ikm = [_]u8{0x0b} ** 32;

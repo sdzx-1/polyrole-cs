@@ -5,6 +5,7 @@ const Runner = polyrole.runner.Runner;
 const nm = polyrole.net_monitor;
 const types = polyrole.net_monitor;
 
+// 内存模拟 net_monitor 基本流程（5 次 ping、seq 单调、RTT 记录）
 test "simulate: basic flow" {
     const testing = std.testing;
     var client: types.ClientContext = .{
@@ -41,6 +42,7 @@ test "simulate: basic flow" {
     }
 }
 
+// 通过 StreamChannel 对称运行 net_monitor（3 次 ping）
 test "symmetric run: over StreamChannel" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});

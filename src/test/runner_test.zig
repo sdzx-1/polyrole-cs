@@ -63,6 +63,7 @@ fn CreateTestProtocol(name: []const u8, Next: type) type {
         };
     };
 }
+// 内存模拟运行协议状态机（两端同进程，无通道）
 test "simulate" {
     const testing = std.testing;
     const P = CreateTestProtocol("p2", Exit);
@@ -72,6 +73,7 @@ test "simulate" {
     try R.simulate(&client, &server, P.A);
     try testing.expectEqual(client, 1000);
 }
+// 通过 TCP 流通道对称运行协议（客户端/服务端各一端）
 test "symmetric run" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
@@ -118,6 +120,7 @@ test "symmetric run" {
     try testing.expectEqual(client_context, 1000);
 }
 
+// 通过 TCP 流通道对称运行协议（客户端/服务端各一端）
 test "symmetric run over in-memory channel" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
@@ -158,6 +161,7 @@ test "symmetric run over in-memory channel" {
     try testing.expectEqual(client_context, 1000);
 }
 
+// 接收超时：对端不发送时 recv 按超时中止并传播错误
 test "symmetric_run: recv timeout" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
@@ -197,6 +201,7 @@ test "symmetric_run: recv timeout" {
     try testing.expectEqual(error.Canceled, ch.stream_reader.err.?);
 }
 
+// TLS 加密通道上对称运行协议（握手派生密钥后加密通信）
 test "tls channel: symmetric_run over encrypted channel" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
@@ -285,6 +290,7 @@ test "tls channel: symmetric_run over encrypted channel" {
     try testing.expectEqual(client_counter, 1000);
 }
 
+// 多协议复用传输（明文模式）：两个协议共享一条 TCP 流
 test "mux test" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
@@ -374,6 +380,7 @@ test "mux test" {
     try testing.expectEqual(client_context1, 1000);
 }
 
+// 多协议复用传输（明文模式）：两个协议共享一条 TCP 流
 test "mux test encrypted" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});

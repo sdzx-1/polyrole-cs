@@ -47,6 +47,7 @@ fn writeRaw(sc: *StreamChannel, bytes: []const u8) !void {
     try sw.flush();
 }
 
+// 重放同一条 AEAD 记录被 ReplayDetected 拒绝
 test "tls channel: replayed record is rejected" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -86,6 +87,7 @@ test "tls channel: replayed record is rejected" {
     try testing.expectError(error.ReplayDetected, tc.recordRead());
 }
 
+// 篡改 AEAD 标签导致解密失败 DecryptFailed
 test "tls channel: corrupted tag fails AEAD" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -117,6 +119,7 @@ test "tls channel: corrupted tag fails AEAD" {
     try testing.expectError(error.DecryptFailed, tc.recordRead());
 }
 
+// 被认证的消息长度与记录长度不一致时被 BadLength 拒绝
 test "tls channel: authenticated length mismatch is rejected" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -148,6 +151,7 @@ test "tls channel: authenticated length mismatch is rejected" {
     try testing.expectError(error.BadLength, tc.recordRead());
 }
 
+// 超长记录在读取正文前就被 MessageTooLarge 拒绝
 test "tls channel: oversized record is rejected before reading its body" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -180,6 +184,7 @@ test "tls channel: oversized record is rejected before reading its body" {
     try testing.expectError(error.MessageTooLarge, tc.recordRead());
 }
 
+// 密钥轮换后通道持续正常工作（epoch 推进、密钥派生）
 test "tls channel: key rotation keeps channel working" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -225,6 +230,7 @@ test "tls channel: key rotation keeps channel working" {
     try testing.expect(!std.mem.eql(u8, &key, &tc_client.read_key));
 }
 
+// 乱序的 KeyUpdate（epoch 跳跃）被 KeyRotationOutOfOrder 拒绝
 test "tls channel: out-of-order key update rejected" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -285,6 +291,7 @@ fn expectPrefixed(prefix: []const u8, i: usize, data: []const u8) !void {
     try std.testing.expectEqualStrings(expected, data);
 }
 
+// 内存通道全双工：两个方向的消息并行流动
 test "smc: full-duplex - both directions flow concurrently" {
     const allocator = std.testing.allocator;
     const rt = try zio.Runtime.init(allocator, .{});
@@ -338,6 +345,7 @@ test "smc: full-duplex - both directions flow concurrently" {
     try t2.join();
 }
 
+// 服务端先发消息时，客户端不会收到自己发送的消息
 test "smc: server sends first - client never receives its own message" {
     const allocator = std.testing.allocator;
     const rt = try zio.Runtime.init(allocator, .{});
