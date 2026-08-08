@@ -82,6 +82,9 @@ try R.symmetric_run(.client, &client_ctx, &ch_c, Counter.A, null);
 每个状态是一个 tagged union，`info` 声明 agent（`.client` / `.server`）和协议名；
 `process(ctx)` 在 agent 端执行并产生转移，`preprocess(ctx, result)` 在对端接收、验证并更新上下文：
 
+> 注：状态函数可以执行任意逻辑（含阻塞式 IO，如数据库、文件、密码学计算、sleep），
+> 框架只负责收发与序列化——状态函数不直接触碰通道。
+
 ```zig
 pub const ClientHello = union(enum) {
     to_server: polyrole.Data(ClientHelloPayload, ServerHello),

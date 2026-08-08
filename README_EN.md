@@ -22,9 +22,14 @@ the protocol means touching all four at once.
 
 polyrole-cs separates protocol **declaration** from **execution**:
 
-- A protocol is a tagged-union state graph (pure declaration, no I/O code)
+- A protocol is a tagged-union state graph (pure declaration — no send/receive or serialization code)
 - Execution is provided by the framework's three modes (simulate / network / multiplex), with zero changes to the protocol code
 - State transitions, context types, and message validity are all checked at **compile time**; runtime dispatch is free
+
+Note: "no send/receive code" means the framework owns transport and
+serialization. `process`/`preprocess` state functions are free to run
+arbitrary logic, including blocking I/O (database access, files,
+cryptographic work, sleeps) — they just never touch the channel directly.
 
 The result: one protocol definition runs unchanged in unit tests, end-to-end
 over the network, and across multiple protocols sharing a single connection.
