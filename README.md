@@ -159,8 +159,7 @@ try mux.run(.server, ctxs);
 | `channel` | `src/channel.zig` | 通道抽象：`StreamChannel`（明文 TCP）、`InMemoryChannel`（进程内管道）、`TlsChannel`（AEAD 加密 + 密钥轮换） |
 | `codec` | `src/codec.zig` | 二进制编解码：状态 ID + tag + payload |
 | `Graph` | `src/Graph.zig` | DOT 格式状态图生成 |
-| `tls` | `src/protocol/tls/` | 简易加密握手协议（示例） |
-| `net_monitor` | `src/protocol/net_monitor/` | 网络延迟探测协议（示例） |
+| `tls` | `src/protocol/tls/` | 简易加密握手协议（单向认证） |
 
 ### Channel
 
@@ -219,7 +218,7 @@ try graph.generateDot(.{}, &writer.interface);
 
 ## 示例协议
 
-### 简易加密握手协议（单向认证，实验性质，勿用于生产）
+### 简易加密握手协议（单向认证）
 
 展示了框架在安全协议上的完整用法：三条消息完成密钥协商和 **Server 认证**
 （HTTPS 模型——Client 预置 Server 公钥，Server 无需知道 Client 身份，可服务任意客户端）：
@@ -252,11 +251,14 @@ try R.simulate(&client_ctx, &server_ctx, tls.ClientHello);
 | Server 身份认证（防 MITM 冒充 Server） | Client 身份认证（Client 匿名） |
 | 机密性 / 完整性 / 防重放 / PFS | 防"陌生 Client 自报身份"——需应用层实现（登录凭据/白名单注册） |
 
-### 网络延迟探测协议（net_monitor）
+**生产使用注意点**：
 
-周期性 ping-pong 协议：Client 发送带序号与时间戳的 ping，Server 回 pong，
-Client 统计往返延迟。内置超时检测与序列号校验，展示 `preprocess` 的验证用法。
-设计文档见 `src/protocol/net_monitor/design_cn.md`。
+- **信任锚分发**：安全性的根基是 Client 预置的 Server 公钥是真的——用带外安全渠道
+  分发或证书固定，否则一切验证都建立在假锚上
+- **单一密码套件**：无协商机制，固定 X25519 + Ed25519 + XSalsa20-Poly1305 +
+  HKDF-SHA256；若需算法演进，需版本化协议
+- **自定记录格式**：`TlsChannel` 的记录格式是自定的（nonce || tag || ct_len || ct），
+  不是标准 TLS wire format——互操作对象只能是本库
 
 ## 测试
 
@@ -269,7 +271,6 @@ Client 统计往返延迟。内置超时检测与序列号校验，展示 `prepr
 | `channel_test.zig` | AEAD 错误路径（重放/篡改/长度）、密钥轮换、内存通道全双工 |
 | `runner_test.zig` | simulate / symmetric_run / 超时 / TLS 加密通道 / Mux 明文+加密 |
 | `tls_test.zig` | 握手协议（签名/MAC/临时公钥篡改、重放、会话隔离、跨会话 ClientFinished 重放、MAC 域分离） |
-| `net_monitor_test.zig` | 网络延迟探测协议模拟与对称运行 |
 
 ## 文档
 
@@ -279,7 +280,6 @@ Client 统计往返延迟。内置超时检测与序列号校验，展示 `prepr
 | `desigen.md` | Mux 传输层的设计笔记（wb/rb 缓冲模型、frame 聚合约束） |
 | `src/protocol/tls/README.md` | 简易 TLS 握手协议设计（中文） |
 | `src/protocol/tls/design.md` | 简易 TLS 握手协议设计（英文） |
-| `src/protocol/net_monitor/design.md` / `design_cn.md` | 网络延迟探测协议设计 |
 
 ## 错误处理
 

@@ -6,5 +6,4 @@ comptime {
     _ = @import("channel_test.zig");
     _ = @import("runner_test.zig");
     _ = @import("tls_test.zig");
-    _ = @import("net_monitor_test.zig");
 }
