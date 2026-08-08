@@ -251,6 +251,7 @@ pub fn Mux(comptime protocols: []const Protocol) type {
         send_id_collect: std.ArrayList(usize),
 
         send_buf: []u8,
+        recv_buf: []u8,
 
         reader_handle: zio.JoinHandle(anyerror!void),
         writer_handle: zio.JoinHandle(anyerror!void),
@@ -265,7 +266,8 @@ pub fn Mux(comptime protocols: []const Protocol) type {
                 total += buff_size;
             }
 
-            self.send_buf = try gpa.alloc(u8, total);
+            self.send_buf = try gpa.alloc(u8, total + 4);
+            self.recv_buf = try gpa.alloc(u8, total + 4);
 
             self.writer = writer;
             self.reader = reader;
@@ -281,6 +283,7 @@ pub fn Mux(comptime protocols: []const Protocol) type {
                 self.sub_channels[id].deinit(gpa);
             }
             gpa.free(self.send_buf);
+            gpa.free(self.recv_buf);
 
             self.reader_handle.cancel();
             self.writer_handle.cancel();
@@ -308,17 +311,32 @@ pub fn Mux(comptime protocols: []const Protocol) type {
         //[protocol_id u8][payload_len u16 BE][payload ...]
         pub fn reader_loop(self: *@This()) anyerror!void {
             while (true) {
-                const protocol_id: usize = @intCast(try self.reader.takeByte());
-                if (protocol_id >= protocol_count) return error.ProtocolIdTooLarge;
-                const payload_len: usize = @intCast(try self.reader.takeInt(u16, .big));
-                const current = &self.sub_channels[protocol_id];
-                if (payload_len > protocols[protocol_id].max_massage_size or
-                    payload_len > current.recv_buff.len) return error.MessageTooLarge;
-                try current.recv_start.receive();
-                current.len = payload_len;
-                const payload = try self.reader.take(payload_len);
-                @memcpy(current.recv_buff[0..payload_len], payload);
-                try current.recv_end.send({});
+                const rbuff = self.recv_buf;
+                var total_len_buff: [4]u8 = undefined;
+                try self.reader.readSliceAll(&total_len_buff);
+                const total_len = std.mem.readInt(u32, &total_len_buff, .big);
+                if (total_len > rbuff.len) return error.TotalLenTooLarge;
+                try self.reader.readSliceAll(rbuff[0..total_len]);
+                var pos: usize = 0;
+                while (pos < total_len) {
+                    const protocol_id: usize = @intCast(rbuff[pos]);
+                    if (protocol_id >= protocol_count) return error.ProtocolIdTooLarge;
+                    pos += 1;
+                    var tmp_u16: [2]u8 = undefined;
+                    tmp_u16[0] = rbuff[pos];
+                    tmp_u16[1] = rbuff[pos + 1];
+                    const payload_len: usize = @intCast(std.mem.readInt(u16, &tmp_u16, .big));
+                    const current = &self.sub_channels[protocol_id];
+                    if (payload_len > protocols[protocol_id].max_massage_size or
+                        payload_len > current.recv_buff.len) return error.MessageTooLarge;
+                    pos += 2;
+                    if (pos + payload_len > total_len) return error.BadLength;
+                    try current.recv_start.receive();
+                    current.len = payload_len;
+                    @memcpy(current.recv_buff[0..payload_len], rbuff[pos .. pos + payload_len]);
+                    try current.recv_end.send({});
+                    pos += payload_len;
+                }
             }
         }
 
@@ -338,8 +356,7 @@ pub fn Mux(comptime protocols: []const Protocol) type {
                         error.ChannelClosed => return err,
                     }
                 }
-
-                var pos: usize = 0;
+                var pos: usize = 4;
                 for (self.send_id_collect.items) |id| {
                     const curr = &self.sub_channels[id];
                     const len = curr.len;
@@ -347,6 +364,7 @@ pub fn Mux(comptime protocols: []const Protocol) type {
                     pos += len;
                     try curr.send_start.send({});
                 }
+                std.mem.writeInt(u32, self.send_buf[0..4], @intCast(pos - 4), .big);
                 try self.writer.writeAll(self.send_buf[0..pos]);
                 try self.writer.flush();
             }
@@ -687,13 +705,8 @@ test "mux test" {
             var stream = try server_address.connect(.{});
             defer stream.close();
 
-            const rbuff = try gpa.alloc(u8, 1024);
-            defer gpa.free(rbuff);
-            const wbuff = try gpa.alloc(u8, 1024);
-            defer gpa.free(wbuff);
-
-            var stream_reader = stream.reader(rbuff);
-            var stream_writer = stream.writer(wbuff);
+            var stream_reader = stream.reader(&.{});
+            var stream_writer = stream.writer(&.{});
 
             var mux: TmpMux = undefined;
             try mux.init(gpa, &stream_writer.interface, &stream_reader.interface);
@@ -710,13 +723,8 @@ test "mux test" {
     var stream = try server.accept(.{});
     defer stream.close();
 
-    const rbuff = try allocator.alloc(u8, 1024);
-    defer allocator.free(rbuff);
-    const wbuff = try allocator.alloc(u8, 1024);
-    defer allocator.free(wbuff);
-
-    var stream_reader = stream.reader(rbuff);
-    var stream_writer = stream.writer(wbuff);
+    var stream_reader = stream.reader(&.{});
+    var stream_writer = stream.writer(&.{});
 
     var mux: TmpMux = undefined;
     try mux.init(allocator, &stream_writer.interface, &stream_reader.interface);
