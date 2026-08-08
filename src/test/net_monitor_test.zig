@@ -5,7 +5,7 @@ const Runner = polyrole.runner.Runner;
 const nm = polyrole.net_monitor;
 const types = polyrole.net_monitor;
 
-test "模拟：基本流程" {
+test "simulate: basic flow" {
     const testing = std.testing;
     var client: types.ClientContext = .{
         .allocator = testing.allocator,
@@ -41,7 +41,7 @@ test "模拟：基本流程" {
     }
 }
 
-test "对称运行：通过 StreamChannel 通信" {
+test "symmetric run: over StreamChannel" {
     const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
     defer rt.deinit();
