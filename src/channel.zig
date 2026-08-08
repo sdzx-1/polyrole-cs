@@ -174,6 +174,38 @@ pub const InMemoryChannel = struct {
 ///    （各自的缓冲区与计数器），可在不同 fiber 上并发执行；
 ///  - 多个发送不得并发——`write_counter` 与编码缓冲由调用方串行化
 ///    （`symmetric_run` 单 fiber 天然满足）。
+/// 密钥轮换配置。
+///
+/// 触发条件在 `sealAndSend` 入口检查（发送侧单 fiber，无竞争）：
+///  - `record_threshold`：写记录数上限，防 AEAD 用量超限（数学安全硬性）；
+///  - `interval_ns`：时间间隔，懒触发——只有有消息要发时才检查，
+///    空闲连接不产生空轮换包。
+/// 任一为 0 表示禁用对应触发。默认 10 分钟 + 2^28 条记录。
+pub const RotationConfig = struct {
+    interval_ns: u64 = 10 * std.time.ns_per_min,
+    record_threshold: u64 = 1 << 28,
+};
+
+/// AEAD 记录类型，编码在 nonce 第 24 字节——nonce 是 AEAD 输入，
+/// 因此类型字节被认证，攻击者无法篡改。
+const RecordType = enum(u8) {
+    data = 0,
+    key_update = 1,
+};
+
+/// 从当前密钥单向派生下一代密钥（RFC 5869 HKDF-Expand 单次迭代）：
+/// `new = HMAC-SHA256(key = current, "polyrole-key-rotate" || epoch || 0x01)`。
+/// HKDF 单向性保证：旧密钥泄露推不出新密钥（前向保密保持）。
+fn deriveRotationKey(current: [32]u8, epoch: u32) [32]u8 {
+    var info: [24]u8 = undefined;
+    @memcpy(info[0..19], "polyrole-key-rotate");
+    std.mem.writeInt(u32, info[19..23], epoch, .big);
+    info[23] = 0x01; // HKDF-Expand 单次迭代计数器
+    var out: [32]u8 = undefined;
+    crypto.auth.hmac.sha2.HmacSha256.create(&out, &info, &current);
+    return out;
+}
+
 pub const TlsChannel = struct {
     /// 借用——调用方拥有 StreamChannel，必须在 TlsChannel 之后 deinit 它。
     inner: *StreamChannel,
@@ -181,6 +213,15 @@ pub const TlsChannel = struct {
     read_key: [32]u8,
     write_counter: u64,
     read_counter: u64,
+
+    /// 本端写入方向的 epoch（发出的记录所属轮次），仅发送侧读写。
+    write_epoch: u32 = 0,
+    /// 对端写入方向的 epoch（预期收到的记录的轮次），仅接收侧读写。
+    read_epoch: u32 = 0,
+    /// 上次轮换时间，仅发送侧读写。
+    last_rotation: u64,
+    /// 轮换配置，init 后只读（可用 setRotationConfig 调整）。
+    rotation: RotationConfig = .{},
 
     /// 加密前编码协议消息的缓冲区。
     /// 前 2 字节保留给被认证的长度前缀。
@@ -215,6 +256,14 @@ pub const TlsChannel = struct {
         self.read_key = read_key;
         self.write_counter = 0;
         self.read_counter = 0;
+        self.write_epoch = 0;
+        self.read_epoch = 0;
+        self.last_rotation = zio.time.Timestamp.now(.realtime).toNanoseconds();
+    }
+
+    /// 覆盖密钥轮换配置（测试或特殊部署使用）。
+    pub fn setRotationConfig(self: *@This(), config: RotationConfig) void {
+        self.rotation = config;
     }
 
     pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
@@ -256,49 +305,102 @@ pub const TlsChannel = struct {
 
     /// 读取并打开一条 AEAD 记录，返回完整明文，不做消息语义解释。
     /// 返回的切片在下次读取本通道之前有效。
+    ///
+    /// KeyUpdate 记录在此被吸收：按序校验并推进读密钥后继续读下一条，
+    /// 上层永远只看到普通数据记录。
     pub fn recordReadRaw(self: *@This()) ![]const u8 {
-        const sr = &self.inner.stream_reader.interface;
+        while (true) {
+            const sr = &self.inner.stream_reader.interface;
 
-        const nonce = (try sr.take(24))[0..24].*;
+            const nonce = (try sr.take(24))[0..24].*;
 
-        // 先校验计数器：nonce 在明文中，可避免为无效 nonce 的记录浪费一次解密。
-        const counter = std.mem.readInt(u64, nonce[0..8], .big);
-        if (counter != self.read_counter) return error.ReplayDetected;
-        if (self.read_counter == std.math.maxInt(u64)) return error.NonceExhausted;
+            // 先校验计数器：nonce 在明文中，可避免为无效 nonce 的记录浪费一次解密。
+            const counter = std.mem.readInt(u64, nonce[0..8], .big);
+            if (counter != self.read_counter) return error.ReplayDetected;
+            if (self.read_counter == std.math.maxInt(u64)) return error.NonceExhausted;
+            const typ: RecordType = @enumFromInt(nonce[23]);
 
-        const tag = try sr.take(16);
-        const ct_len = try sr.takeInt(u32, .big);
-        if (ct_len < 2 or ct_len > self.decode_buf.len) return error.MessageTooLarge;
+            const tag = try sr.take(16);
+            const ct_len = try sr.takeInt(u32, .big);
+            if (ct_len < 2 or ct_len > self.decode_buf.len) return error.MessageTooLarge;
 
-        const ct = try sr.take(ct_len);
+            const ct = try sr.take(ct_len);
 
-        // AEAD 解密
-        const combined = self.open_buf[0 .. ct_len + 16];
-        @memcpy(combined[0..16], tag);
-        @memcpy(combined[16..][0..ct_len], ct);
-        crypto.nacl.SecretBox.open(
-            self.decode_buf[0..ct_len],
-            combined,
-            nonce,
-            self.read_key,
-        ) catch return error.DecryptFailed;
+            // AEAD 解密
+            const combined = self.open_buf[0 .. ct_len + 16];
+            @memcpy(combined[0..16], tag);
+            @memcpy(combined[16..][0..ct_len], ct);
+            crypto.nacl.SecretBox.open(
+                self.decode_buf[0..ct_len],
+                combined,
+                nonce,
+                self.read_key,
+            ) catch return error.DecryptFailed;
 
-        self.read_counter += 1;
+            self.read_counter += 1;
 
-        return self.decode_buf[0..ct_len];
+            if (typ == .key_update) {
+                // 明文 = [epoch u32 BE]。计数器检查已保证按序到达，
+                // epoch 校验是第二道防线（防乱序/重放旧轮换）。
+                const declared = std.mem.readInt(u32, self.decode_buf[0..4], .big);
+                if (declared != self.read_epoch + 1) return error.KeyRotationOutOfOrder;
+                self.read_key = deriveRotationKey(self.read_key, declared);
+                self.read_epoch = declared;
+                self.read_counter = 0;
+                continue;
+            }
+
+            return self.decode_buf[0..ct_len];
+        }
     }
 
     /// 原子性地推进计数器并发送一条 AEAD 记录。
     /// nonce 永不复用——即使后续 flush 失败且调用方重试。
     /// 线上格式：nonce(24) || tag(16) || ct_len(4 BE) || ciphertext(ct_len)。
+    /// nonce = counter(8 BE) || 0(15) || type(1)。
     pub fn sealAndSend(self: *@This(), plaintext: []const u8) !void {
+        try self.maybeRotate();
+        try self.sealRecord(plaintext, .data);
+    }
+
+    /// 发送侧触发检查（懒触发：只在有消息要发时运行）。
+    fn maybeRotate(self: *@This()) !void {
+        const rot = self.rotation;
+        if (rot.record_threshold != 0 and self.write_counter >= rot.record_threshold) {
+            try self.sendKeyUpdate();
+            return;
+        }
+        if (rot.interval_ns != 0) {
+            const now = zio.time.Timestamp.now(.realtime).toNanoseconds();
+            if (now -| self.last_rotation >= rot.interval_ns) {
+                try self.sendKeyUpdate();
+            }
+        }
+    }
+
+    /// 发起一次密钥轮换：用当前写密钥发 KeyUpdate（明文 = 新 epoch），
+    /// 随后本地推进写密钥并重置写计数器。切密钥与计数器归零原子绑定，
+    /// 保证 nonce 不重用。
+    fn sendKeyUpdate(self: *@This()) !void {
+        const new_epoch = self.write_epoch + 1;
+        var buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &buf, new_epoch, .big);
+        try self.sealRecord(&buf, .key_update);
+        self.write_key = deriveRotationKey(self.write_key, new_epoch);
+        self.write_epoch = new_epoch;
+        self.write_counter = 0;
+        self.last_rotation = zio.time.Timestamp.now(.realtime).toNanoseconds();
+    }
+
+    fn sealRecord(self: *@This(), plaintext: []const u8, typ: RecordType) !void {
         const this_counter = self.write_counter;
         if (this_counter == std.math.maxInt(u64)) return error.NonceExhausted;
         self.write_counter += 1;
 
-        // 从已提交的计数器构造 nonce
+        // 从已提交的计数器构造 nonce；type 编码在 nonce 末字节（被 AEAD 认证）
         var nonce: [24]u8 = [_]u8{0} ** 24;
         std.mem.writeInt(u64, nonce[0..8], this_counter, .big);
+        nonce[23] = @intFromEnum(typ);
 
         // AEAD 加密
         const combined = self.seal_buf[0 .. plaintext.len + 16];
@@ -333,10 +435,11 @@ const SocketPair = struct {
 };
 
 /// 用给定密钥手工构造一条 AEAD 记录（nonce || tag || ct_len || ct），
-/// 返回写入 out 的字节数。
-fn craftRecord(key: [32]u8, counter: u64, plaintext: []const u8, out: []u8) usize {
+/// 返回写入 out 的字节数。`typ` 编码进 nonce 末字节（0=数据，1=KeyUpdate）。
+fn craftRecord(key: [32]u8, counter: u64, typ: u8, plaintext: []const u8, out: []u8) usize {
     var nonce: [24]u8 = [_]u8{0} ** 24;
     std.mem.writeInt(u64, nonce[0..8], counter, .big);
+    nonce[23] = typ;
     var scratch: [2048]u8 = undefined;
     const combined = scratch[0 .. plaintext.len + 16];
     crypto.nacl.SecretBox.seal(combined, plaintext, nonce, key);
@@ -382,7 +485,7 @@ test "tls channel: replayed record is rejected" {
     @memcpy(plain[2..], &frame);
 
     var record: [2048]u8 = undefined;
-    const n = craftRecord(key, 0, &plain, &record);
+    const n = craftRecord(key, 0, 0, &plain, &record);
 
     try writeRaw(&sc_client, record[0..n]);
     _ = try tc.recordRead(); // 第一帧：counter 0 通过
@@ -416,7 +519,7 @@ test "tls channel: corrupted tag fails AEAD" {
 
     const plain = [_]u8{ 0x00, 0x03, 1, 0, 1, 'x' };
     var record: [2048]u8 = undefined;
-    const n = craftRecord(key, 0, &plain, &record);
+    const n = craftRecord(key, 0, 0, &plain, &record);
     record[24] ^= 0x01; // 破坏 tag 的第一个字节
 
     try writeRaw(&sc_client, record[0..n]);
@@ -448,7 +551,7 @@ test "tls channel: authenticated length mismatch is rejected" {
     // 前缀声称 2 字节，但实际载荷 3 字节 → ct_len=5, msg_len=2 ≠ 3 → BadLength
     const plain = [_]u8{ 0x00, 0x02, 0xAA, 0xBB, 0xCC };
     var record: [2048]u8 = undefined;
-    const n = craftRecord(key, 0, &plain, &record);
+    const n = craftRecord(key, 0, 0, &plain, &record);
 
     try writeRaw(&sc_client, record[0..n]);
     try testing.expectError(error.BadLength, tc.recordRead());
@@ -484,6 +587,97 @@ test "tls channel: oversized record is rejected before reading its body" {
 
     try writeRaw(&sc_client, &hdr);
     try testing.expectError(error.MessageTooLarge, tc.recordRead());
+}
+
+test "tls channel: key rotation keeps channel working" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const pair = try SocketPair.connect();
+    defer pair.client.close();
+    defer pair.server.close();
+
+    const key = [_]u8{0x42} ** 32;
+    var sc_client: StreamChannel = undefined;
+    try sc_client.init(allocator, pair.client, 256, 256, 4096);
+    defer sc_client.deinit(allocator);
+    var sc_server: StreamChannel = undefined;
+    try sc_server.init(allocator, pair.server, 256, 256, 4096);
+    defer sc_server.deinit(allocator);
+
+    var tc_client: TlsChannel = undefined;
+    try tc_client.init(allocator, &sc_client, key, key, 256);
+    defer tc_client.deinit(allocator);
+    var tc_server: TlsChannel = undefined;
+    try tc_server.init(allocator, &sc_server, key, key, 256);
+    defer tc_server.deinit(allocator);
+
+    // 服务端每写 2 条记录就轮换（时间触发禁用）
+    tc_server.setRotationConfig(.{ .interval_ns = 0, .record_threshold = 2 });
+
+    // 4 条消息：第 3 条发送前触发一次轮换（KeyUpdate + 新密钥续传）
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        var buf: [8]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "msg-{d}", .{i});
+        try tc_server.sealAndSend(msg);
+        const got = try tc_client.recordReadRaw();
+        try testing.expectEqualStrings(msg, got);
+    }
+
+    // 轮换确实发生：两侧各自推进了一个 epoch，写密钥已派生
+    try testing.expectEqual(@as(u32, 1), tc_server.write_epoch);
+    try testing.expectEqual(@as(u32, 1), tc_client.read_epoch);
+    try testing.expect(!std.mem.eql(u8, &key, &tc_server.write_key));
+    try testing.expect(!std.mem.eql(u8, &key, &tc_client.read_key));
+}
+
+test "tls channel: out-of-order key update rejected" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const pair = try SocketPair.connect();
+    defer pair.client.close();
+    defer pair.server.close();
+
+    const key = [_]u8{0x42} ** 32;
+    var sc_client: StreamChannel = undefined;
+    try sc_client.init(allocator, pair.client, 256, 256, 4096);
+    defer sc_client.deinit(allocator);
+    var sc_server: StreamChannel = undefined;
+    try sc_server.init(allocator, pair.server, 256, 256, 4096);
+    defer sc_server.deinit(allocator);
+
+    var tc: TlsChannel = undefined;
+    try tc.init(allocator, &sc_server, key, key, 256);
+    defer tc.deinit(allocator);
+
+    // 合法 KeyUpdate：epoch=1，原密钥，counter 0
+    var epoch1: [4]u8 = undefined;
+    std.mem.writeInt(u32, &epoch1, 1, .big);
+    var rec: [2048]u8 = undefined;
+    var n = craftRecord(key, 0, 1, &epoch1, &rec);
+    try writeRaw(&sc_client, rec[0..n]);
+
+    // 普通数据（新密钥 derive(key,1)，counter 0）→ recordReadRaw 返回，
+    // 证明 KeyUpdate 已被吸收
+    const new_key = deriveRotationKey(key, 1);
+    n = craftRecord(new_key, 0, 0, "hi", &rec);
+    try writeRaw(&sc_client, rec[0..n]);
+    const got = try tc.recordReadRaw();
+    try testing.expectEqualStrings("hi", got);
+
+    // 乱序 KeyUpdate：声明 epoch=3（预期 2），新密钥 counter 1 →
+    // 计数器匹配、解密成功，但 epoch 校验失败
+    var epoch3: [4]u8 = undefined;
+    std.mem.writeInt(u32, &epoch3, 3, .big);
+    n = craftRecord(new_key, 1, 1, &epoch3, &rec);
+    try writeRaw(&sc_client, rec[0..n]);
+    try testing.expectError(error.KeyRotationOutOfOrder, tc.recordReadRaw());
 }
 
 // ─────────────────── InMemoryChannel 全双工验证测试 ───────────────────
