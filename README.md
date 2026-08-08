@@ -307,7 +307,7 @@ zig build test
 | `codec_test.zig` | 编解码畸形输入（非法布尔、越界 tag、超长切片） |
 | `channel_test.zig` | AEAD 错误路径（重放/篡改/长度）、密钥轮换、内存通道全双工 |
 | `runner_test.zig` | simulate / symmetric_run / 超时 / TLS 加密通道 / Mux 明文+加密 |
-| `tls_test.zig` | 握手协议（签名/MAC/临时公钥篡改、重放、会话隔离） |
+| `tls_test.zig` | 握手协议（签名/MAC/临时公钥篡改、重放、会话隔离、跨会话 ClientFinished 重放、MAC 域分离） |
 | `net_monitor_test.zig` | 网络延迟探测协议模拟与对称运行 |
 
 ---
@@ -327,19 +327,26 @@ pub fn process(ctx: *Ctx) !@This() {
 
 ---
 
-## 简易加密握手协议（示例）
+## 简易加密握手协议（示例，单向认证）
 
 项目包含一个自定的简易加密握手实现，展示了 polyrole-cs 的完整用法。
 
-**前提**：Client 预先知道（带外/信任锚/证书固定）Server 的 Ed25519 公钥；Server **无需知道** Client 的身份——单向认证（HTTPS 模型），Server 可同时服务任意数量的客户端。
+**前提**：Client 预先知道（带外/信任锚/证书固定）Server 的 Ed25519 公钥；Server **无需知道** Client 的身份——单向认证（HTTPS 模型），Server 可同时服务任意数量的客户端，客户端零密钥管理。
 
 **握手流程**：三条消息完成密钥协商和 Server 认证，不包含数据阶段。
 
 - `ClientHello → ServerHello → ClientFinished → Exit`
 - X25519 临时密钥协商（ephemeral-ephemeral，提供前向安全）
 - Server 的 Ed25519 身份签名 + 双方 HMAC（ClientFinished 为会话持有证明，不携带 Client 身份）
-- Transcript 链式 SHA256 哈希防篡改
+- Transcript 链式 SHA256 哈希防篡改（Server 签名覆盖双方临时公钥，MITM 无法替换）
 - HKDF-SHA256 派生三把独立密钥
+
+**安全边界**（HTTPS 模型，与标准 TLS 单向认证一致）：
+
+| 提供 | 不提供 |
+|------|--------|
+| Server 身份认证（防 MITM 冒充 Server） | Client 身份认证（Client 匿名） |
+| 机密性 / 完整性 / 防重放 / PFS | 防"陌生 Client 自报身份"——需要身份认证时在应用层实现（登录凭据/白名单注册） |
 
 握手后 `write_key` / `read_key` 即为派生的对称密钥，可直接用于 `TlsChannel` 加密通信：
 
@@ -356,6 +363,9 @@ try R.simulate(&client_ctx, &server_ctx, tls.ClientHello);
 
 // client_ctx.write_key / read_key 即为派生的对称密钥
 ```
+
+网络部署时用 `symmetric_run` 跑在 `StreamChannel` 上（或 Mux 加密模式），
+握手后创建的 `TlsChannel` 支持密钥轮换（见下文）。
 
 详见 `src/protocol/tls/README.md`。
 
