@@ -152,6 +152,67 @@ try R.symmetric_run(.server, &server_ctx, &ch, A, null);
 try R.symmetric_run(.client, &client_ctx, &ch, A, null);
 ```
 
+### Mux — 多路复用传输层（核心特性）
+
+**Mux 是 polyrole-cs 的核心亮点**：多个协议共享一条底层连接，每个协议跑独立的
+状态机——独立缓冲、独立超时、互不阻塞，而传输成本与单协议几乎相同。
+
+它解决的是真实系统的典型问题：一个连接往往要承载多种语义（如控制面 + 推送面、
+信令 + 数据），逐一独占连接浪费资源，手工拼帧又容易出错。Mux 把"多路复用"
+变成框架能力，与 `simulate`（单机模拟）、`symmetric_run`（单协议端到端）并列，
+构成第三种执行形态：
+
+```
+simulate        单机内存模拟（零序列化，测逻辑）
+symmetric_run   单协议端到端（一条连接一个协议）
+Mux             多协议端到端（一条连接 N 个协议，可选加密）
+```
+
+**机制**：每个协议一个 `SubChannel`（独立 `send_buff`/`recv_buff`，
+大小 = `max_massage_size + 3`）。发送许可机制保证同一时刻每协议至多一条消息在途；
+`writer_loop` 把一轮聚合的帧拷贝进连续缓冲，一次 `writeAll` 写出（聚合写）；
+`reader_loop` 读入整批后按帧头切分分发到各协议。
+
+**wire format（批记录）**：`[total_len u32 BE][帧...]`，每帧 `[protocol_id u8][payload_len u16 BE][payload]`。
+
+**用法**——`Protocol` 声明协议族，comptime 决定是否加密：
+
+```zig
+const Mux = polyrole.runner.Mux;
+
+const protocols = [_]polyrole.runner.Protocol{
+    .{ .enter = Ctrl.A, .runner = R_ctrl, .client_ct = i32, .server_ct = i32,
+       .max_massage_size = 1024, .recv_timeout_ms = null },
+    .{ .enter = Push.A, .runner = R_push, .client_ct = i32, .server_ct = i32,
+       .max_massage_size = 1024, .recv_timeout_ms = null },
+};
+```
+
+**明文模式**（`encrypt = false`）——批明文直接写底层流，`keys` 传 `null`：
+
+```zig
+const TmpMux = Mux(&protocols, false);
+var mux: TmpMux = undefined;
+try mux.init(gpa, &sc, null);
+try mux.run(.client, ctxs);   // ctxs 是各协议 context 的元组
+```
+
+**加密模式**（`encrypt = true`）——整批明文作为一条 AEAD 记录加密，密钥来自
+TLS 握手（或任何带外协商）：
+
+```zig
+const TmpMux = Mux(&protocols, true);
+var mux: TmpMux = undefined;
+try mux.init(gpa, &sc, .{ .write_key = wk, .read_key = rk });
+try mux.run(.server, ctxs);
+```
+
+加密模式下每条批记录 `[total_len u32][帧...]` 整体被 AEAD 认证；记录长度已升级为
+u32，批明文可超过 64 KiB。密钥轮换同样生效——KeyUpdate 记录在 Mux 层被透明吸收。
+
+`SubChannel` 接口与 `StreamChannel` 完全一致（`send`/`recv`），协议代码零改动；
+`SubChannel.recv` 超时由 `Protocol.recv_timeout_ms` 声明，行为与 `symmetric_run` 相同。
+
 ---
 
 ## 模块
@@ -198,41 +259,8 @@ nonce = `counter(8 BE) || 0(15) || type(1)`——type 字节被 AEAD 认证，�
 - 接收侧按序读到 KeyUpdate 后派生对应读密钥并归零读计数器，记录被**透明吸收**，
   上层（Mux / symmetric_run / 协议状态机）完全无感知。
 
-**Mux** — 多路复用传输层，多个协议共享一条底层流（`src/runner.zig`）：
-
-```zig
-pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type
-```
-
-每个协议一个 `SubChannel`（独立 `send_buff`/`recv_buff`，大小 = `max_massage_size + 3`），
-发送许可机制保证同一时刻每协议至多一条消息在途。`writer_loop` 把一轮聚合的帧
-拷贝进连续缓冲并一次写出；`reader_loop` 按帧头切分并分发。
-
-**wire format（批记录）**：`[total_len u32 BE][帧...]`，每帧 `[protocol_id u8][payload_len u16 BE][payload]`。
-
-**明文模式**（`encrypt = false`）——批明文直接写底层流：
-
-```zig
-const TmpMux = Mux(&.{ protocol1, protocol2 }, false);
-var mux: TmpMux = undefined;
-try mux.init(gpa, &sc, null);   // keys 传 null
-try mux.run(.client, ctxs);
-```
-
-**加密模式**（`encrypt = true`）——整批明文作为一条 AEAD 记录加密，密钥来自
-TLS 握手（或任何带外协商）：
-
-```zig
-const TmpMux = Mux(&.{ protocol1, protocol2 }, true);
-var mux: TmpMux = undefined;
-try mux.init(gpa, &sc, .{ .write_key = wk, .read_key = rk });
-try mux.run(.server, ctxs);
-```
-
-加密模式下每条批记录 `[total_len u32][帧...]` 整体被 AEAD 认证；记录长度已升级为
-u32，批明文可超过 64 KiB。密钥轮换同样生效——KeyUpdate 记录在 Mux 层被透明吸收。
-
-**SubChannel.recv 超时**：`symmetric_run(..., 100)` → AutoCancel 100ms → `error.Canceled`。
+**Mux** — 多路复用传输层（`src/runner.zig`），是框架的核心特性：
+多个协议共享一条底层连接，可选批记录加密。用法与机制详见上文「执行模式 → Mux」。
 
 ### Codec
 
