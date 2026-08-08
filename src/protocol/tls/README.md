@@ -426,9 +426,12 @@ try R.symmetric_run(.client, &app_ctx, &tc, AppProtocol.Start, null);
 ```
 
 `TlsChannel` 的详细设计见 `src/channel.zig` 文档注释。核心机制：
-- 每条消息用 NaCl SecretBox AEAD 加密（XSalsa20-Poly1305）
-- 24 字节 nonce 嵌入单调递增 u64 计数器，防止重放和乱序
-- 消息长度嵌入 AEAD 载荷内部认证，wire 上的 `ct_len` 仅作帧分隔符
+- 每条记录用 NaCl SecretBox AEAD 加密（XSalsa20-Poly1305）
+- 24 字节 nonce = 单调递增 u64 计数器 + 类型字节，防止重放、乱序和类型篡改
+- 消息长度嵌入 AEAD 载荷内部认证，wire 上的 `ct_len`（u32 BE）仅作帧分隔符
+- **密钥轮换**：发送侧按记录数阈值（默认 2^28）/ 时间间隔（默认 10 分钟）懒触发
+  KeyUpdate，本地 HKDF 单向派生新密钥并归零计数器；接收侧按序透明吸收，
+  上层无感知（详见 `src/channel.zig` 的 `RotationConfig`）
 
 ---
 
@@ -452,10 +455,11 @@ try R.symmetric_run(.client, &app_ctx, &tc, AppProtocol.Start, null);
 ```
 src/protocol/tls/
 ├── root.zig         — 状态机定义 (ClientHello, ServerHello, ClientFinished)
-├── context.zig      — 共享类型 (ClientContext, ServerContext, deriveKeys)
-├── test.zig         — 测试 (simulate 和 symmetric_run 测试)
+├── context.zig      — 共享类型 (ClientContext, ServerContext, deriveKeys, hkdf_*)
 ├── design.md        — 设计文档（英文）
 └── README.md        — 本文档
 ```
 
-状态机定义、类型和测试完全分离，`root.zig` 纯描述协议逻辑，`context.zig` 纯数据结构和密码学工具函数。
+协议测试位于 `src/test/tls_test.zig`（与库其他测试一起由 `zig build test` 编译运行）。
+
+状态机定义和类型完全分离，`root.zig` 纯描述协议逻辑，`context.zig` 纯数据结构和密码学工具函数。

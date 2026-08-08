@@ -15,33 +15,31 @@ const polyrole = @import("polyrole_cs");
 polyrole-cs/
 ├── src/                          # 核心库
 │   ├── root.zig                  # 模块入口，导出所有公共组件
-│   ├── runner.zig                # 状态机驱动（simulate / symmetric_run）
-│   ├── channel.zig               # 通道抽象（StreamChannel）
-│   ├── family_mux_channel.zig    # 协议族传输层（MultiplexChannel）
-│   ├── family_test.zig           # Mux 测试
+│   ├── runner.zig                # 状态机驱动（simulate / symmetric_run）+ Mux 多路复用传输层
+│   ├── channel.zig               # 通道抽象（StreamChannel / InMemoryChannel / TlsChannel）
 │   ├── codec.zig                 # 二进制编解码
 │   ├── Graph.zig                 # DOT 格式状态图生成
+│   ├── test/                     # 全部测试（zig build test 编译此目录）
+│   │   ├── test.zig              # 测试根
+│   │   ├── codec_test.zig
+│   │   ├── channel_test.zig
+│   │   ├── runner_test.zig
+│   │   ├── tls_test.zig
+│   │   └── net_monitor_test.zig
 │   └── protocol/                 # 协议实现
 │       ├── tls.zig               # 简易加密握手协议（模块入口）
 │       ├── tls/                  # 内部实现
 │       │   ├── root.zig
 │       │   ├── context.zig       # 握手上下文 + 密钥协商
-│       │   ├── test.zig
 │       │   ├── README.md
 │       │   └── design.md
 │       ├── net_monitor.zig       # 网络延迟探测协议（模块入口）
 │       └── net_monitor/          # 内部实现
 │           ├── root.zig
 │           ├── context.zig
-│           ├── test.zig
 │           ├── design.md
 │           └── design_cn.md
-├── tools/
-│   └── graph.zig                 # 状态图生成工具（zig build graph）
-├── docs/
-│   ├── family.md                 # 协议族设计说明
-│   └── graphs/                   # 生成的状态图（gitignored）
-├── examples/chat/               # 多人聊天室 demo（10000 并发压测通过）
+├── desigen.md                    # Mux 设计笔记
 ├── build.zig                     # 构建配置
 ├── build.zig.zon                 # 依赖声明
 └── README.md
@@ -160,9 +158,8 @@ try R.symmetric_run(.client, &client_ctx, &ch, A, null);
 
 | 模块 | 路径 | 说明 |
 |------|------|------|
-| `runner` | `src/runner.zig` | 状态机驱动：`simulate()`、`symmetric_run()` |
-| `channel` | `src/channel.zig` | 通道抽象：`StreamChannel`（明文 TCP）、`TlsChannel`（AEAD 加密） |
-| `family_mux_channel` | `src/family_mux_channel.zig` | 协议族传输层：`MultiplexChannel(N)` 多协议共享 TCP |
+| `runner` | `src/runner.zig` | 状态机驱动：`simulate()`、`symmetric_run()`；多路复用传输层 `Mux()` |
+| `channel` | `src/channel.zig` | 通道抽象：`StreamChannel`（明文 TCP）、`InMemoryChannel`（进程内管道）、`TlsChannel`（AEAD 加密 + 密钥轮换） |
 | `codec` | `src/codec.zig` | 二进制编解码：状态 ID + tag + payload |
 | `Graph` | `src/Graph.zig` | DOT 格式状态图生成 |
 | `tls` | `src/protocol/tls/` | 简易加密握手协议（示例） |
@@ -178,6 +175,9 @@ try ch.init(allocator, stream, read_buf_size, write_buf_size, max_slice_len);
 defer ch.deinit(allocator);
 ```
 
+**InMemoryChannel** — 进程内全双工管道（两个配对的 `HalfChannel` 交叉引用），
+不经过网络 I/O，每个方向至多一条消息在途。
+
 **TlsChannel** — AEAD 加密通道，在 StreamChannel 之上使用 NaCl SecretBox：
 
 ```zig
@@ -186,44 +186,53 @@ try tc.init(allocator, &sc, write_key, read_key, 512);
 defer tc.deinit(allocator);
 ```
 
-每条消息 wire format：`nonce(24) || tag(16) || ct_len(2 BE) || ciphertext`，
-nonce 内嵌单调 u64 计数器，提供防重放和防乱序保护。
+每条记录 wire format：`nonce(24) || tag(16) || ct_len(4 BE) || ciphertext`，
+nonce = `counter(8 BE) || 0(15) || type(1)`——type 字节被 AEAD 认证，记录类型
+（数据 / KeyUpdate）不可篡改。
 
-**MultiplexChannel** — 协议族传输层，多协议共享一条 TCP 连接：
+**密钥轮换**（TLS 1.3 KeyUpdate 同构，`setRotationConfig` 可配置）：
+- 发送侧在 `sealAndSend` 入口懒检查触发条件——写记录数阈值（默认 2^28，AEAD 数学安全硬性）
+  或时间间隔（默认 10 分钟，空闲连接不产生空轮换包）；
+- 触发时用当前密钥发一条 KeyUpdate 记录（明文 = 新 epoch），然后本地 HKDF 单向派生
+  下一代写密钥并把写计数器归零（nonce 不重用）；
+- 接收侧按序读到 KeyUpdate 后派生对应读密钥并归零读计数器，记录被**透明吸收**，
+  上层（Mux / symmetric_run / 协议状态机）完全无感知。
+
+**Mux** — 多路复用传输层，多个协议共享一条底层流（`src/runner.zig`）：
 
 ```zig
-pub fn MultiplexChannel(comptime configs: []const SubChannelConfig, comptime frame_budget: usize) type
+pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type
 ```
 
-每个子通道用 `SubChannelConfig` 声明容量、消息上限与溢出策略（`.close_channel` 直接关通道 / `.backpressure` 背压到 Reader）：
+每个协议一个 `SubChannel`（独立 `send_buff`/`recv_buff`，大小 = `max_massage_size + 3`），
+发送许可机制保证同一时刻每协议至多一条消息在途。`writer_loop` 把一轮聚合的帧
+拷贝进连续缓冲并一次写出；`reader_loop` 按帧头切分并分发。
+
+**wire format（批记录）**：`[total_len u32 BE][帧...]`，每帧 `[protocol_id u8][payload_len u16 BE][payload]`。
+
+**明文模式**（`encrypt = false`）——批明文直接写底层流：
 
 ```zig
-const Mux = polyrole.family_mux_channel.MultiplexChannel(&.{
-    .{ .capacity = 1, .max_message_size = 4096, .overflow = .close_channel },
-    .{ .capacity = 16, .max_message_size = 4096, .overflow = .backpressure },
-}, 4100);
+const TmpMux = Mux(&.{ protocol1, protocol2 }, false);
+var mux: TmpMux = undefined;
+try mux.init(gpa, &sc, null);   // keys 传 null
+try mux.run(.client, ctxs);
 ```
 
-**架构**：独立 Reader Fiber + 有界 MVar 队列：
+**加密模式**（`encrypt = true`）——整批明文作为一条 AEAD 记录加密，密钥来自
+TLS 握手（或任何带外协商）：
 
-```
-  Reader Fiber [R]
-  TCP → [protocol_id][payload_len][payload]
-  → 解析 protocol_id
-  → rb.send()
-       ↓
-  SubChannel[0].rb
-  SubChannel[1].rb
-  SubChannel[...].rb
+```zig
+const TmpMux = Mux(&.{ protocol1, protocol2 }, true);
+var mux: TmpMux = undefined;
+try mux.init(gpa, &sc, .{ .write_key = wk, .read_key = rk });
+try mux.run(.server, ctxs);
 ```
 
-SubChannel 接口与 `StreamChannel` 完全一致（`send`/`recv`），`symmetric_run` 零改动。
-
-**wire format**：`[protocol_id: u8][payload_len: u16 BE][payload]`
+加密模式下每条批记录 `[total_len u32][帧...]` 整体被 AEAD 认证；记录长度已升级为
+u32，批明文可超过 64 KiB。密钥轮换同样生效——KeyUpdate 记录在 Mux 层被透明吸收。
 
 **SubChannel.recv 超时**：`symmetric_run(..., 100)` → AutoCancel 100ms → `error.Canceled`。
-
-详见 `docs/family.md`。
 
 ### Codec
 
@@ -247,26 +256,31 @@ try graph.generateDot(.{}, &writer.interface);
 
 用 Graphviz 渲染：`dot -Tpng graph.dot -o graph.png`
 
-完整示例见 `tools/graph.zig`，运行 `zig build graph` 即可生成所有协议状态图。
-
 ## 文档
-
-项目文档位于 `docs/` 目录：
 
 | 文档 | 说明 |
 |------|------|
-| `docs/family.md` | 协议族（Protocol Family）设计——多协议共享 TCP 连接的架构说明 |
-| `examples/chat/README.md` | 多人聊天室 demo 设计文档：架构、推演史、压测验证、设计不变式 |
+| `README.md` | 本文件：框架概览与使用指南 |
+| `desigen.md` | Mux 传输层的设计笔记（wb/rb 缓冲模型、frame 聚合约束） |
+| `src/protocol/tls/README.md` | 简易 TLS 握手协议设计（中文） |
+| `src/protocol/tls/design.md` | 简易 TLS 握手协议设计（英文） |
+| `src/protocol/net_monitor/design.md` / `design_cn.md` | 网络延迟探测协议设计 |
 
-### 状态图
+### 测试
 
-用 Graph 模块和 Graphviz 生成 DOT 格式状态图：
+全部测试位于 `src/test/`（`zig build test` 编译运行）：
 
 ```bash
-zig build graph
+zig build test
 ```
 
-生成 `docs/graphs/*.dot` 和 `docs/graphs/*.png`，覆盖 `tls`、`net_monitor`、`chat_ctrl`、`chat_push` 四个协议。
+| 文件 | 覆盖 |
+|------|------|
+| `codec_test.zig` | 编解码畸形输入（非法布尔、越界 tag、超长切片） |
+| `channel_test.zig` | AEAD 错误路径（重放/篡改/长度）、密钥轮换、内存通道全双工 |
+| `runner_test.zig` | simulate / symmetric_run / 超时 / TLS 加密通道 / Mux 明文+加密 |
+| `tls_test.zig` | 握手协议（签名/MAC/临时公钥篡改、重放、会话隔离） |
+| `net_monitor_test.zig` | 网络延迟探测协议模拟与对称运行 |
 
 ---
 
@@ -282,30 +296,6 @@ pub fn process(ctx: *Ctx) !@This() {
     // ...
 }
 ```
-
----
-
-## 多人聊天室 demo（示例）
-
-项目包含一个完整的多人聊天室示例（`examples/chat/`），是框架能力的**端到端验证样本**：
-用 Mux 双协议承载控制面与推送面，用 SharedBoard（共享消息板 + 游标拉取）实现 O(1) 广播，
-在本机 20 核 / 31GB 上通过 **10000 并发压测**（10000/10000 连接零失败，10 万条广播 100% 送达）。
-
-- **Ctrl 协议**（锁步）：注册、消息、心跳、`/who`、退出
-- **Push 协议**（游标拉取）：按连接游标从 SharedBoard 批量拉取广播（8 条/帧）
-- **Room fiber**：成员表与消息板的唯一写者（Channel 串行化，无锁）
-- **SharedBoard**：预分配 + 原子游标 + release/acquire 无锁读
-
-```bash
-zig build
-zig-out/bin/chat-server 7788          # 服务器（广播压测加 --silent-join）
-zig-out/bin/chat-client alice         # 客户端（多开几个）
-ulimit -n 65535                       # 压测前提：fd 上限（10000 连接需 ≥20000）
-zig-out/bin/chat-loadtest 10000 127.0.0.1 7788 6    # 10000 并发压测
-zig-out/bin/chat-loadtest 10000 127.0.0.1 7788 15 10 # 广播压测：10 条 × 10000，期望 10 万条
-```
-
-完整设计文档（架构、推演史、验证数据、**设计不变式**）见 `examples/chat/README.md`。
 
 ---
 
@@ -340,6 +330,8 @@ try R.simulate(&client_ctx, &server_ctx, tls.ClientHello);
 ```
 
 详见 `src/protocol/tls/README.md`。
+
+TlsChannel 的密钥轮换（KeyUpdate）机制见上文「密钥轮换」小节。
 
 ---
 

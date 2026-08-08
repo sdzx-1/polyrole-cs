@@ -272,8 +272,15 @@ TCP stream
 ```
 
 `TlsChannel` wraps a `StreamChannel` with NaCl SecretBox AEAD encryption.
-Each message is framed as `nonce(24) || tag(16) || ct_len(2 BE) || ciphertext`.
-The nonce embeds a monotonic u64 counter for replay/reordering protection.
+Each record is framed as `nonce(24) || tag(16) || ct_len(4 BE) || ciphertext`.
+The nonce embeds a monotonic u64 counter plus a record-type byte (data /
+KeyUpdate), both AEAD-authenticated, for replay/reordering/tamper protection.
+
+In-band key rotation (TLS 1.3 KeyUpdate style): the sender lazily triggers on
+a record-count threshold (default 2^28) or time interval (default 10 min),
+seals a KeyUpdate record (plaintext = new epoch) and derives the next key
+via HKDF-SHA256; the receiver advances its read key in stream order and
+absorbs the record transparently. See `src/channel.zig` (`RotationConfig`).
 
 ## Dependencies
 
