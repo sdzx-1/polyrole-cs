@@ -244,6 +244,16 @@ try R.simulate(&client_ctx, &server_ctx, tls.ClientHello);
 网络部署：`symmetric_run` 跑在 `StreamChannel` 上（或 Mux 加密模式），握手后创建的
 `TlsChannel` 支持密钥轮换。
 
+**生产部署必须为握手设置超时**——`symmetric_run` 的 `recv_timeout_ms` 参数
+（如 10 秒）。否则恶意/慢速对端可以在握手阶段挂起连接不发送消息，
+server 将永久阻塞（握手 DoS）：
+
+```zig
+// 握手阶段：10s 超时（超时以 error.ReadFailed / error.Canceled 中止）
+try R.symmetric_run(.server, &server_ctx, &ch, tls.ClientHello, 10_000);
+// 数据阶段：TlsChannel 业务消息可另行配置超时
+```
+
 **安全边界**：
 
 | 提供 | 不提供 |

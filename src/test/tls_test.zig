@@ -428,3 +428,46 @@ test "handshake: client_fin MAC domain separation" {
     try testing.expectError(error.HmacInvalid, R.symmetric_run(.server, &s, &inj_ch, tls.ClientHello, null));
     try client_task.join();
 }
+
+// 恶意/慢速 client 不响应时，server 握手应在超时后中止，而不是永久挂起（生产 DoS 防护）
+test "handshake: unresponsive peer times out" {
+    const testing = std.testing;
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const allocator = testing.allocator;
+
+    const kp_s = try ed25519KeyPair();
+    var server = types.ServerContext.init(kp_s);
+
+    const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try localhost.listen(.{});
+    defer listener.close();
+
+    const StreamChannel = polyrole.channel.StreamChannel;
+    const R = Runner(tls.ClientHello);
+
+    // client：连接后保持静默（不发送 ClientHello），存活时间比 server 超时长
+    const S = struct {
+        fn silentClient(address: zio.net.Address) !void {
+            var stream = try address.connect(.{});
+            defer stream.close();
+            zio.sleep(zio.Duration.fromMilliseconds(500)) catch {};
+        }
+    };
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(S.silentClient, .{listener.socket.address});
+
+    var stream = try listener.accept(.{});
+    defer stream.close();
+
+    var ch: StreamChannel = undefined;
+    try ch.init(allocator, stream, 256, 256, 4096);
+    defer ch.deinit(allocator);
+
+    // 100ms 超时：client 不发消息 → server 应中止而非永久阻塞。
+    // zio 读取层把 fiber 取消包装为 ReadFailed，底层 err 才是 Canceled。
+    try testing.expectError(error.ReadFailed, R.symmetric_run(.server, &server, &ch, tls.ClientHello, 100));
+    try testing.expectEqual(error.Canceled, ch.stream_reader.err.?);
+    server.deinit();
+}
