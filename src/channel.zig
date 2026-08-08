@@ -203,7 +203,6 @@ pub const TlsChannel = struct {
         buf_size: usize,
     ) !void {
         std.debug.assert(buf_size >= 2);
-        std.debug.assert(buf_size <= 65535);
         self.inner = inner;
         self.encode_buf = try gpa.alloc(u8, buf_size);
         errdefer gpa.free(self.encode_buf);
@@ -246,10 +245,18 @@ pub const TlsChannel = struct {
         return try codec.decode(&reader, state_id, T);
     }
 
-    /// 记录模式读取：读取一个记录并返回其明文。
-    ///
-    /// 返回的切片布局为 `[frame_len(2 BE) || frame]`，在下次读取本通道之前有效。
+    /// 记录模式读取：读取一条 AEAD 记录并返回其明文（`[msg_len(2 BE) || msg]`，
+    /// 单消息语义）。在下次读取本通道之前有效。
     pub fn recordRead(self: *@This()) ![]const u8 {
+        const plain = try self.recordReadRaw();
+        const msg_len = std.mem.readInt(u16, plain[0..2], .big);
+        if (msg_len != plain.len - 2) return error.BadLength;
+        return plain;
+    }
+
+    /// 读取并打开一条 AEAD 记录，返回完整明文，不做消息语义解释。
+    /// 返回的切片在下次读取本通道之前有效。
+    pub fn recordReadRaw(self: *@This()) ![]const u8 {
         const sr = &self.inner.stream_reader.interface;
 
         const nonce = (try sr.take(24))[0..24].*;
@@ -260,7 +267,7 @@ pub const TlsChannel = struct {
         if (self.read_counter == std.math.maxInt(u64)) return error.NonceExhausted;
 
         const tag = try sr.take(16);
-        const ct_len = try sr.takeInt(u16, .big);
+        const ct_len = try sr.takeInt(u32, .big);
         if (ct_len < 2 or ct_len > self.decode_buf.len) return error.MessageTooLarge;
 
         const ct = try sr.take(ct_len);
@@ -276,18 +283,15 @@ pub const TlsChannel = struct {
             self.read_key,
         ) catch return error.DecryptFailed;
 
-        // 读取被认证的消息长度
-        const msg_len = std.mem.readInt(u16, self.decode_buf[0..2], .big);
-        if (msg_len != ct_len - 2) return error.BadLength;
-
         self.read_counter += 1;
 
-        return self.decode_buf[0 .. 2 + msg_len];
+        return self.decode_buf[0..ct_len];
     }
 
     /// 原子性地推进计数器并发送一条 AEAD 记录。
     /// nonce 永不复用——即使后续 flush 失败且调用方重试。
-    fn sealAndSend(self: *@This(), plaintext: []const u8) !void {
+    /// 线上格式：nonce(24) || tag(16) || ct_len(4 BE) || ciphertext(ct_len)。
+    pub fn sealAndSend(self: *@This(), plaintext: []const u8) !void {
         const this_counter = self.write_counter;
         if (this_counter == std.math.maxInt(u64)) return error.NonceExhausted;
         self.write_counter += 1;
@@ -305,7 +309,7 @@ pub const TlsChannel = struct {
         const sw = &self.inner.stream_writer.interface;
         try sw.writeAll(&nonce);
         try sw.writeAll(combined[0..16]); // 标签
-        try sw.writeInt(u16, @intCast(ct.len), .big);
+        try sw.writeInt(u32, @intCast(ct.len), .big);
         try sw.writeAll(ct);
         try sw.flush();
     }
@@ -338,9 +342,9 @@ fn craftRecord(key: [32]u8, counter: u64, plaintext: []const u8, out: []u8) usiz
     crypto.nacl.SecretBox.seal(combined, plaintext, nonce, key);
     @memcpy(out[0..24], &nonce);
     @memcpy(out[24..40], combined[0..16]); // tag
-    std.mem.writeInt(u16, out[40..42], @intCast(plaintext.len), .big);
-    @memcpy(out[42..][0..plaintext.len], combined[16..][0..plaintext.len]);
-    return 42 + plaintext.len;
+    std.mem.writeInt(u32, out[40..44], @intCast(plaintext.len), .big);
+    @memcpy(out[44..][0..plaintext.len], combined[16..][0..plaintext.len]);
+    return 44 + plaintext.len;
 }
 
 fn writeRaw(sc: *StreamChannel, bytes: []const u8) !void {
@@ -474,9 +478,9 @@ test "tls channel: oversized record is rejected before reading its body" {
     defer tc.deinit(allocator);
 
     // 只写头部（nonce + tag + ct_len=100），recordRead 在读取正文前就会拒绝。
-    var hdr: [42]u8 = [_]u8{0} ** 42;
+    var hdr: [44]u8 = [_]u8{0} ** 44;
     std.mem.writeInt(u64, hdr[0..8], 0, .big); // counter 0
-    std.mem.writeInt(u16, hdr[40..42], 100, .big);
+    std.mem.writeInt(u32, hdr[40..44], 100, .big);
 
     try writeRaw(&sc_client, &hdr);
     try testing.expectError(error.MessageTooLarge, tc.recordRead());

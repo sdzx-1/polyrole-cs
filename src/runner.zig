@@ -235,8 +235,15 @@ pub const SubChannel = struct {
     }
 };
 
-pub fn Mux(comptime protocols: []const Protocol) type {
+pub const MuxKeys = struct {
+    write_key: [32]u8,
+    read_key: [32]u8,
+};
+
+pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
     const protocol_count = protocols.len;
+    const StreamChannel = root.channel.StreamChannel;
+    const TlsChannel = root.channel.TlsChannel;
 
     return struct {
         send_end_buf: [protocol_count]usize,
@@ -244,20 +251,21 @@ pub fn Mux(comptime protocols: []const Protocol) type {
 
         sub_channels: [protocol_count]SubChannel,
 
-        writer: *Io.Writer,
-        reader: *Io.Reader,
+        sc: *StreamChannel,
+        tls: if (encrypt) TlsChannel else void = if (encrypt) undefined else {},
 
         send_id_collect_buff: [protocol_count]usize,
         send_id_collect: std.ArrayList(usize),
 
         send_buf: []u8,
-        recv_buf: []u8,
+        recv_buf: if (encrypt) void else []u8 = if (encrypt) {} else undefined,
 
         reader_handle: zio.JoinHandle(anyerror!void),
         writer_handle: zio.JoinHandle(anyerror!void),
 
-        pub fn init(self: *@This(), gpa: std.mem.Allocator, writer: *Io.Writer, reader: *Io.Reader) !void {
+        pub fn init(self: *@This(), gpa: std.mem.Allocator, sc: *StreamChannel, keys: ?MuxKeys) !void {
             self.send_end = .init(self.send_end_buf[0..]);
+            self.sc = sc;
 
             var total: usize = 0;
             for (0..protocol_count) |id| {
@@ -267,10 +275,13 @@ pub fn Mux(comptime protocols: []const Protocol) type {
             }
 
             self.send_buf = try gpa.alloc(u8, total + 4);
-            self.recv_buf = try gpa.alloc(u8, total + 4);
+            if (comptime !encrypt) self.recv_buf = try gpa.alloc(u8, total + 4);
 
-            self.writer = writer;
-            self.reader = reader;
+            if (comptime encrypt) {
+                const k = keys orelse return error.MissingKeys;
+                try self.tls.init(gpa, sc, k.write_key, k.read_key, total + 4);
+            }
+
             self.send_id_collect = .initBuffer(self.send_id_collect_buff[0..]);
             self.send_id_collect.clearRetainingCapacity();
 
@@ -283,7 +294,8 @@ pub fn Mux(comptime protocols: []const Protocol) type {
                 self.sub_channels[id].deinit(gpa);
             }
             gpa.free(self.send_buf);
-            gpa.free(self.recv_buf);
+            if (comptime !encrypt) gpa.free(self.recv_buf);
+            if (comptime encrypt) self.tls.deinit(gpa);
 
             self.reader_handle.cancel();
             self.writer_handle.cancel();
@@ -311,32 +323,43 @@ pub fn Mux(comptime protocols: []const Protocol) type {
         //[protocol_id u8][payload_len u16 BE][payload ...]
         pub fn reader_loop(self: *@This()) anyerror!void {
             while (true) {
-                const rbuff = self.recv_buf;
-                var total_len_buff: [4]u8 = undefined;
-                try self.reader.readSliceAll(&total_len_buff);
-                const total_len = std.mem.readInt(u32, &total_len_buff, .big);
-                if (total_len > rbuff.len) return error.TotalLenTooLarge;
-                try self.reader.readSliceAll(rbuff[0..total_len]);
-                var pos: usize = 0;
-                while (pos < total_len) {
-                    const protocol_id: usize = @intCast(rbuff[pos]);
-                    if (protocol_id >= protocol_count) return error.ProtocolIdTooLarge;
-                    pos += 1;
-                    var tmp_u16: [2]u8 = undefined;
-                    tmp_u16[0] = rbuff[pos];
-                    tmp_u16[1] = rbuff[pos + 1];
-                    const payload_len: usize = @intCast(std.mem.readInt(u16, &tmp_u16, .big));
-                    const current = &self.sub_channels[protocol_id];
-                    if (payload_len > protocols[protocol_id].max_massage_size or
-                        payload_len > current.recv_buff.len) return error.MessageTooLarge;
-                    pos += 2;
-                    if (pos + payload_len > total_len) return error.BadLength;
-                    try current.recv_start.receive();
-                    current.len = payload_len;
-                    @memcpy(current.recv_buff[0..payload_len], rbuff[pos .. pos + payload_len]);
-                    try current.recv_end.send({});
-                    pos += payload_len;
+                if (comptime encrypt) {
+                    const plain = try self.tls.recordReadRaw();
+                    const total_len = std.mem.readInt(u32, plain[0..4], .big);
+                    if (plain.len != total_len + 4) return error.BadLength;
+                    try self.dispatchFrames(plain[4..]);
+                } else {
+                    var total_len_buff: [4]u8 = undefined;
+                    try self.sc.stream_reader.interface.readSliceAll(&total_len_buff);
+                    const total_len = std.mem.readInt(u32, &total_len_buff, .big);
+                    if (total_len > self.recv_buf.len) return error.TotalLenTooLarge;
+                    try self.sc.stream_reader.interface.readSliceAll(self.recv_buf[0..total_len]);
+                    try self.dispatchFrames(self.recv_buf[0..total_len]);
                 }
+            }
+        }
+
+        /// 按帧头切分一个批明文，逐帧分发给对应 SubChannel。
+        fn dispatchFrames(self: *@This(), frames: []const u8) anyerror!void {
+            var pos: usize = 0;
+            while (pos < frames.len) {
+                const protocol_id: usize = @intCast(frames[pos]);
+                if (protocol_id >= protocol_count) return error.ProtocolIdTooLarge;
+                pos += 1;
+                var tmp_u16: [2]u8 = undefined;
+                tmp_u16[0] = frames[pos];
+                tmp_u16[1] = frames[pos + 1];
+                const payload_len: usize = @intCast(std.mem.readInt(u16, &tmp_u16, .big));
+                const current = &self.sub_channels[protocol_id];
+                if (payload_len > protocols[protocol_id].max_massage_size or
+                    payload_len > current.recv_buff.len) return error.MessageTooLarge;
+                pos += 2;
+                if (pos + payload_len > frames.len) return error.BadLength;
+                try current.recv_start.receive();
+                current.len = payload_len;
+                @memcpy(current.recv_buff[0..payload_len], frames[pos .. pos + payload_len]);
+                try current.recv_end.send({});
+                pos += payload_len;
             }
         }
 
@@ -365,8 +388,12 @@ pub fn Mux(comptime protocols: []const Protocol) type {
                     try curr.send_start.send({});
                 }
                 std.mem.writeInt(u32, self.send_buf[0..4], @intCast(pos - 4), .big);
-                try self.writer.writeAll(self.send_buf[0..pos]);
-                try self.writer.flush();
+                if (comptime encrypt) {
+                    try self.tls.sealAndSend(self.send_buf[0..pos]);
+                } else {
+                    try self.sc.stream_writer.interface.writeAll(self.send_buf[0..pos]);
+                    try self.sc.stream_writer.interface.flush();
+                }
             }
         }
     };
@@ -656,6 +683,7 @@ test "mux test" {
     const rt = try zio.Runtime.init(testing.allocator, .{});
     defer rt.deinit();
     const allocator = testing.allocator;
+    const StreamChannel = root.channel.StreamChannel;
 
     const P1 = CreateTestProtocol("p1", Exit);
     const R1 = Runner(P1.A);
@@ -690,7 +718,7 @@ test "mux test" {
     const TmpMux = Mux(&.{
         protocol1,
         protocol2,
-    });
+    }, false);
 
     const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var server = try localhost.listen(.{});
@@ -705,11 +733,12 @@ test "mux test" {
             var stream = try server_address.connect(.{});
             defer stream.close();
 
-            var stream_reader = stream.reader(&.{});
-            var stream_writer = stream.writer(&.{});
+            var sc: StreamChannel = undefined;
+            try sc.init(gpa, stream, 1024, 1024, 4096);
+            defer sc.deinit(gpa);
 
             var mux: TmpMux = undefined;
-            try mux.init(gpa, &stream_writer.interface, &stream_reader.interface);
+            try mux.init(gpa, &sc, null);
             defer mux.deinit(gpa);
 
             try mux.run(.client, ctxs);
@@ -723,11 +752,105 @@ test "mux test" {
     var stream = try server.accept(.{});
     defer stream.close();
 
-    var stream_reader = stream.reader(&.{});
-    var stream_writer = stream.writer(&.{});
+    var sc: StreamChannel = undefined;
+    try sc.init(allocator, stream, 1024, 1024, 4096);
+    defer sc.deinit(allocator);
 
     var mux: TmpMux = undefined;
-    try mux.init(allocator, &stream_writer.interface, &stream_reader.interface);
+    try mux.init(allocator, &sc, null);
+    defer mux.deinit(allocator);
+
+    try mux.run(.server, .{ &server_context, &server_context1 });
+
+    // 服务端跑完时客户端可能还在收 C 阶段的剩余消息,必须等客户端完成再断言。
+    try group.wait();
+    try testing.expectEqual(client_context, 1000);
+    try testing.expectEqual(client_context1, 1000);
+}
+
+test "mux test encrypted" {
+    const testing = std.testing;
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const allocator = testing.allocator;
+    const StreamChannel = root.channel.StreamChannel;
+
+    const P1 = CreateTestProtocol("p1", Exit);
+    const R1 = Runner(P1.A);
+
+    const P2 = CreateTestProtocol("p2", Exit);
+    const R2 = Runner(P2.A);
+
+    var client_context: i32 = 0;
+    var server_context: i32 = 0;
+
+    var client_context1: i32 = 0;
+    var server_context1: i32 = 0;
+
+    const protocol1: Protocol = .{
+        .enter = P1.A,
+        .runner = R1,
+        .client_ct = i32,
+        .server_ct = i32,
+        .max_massage_size = 1024,
+        .recv_timeout_ms = null,
+    };
+
+    const protocol2: Protocol = .{
+        .enter = P2.A,
+        .runner = R2,
+        .client_ct = i32,
+        .server_ct = i32,
+        .max_massage_size = 1024,
+        .recv_timeout_ms = null,
+    };
+
+    const TmpMux = Mux(&.{
+        protocol1,
+        protocol2,
+    }, true);
+
+    const key = [_]u8{0x42} ** 32;
+    const keys: MuxKeys = .{ .write_key = key, .read_key = key };
+
+    const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try localhost.listen(.{});
+    defer server.close();
+
+    const S = struct {
+        fn clientFn(
+            server_address: zio.net.Address,
+            gpa: std.mem.Allocator,
+            ctxs: struct { *i32, *i32 },
+        ) !void {
+            var stream = try server_address.connect(.{});
+            defer stream.close();
+
+            var sc: StreamChannel = undefined;
+            try sc.init(gpa, stream, 1024, 1024, 4096);
+            defer sc.deinit(gpa);
+
+            var mux: TmpMux = undefined;
+            try mux.init(gpa, &sc, keys);
+            defer mux.deinit(gpa);
+
+            try mux.run(.client, ctxs);
+        }
+    };
+
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(S.clientFn, .{ server.socket.address, allocator, .{ &client_context, &client_context1 } });
+
+    var stream = try server.accept(.{});
+    defer stream.close();
+
+    var sc: StreamChannel = undefined;
+    try sc.init(allocator, stream, 1024, 1024, 4096);
+    defer sc.deinit(allocator);
+
+    var mux: TmpMux = undefined;
+    try mux.init(allocator, &sc, keys);
     defer mux.deinit(allocator);
 
     try mux.run(.server, .{ &server_context, &server_context1 });
