@@ -88,7 +88,6 @@ test "symmetric run" {
     var server = try localhost.listen(.{});
     defer server.close();
 
-
     const S = struct {
         fn clientFn(server_address: zio.net.Address, ctx: *i32) !void {
             var stream = try server_address.connect(.{});
@@ -348,7 +347,10 @@ test "mux test" {
             try mux.init(gpa, &sc, null);
             defer mux.deinit(gpa);
 
-            try mux.run(.client, ctxs);
+            var group: zio.Group = .init;
+
+            try mux.run(.client, &group, ctxs);
+            try group.wait();
         }
     };
 
@@ -367,7 +369,7 @@ test "mux test" {
     try mux.init(allocator, &sc, null);
     defer mux.deinit(allocator);
 
-    try mux.run(.server, .{ &server_context, &server_context1 });
+    try mux.run(.server, &group, .{ &server_context, &server_context1 });
 
     // 服务端跑完时客户端可能还在收 C 阶段的剩余消息,必须等客户端完成再断言。
     try group.wait();
@@ -452,7 +454,10 @@ test "mux test encrypted" {
             tls_ctx.deinit();
             defer mux.deinit(gpa);
 
-            try mux.run(.client, ctxs);
+            var group: zio.Group = .init;
+
+            try mux.run(.client, &group, ctxs);
+            try group.wait();
         }
     };
 
@@ -482,7 +487,7 @@ test "mux test encrypted" {
     tls_ctx.deinit();
     defer mux.deinit(allocator);
 
-    try mux.run(.server, .{ &server_context, &server_context1 });
+    try mux.run(.server, &group, .{ &server_context, &server_context1 });
 
     // 服务端跑完时客户端可能还在收 C 阶段的剩余消息,必须等客户端完成再断言。
     try group.wait();

@@ -304,9 +304,9 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
         pub fn run(
             self: *@This(),
             comptime role: Role,
+            group: *zio.Group,
             ctxs: anytype,
         ) !void {
-            var group: zio.Group = .init;
             inline for (0..protocol_count) |id| {
                 const curr = protocols[id];
                 const S = struct {
@@ -317,7 +317,6 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
                 };
                 try group.spawn(S.foo, .{ ctxs[id], &self.sub_channels[id] });
             }
-            try group.wait();
         }
 
         //[total_len u32 BE][protocol_id u8][payload_len u16 BE][payload ...]
