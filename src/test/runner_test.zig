@@ -321,10 +321,8 @@ test "mux test" {
         .recv_timeout_ms = null,
     };
 
-    const TmpMux = Mux(&.{
-        protocol1,
-        protocol2,
-    }, false);
+    const TmpMuxClient = Mux(&.{ protocol1, protocol2 }, .client, false);
+    const TmpMuxServer = Mux(&.{ protocol1, protocol2 }, .server, false);
 
     const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var server = try localhost.listen(.{});
@@ -343,13 +341,13 @@ test "mux test" {
             try sc.init(gpa, stream, 1024, 1024, 4096);
             defer sc.deinit(gpa);
 
-            var mux: TmpMux = undefined;
-            try mux.init(gpa, &sc, null);
+            var mux: TmpMuxClient = undefined;
+            try mux.init(gpa, ctxs, &sc, null);
             defer mux.deinit(gpa);
 
             var group: zio.Group = .init;
 
-            try mux.run(.client, &group, ctxs);
+            try mux.run(&group);
             try group.wait();
         }
     };
@@ -365,11 +363,11 @@ test "mux test" {
     try sc.init(allocator, stream, 1024, 1024, 4096);
     defer sc.deinit(allocator);
 
-    var mux: TmpMux = undefined;
-    try mux.init(allocator, &sc, null);
+    var mux: TmpMuxServer = undefined;
+    try mux.init(allocator, .{ &server_context, &server_context1 }, &sc, null);
     defer mux.deinit(allocator);
 
-    try mux.run(.server, &group, .{ &server_context, &server_context1 });
+    try mux.run(&group);
 
     // 服务端跑完时客户端可能还在收 C 阶段的剩余消息,必须等客户端完成再断言。
     try group.wait();
@@ -421,10 +419,8 @@ test "mux test encrypted" {
         .recv_timeout_ms = null,
     };
 
-    const TmpMux = Mux(&.{
-        protocol1,
-        protocol2,
-    }, true);
+    const TmpMuxClient = Mux(&.{ protocol1, protocol2 }, .client, true);
+    const TmpMuxServer = Mux(&.{ protocol1, protocol2 }, .server, true);
 
     const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
     var server = try localhost.listen(.{});
@@ -449,14 +445,14 @@ test "mux test encrypted" {
             try R_tls.symmetric_run(.client, &tls_ctx, &sc, tls.ClientHello, null);
 
             // 阶段 2：加密 Mux——复用 sc，密钥来自握手
-            var mux: TmpMux = undefined;
-            try mux.init(gpa, &sc, .{ .write_key = tls_ctx.write_key, .read_key = tls_ctx.read_key });
+            var mux: TmpMuxClient = undefined;
+            try mux.init(gpa, ctxs, &sc, .{ .write_key = tls_ctx.write_key, .read_key = tls_ctx.read_key });
             tls_ctx.deinit();
             defer mux.deinit(gpa);
 
             var group: zio.Group = .init;
 
-            try mux.run(.client, &group, ctxs);
+            try mux.run(&group);
             try group.wait();
         }
     };
@@ -482,12 +478,12 @@ test "mux test encrypted" {
     try R_tls.symmetric_run(.server, &tls_ctx, &sc, tls.ClientHello, null);
 
     // 阶段 2：加密 Mux——复用 sc，密钥来自握手
-    var mux: TmpMux = undefined;
-    try mux.init(allocator, &sc, .{ .write_key = tls_ctx.write_key, .read_key = tls_ctx.read_key });
+    var mux: TmpMuxServer = undefined;
+    try mux.init(allocator, .{ &server_context, &server_context1 }, &sc, .{ .write_key = tls_ctx.write_key, .read_key = tls_ctx.read_key });
     tls_ctx.deinit();
     defer mux.deinit(allocator);
 
-    try mux.run(.server, &group, .{ &server_context, &server_context1 });
+    try mux.run(&group);
 
     // 服务端跑完时客户端可能还在收 C 阶段的剩余消息,必须等客户端完成再断言。
     try group.wait();

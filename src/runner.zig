@@ -246,10 +246,21 @@ pub const ErrorInfo = struct {
     err: anyerror,
 };
 
-pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
+fn CreateContextTuple(comptime protocols: []const Protocol, comptime role: Role) type {
+    const protocol_count = protocols.len;
+    var types: [protocol_count]type = undefined;
+    for (0..protocol_count) |i| {
+        const CT = if (role == .client) protocols[i].client_ct else protocols[i].server_ct;
+        types[i] = @Pointer(.one, .{}, CT, null);
+    }
+    return @Tuple(&types);
+}
+
+pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime encrypt: bool) type {
     const protocol_count = protocols.len;
     const StreamChannel = root.channel.StreamChannel;
     const TlsChannel = root.channel.TlsChannel;
+    const Ctxs = CreateContextTuple(protocols, role);
 
     return struct {
         send_end_buf: [protocol_count]usize,
@@ -273,7 +284,9 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
         error_channel_buf: [protocol_count]ErrorInfo,
         error_channel: zio.Channel(ErrorInfo),
 
-        pub fn init(self: *@This(), gpa: std.mem.Allocator, sc: *StreamChannel, keys: ?MuxKeys) !void {
+        ctxs: Ctxs,
+
+        pub fn init(self: *@This(), gpa: std.mem.Allocator, ctxs: Ctxs, sc: *StreamChannel, keys: ?MuxKeys) !void {
             self.send_end = .init(self.send_end_buf[0..]);
             self.sc = sc;
 
@@ -299,6 +312,8 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
             self.writer_handle = try zio.spawn(writer_loop, .{self});
 
             self.error_channel = .init(self.error_channel_buf[0..]);
+
+            self.ctxs = ctxs;
         }
 
         pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
@@ -313,12 +328,7 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
             self.writer_handle.cancel();
         }
 
-        pub fn run(
-            self: *@This(),
-            comptime role: Role,
-            group: *zio.Group,
-            ctxs: anytype,
-        ) !void {
+        pub fn run(self: *@This(), group: *zio.Group) !void {
             inline for (0..protocol_count) |id| {
                 const curr = protocols[id];
                 const S = struct {
@@ -329,7 +339,7 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
                         };
                     }
                 };
-                try group.spawn(S.protocolTask, .{ ctxs[id], &self.error_channel, &self.sub_channels[id] });
+                try group.spawn(S.protocolTask, .{ self.ctxs[id], &self.error_channel, &self.sub_channels[id] });
             }
         }
 
