@@ -334,10 +334,11 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
                 const S = struct {
                     const Ctx = if (role == .client) curr.client_ct else curr.server_ct;
                     pub fn protocolTask(ctx: *Ctx, err_chan: *zio.Channel(ErrorInfo), channel: *SubChannel) void {
+                        var task_err: ?anyerror = null;
                         curr.runner.symmetric_run(role, ctx, channel, curr.enter, curr.recv_timeout_ms) catch |err| {
-                            err_chan.send(.{ .protocol_id = id, .err = err }) catch @panic("mux: error_channel full");
+                            task_err = err;
                         };
-                        err_chan.send(.{ .protocol_id = id, .err = null }) catch @panic("mux: error_channel full");
+                        err_chan.send(.{ .protocol_id = id, .err = task_err }) catch @panic("mux: error_channel full");
                     }
                 };
                 try group.spawn(S.protocolTask, .{ self.ctxs[id], &self.error_channel, &self.sub_channels[id] });
