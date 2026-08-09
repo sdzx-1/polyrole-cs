@@ -325,10 +325,7 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
                     const Ctx = if (role == .client) curr.client_ct else curr.server_ct;
                     pub fn protocolTask(ctx: *Ctx, err_chan: *zio.Channel(ErrorInfo), channel: *SubChannel) void {
                         curr.runner.symmetric_run(role, ctx, channel, curr.enter, curr.recv_timeout_ms) catch |err| {
-                            err_chan.send(.{ .protocol_id = id, .err = err }) catch |e| {
-                                std.debug.print("mux: error_channel full while reporting protocol error: {s}\n", .{@errorName(e)});
-                                @panic("mux: error_channel full");
-                            };
+                            err_chan.send(.{ .protocol_id = id, .err = err }) catch @panic("mux: error_channel full");
                         };
                     }
                 };
