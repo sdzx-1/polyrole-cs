@@ -241,8 +241,9 @@ pub const MuxKeys = struct {
 };
 
 pub const ErrorInfo = struct {
-    id: usize,
-    error_: anyerror,
+    /// protocols 数组下标
+    protocol_id: usize,
+    err: anyerror,
 };
 
 pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
@@ -268,6 +269,7 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
         reader_handle: zio.JoinHandle(anyerror!void),
         writer_handle: zio.JoinHandle(anyerror!void),
 
+        /// 每个协议至多上报一条错误（容量 = 协议数），调用方应在 wait 后消费。
         error_channel_buf: [protocol_count]ErrorInfo,
         error_channel: zio.Channel(ErrorInfo),
 
@@ -321,13 +323,16 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
                 const curr = protocols[id];
                 const S = struct {
                     const Ctx = if (role == .client) curr.client_ct else curr.server_ct;
-                    pub fn foo(ctx: *Ctx, error_channel_: *zio.Channel(ErrorInfo), channel: *SubChannel) void {
+                    pub fn protocolTask(ctx: *Ctx, err_chan: *zio.Channel(ErrorInfo), channel: *SubChannel) void {
                         curr.runner.symmetric_run(role, ctx, channel, curr.enter, curr.recv_timeout_ms) catch |err| {
-                            error_channel_.send(.{ .id = id, .error_ = err }) catch @panic("strange happened!");
+                            err_chan.send(.{ .protocol_id = id, .err = err }) catch |e| {
+                                std.debug.print("mux: error_channel full while reporting protocol error: {s}\n", .{@errorName(e)});
+                                @panic("mux: error_channel full");
+                            };
                         };
                     }
                 };
-                try group.spawn(S.foo, .{ ctxs[id], &self.error_channel, &self.sub_channels[id] });
+                try group.spawn(S.protocolTask, .{ ctxs[id], &self.error_channel, &self.sub_channels[id] });
             }
         }
 
