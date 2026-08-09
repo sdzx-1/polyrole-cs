@@ -277,6 +277,77 @@ test "tls channel: out-of-order key update rejected" {
     try testing.expectError(error.KeyRotationOutOfOrder, tc.recordReadRaw());
 }
 
+// 两端同时按各自方向轮换（threshold=2，第 3 条消息前触发），
+// 双向通信在各自新密钥下继续正常。
+test "tls channel: simultaneous rotation on both directions" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const pair = try SocketPair.connect();
+    defer pair.client.close();
+    defer pair.server.close();
+
+    const key = [_]u8{0x42} ** 32;
+    var sc_client: StreamChannel = undefined;
+    try sc_client.init(allocator, pair.client, 256, 256, 4096);
+    defer sc_client.deinit(allocator);
+    var sc_server: StreamChannel = undefined;
+    try sc_server.init(allocator, pair.server, 256, 256, 4096);
+    defer sc_server.deinit(allocator);
+
+    var tc_client: TlsChannel = undefined;
+    try tc_client.init(allocator, &sc_client, key, key, 256);
+    defer tc_client.deinit(allocator);
+    var tc_server: TlsChannel = undefined;
+    try tc_server.init(allocator, &sc_server, key, key, 256);
+    defer tc_server.deinit(allocator);
+
+    // 两端都配置记录数阈值触发，各自独立轮换自己的写方向
+    tc_client.setRotationConfig(.{ .interval_ns = 0, .record_threshold = 2 });
+    tc_server.setRotationConfig(.{ .interval_ns = 0, .record_threshold = 2 });
+
+    // 4 轮双向交替：第 3 轮发送前两端各自触发一次轮换
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        var buf_c: [8]u8 = undefined;
+        const msg_c = try std.fmt.bufPrint(&buf_c, "c-{d}", .{i});
+        try tc_client.sealAndSend(msg_c); // client 写方向（含 client 侧轮换）
+        const got_s = try tc_server.recordReadRaw(); // server 吸收（含 client 的 KeyUpdate）
+        try testing.expectEqualStrings(msg_c, got_s);
+
+        var buf_s: [8]u8 = undefined;
+        const msg_s = try std.fmt.bufPrint(&buf_s, "s-{d}", .{i});
+        try tc_server.sealAndSend(msg_s); // server 写方向（含 server 侧轮换）
+        const got_c = try tc_client.recordReadRaw(); // client 吸收（含 server 的 KeyUpdate）
+        try testing.expectEqualStrings(msg_s, got_c);
+    }
+
+    // 两端各自推进自己的写 epoch，并吸收对端的读 epoch（方向独立）
+    try testing.expectEqual(@as(u32, 1), tc_client.write_epoch);
+    try testing.expectEqual(@as(u32, 1), tc_client.read_epoch);
+    try testing.expectEqual(@as(u32, 1), tc_server.write_epoch);
+    try testing.expectEqual(@as(u32, 1), tc_server.read_epoch);
+
+    // 四个方向的密钥均已派生（不再是初始 key）
+    try testing.expect(!std.mem.eql(u8, &key, &tc_client.write_key));
+    try testing.expect(!std.mem.eql(u8, &key, &tc_client.read_key));
+    try testing.expect(!std.mem.eql(u8, &key, &tc_server.write_key));
+    try testing.expect(!std.mem.eql(u8, &key, &tc_server.read_key));
+
+    // 轮换后双向继续正常（第 5/6 轮，各自新密钥下）
+    var buf_c: [8]u8 = undefined;
+    const msg_c = try std.fmt.bufPrint(&buf_c, "c-4", .{});
+    try tc_client.sealAndSend(msg_c);
+    try testing.expectEqualStrings(msg_c, try tc_server.recordReadRaw());
+
+    var buf_s: [8]u8 = undefined;
+    const msg_s = try std.fmt.bufPrint(&buf_s, "s-4", .{});
+    try tc_server.sealAndSend(msg_s);
+    try testing.expectEqualStrings(msg_s, try tc_client.recordReadRaw());
+}
+
 // ─────────────────── InMemoryChannel 全双工验证测试 ───────────────────
 
 const SmcState = enum { hello };
