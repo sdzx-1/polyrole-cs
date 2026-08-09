@@ -240,6 +240,11 @@ pub const MuxKeys = struct {
     read_key: [32]u8,
 };
 
+pub const ErrorInfo = struct {
+    id: usize,
+    error_: anyerror,
+};
+
 pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
     const protocol_count = protocols.len;
     const StreamChannel = root.channel.StreamChannel;
@@ -262,6 +267,9 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
 
         reader_handle: zio.JoinHandle(anyerror!void),
         writer_handle: zio.JoinHandle(anyerror!void),
+
+        error_channel_buf: [protocol_count]ErrorInfo,
+        error_channel: zio.Channel(ErrorInfo),
 
         pub fn init(self: *@This(), gpa: std.mem.Allocator, sc: *StreamChannel, keys: ?MuxKeys) !void {
             self.send_end = .init(self.send_end_buf[0..]);
@@ -287,6 +295,8 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
 
             self.reader_handle = try zio.spawn(reader_loop, .{self});
             self.writer_handle = try zio.spawn(writer_loop, .{self});
+
+            self.error_channel = .init(self.error_channel_buf[0..]);
         }
 
         pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
@@ -311,11 +321,13 @@ pub fn Mux(comptime protocols: []const Protocol, comptime encrypt: bool) type {
                 const curr = protocols[id];
                 const S = struct {
                     const Ctx = if (role == .client) curr.client_ct else curr.server_ct;
-                    pub fn foo(ctx: *Ctx, channel: *SubChannel) !void {
-                        try curr.runner.symmetric_run(role, ctx, channel, curr.enter, curr.recv_timeout_ms);
+                    pub fn foo(ctx: *Ctx, error_channel_: *zio.Channel(ErrorInfo), channel: *SubChannel) void {
+                        curr.runner.symmetric_run(role, ctx, channel, curr.enter, curr.recv_timeout_ms) catch |err| {
+                            error_channel_.send(.{ .id = id, .error_ = err }) catch @panic("strange happened!");
+                        };
                     }
                 };
-                try group.spawn(S.foo, .{ ctxs[id], &self.sub_channels[id] });
+                try group.spawn(S.foo, .{ ctxs[id], &self.error_channel, &self.sub_channels[id] });
             }
         }
 
