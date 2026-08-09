@@ -243,7 +243,7 @@ pub const MuxKeys = struct {
 pub const ErrorInfo = struct {
     /// protocols 数组下标
     protocol_id: usize,
-    err: anyerror,
+    err: ?anyerror,
 };
 
 fn CreateContextTuple(comptime protocols: []const Protocol, comptime role: Role) type {
@@ -337,6 +337,7 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
                         curr.runner.symmetric_run(role, ctx, channel, curr.enter, curr.recv_timeout_ms) catch |err| {
                             err_chan.send(.{ .protocol_id = id, .err = err }) catch @panic("mux: error_channel full");
                         };
+                        err_chan.send(.{ .protocol_id = id, .err = null }) catch @panic("mux: error_channel full");
                     }
                 };
                 try group.spawn(S.protocolTask, .{ self.ctxs[id], &self.error_channel, &self.sub_channels[id] });
