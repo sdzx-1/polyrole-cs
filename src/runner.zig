@@ -404,29 +404,21 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
                         error.ChannelClosed => return err,
                     }
                 }
-                try self.muxFrames();
-            }
-        }
-
-        /// 与 dispatchFrames 对称:把已就绪子帧聚合成一个批量帧写出。
-        /// 输出格式与 dispatchFrames 的输入一致:
-        /// `[total_len u32 BE][子帧 ...]`,子帧 = `[protocol_id u8][payload_len u16 BE][payload]`。
-        /// 每聚合一个子帧即归还其 send_start 许可,随后一次性写出(加密时整体 seal)。
-        fn muxFrames(self: *@This()) anyerror!void {
-            var pos: usize = 4;
-            for (self.send_id_collect.items) |id| {
-                const curr = &self.sub_channels[id];
-                const len = curr.len;
-                @memcpy(self.send_buf[pos .. pos + len], curr.send_buff[0..len]);
-                pos += len;
-                try curr.send_start.send({});
-            }
-            std.mem.writeInt(u32, self.send_buf[0..4], @intCast(pos - 4), .big);
-            if (comptime encrypt) {
-                try self.tls.sealAndSend(self.send_buf[0..pos]);
-            } else {
-                try self.sc.stream_writer.interface.writeAll(self.send_buf[0..pos]);
-                try self.sc.stream_writer.interface.flush();
+                var pos: usize = 4;
+                for (self.send_id_collect.items) |id| {
+                    const curr = &self.sub_channels[id];
+                    const len = curr.len;
+                    @memcpy(self.send_buf[pos .. pos + len], curr.send_buff[0..len]);
+                    pos += len;
+                    try curr.send_start.send({});
+                }
+                std.mem.writeInt(u32, self.send_buf[0..4], @intCast(pos - 4), .big);
+                if (comptime encrypt) {
+                    try self.tls.sealAndSend(self.send_buf[0..pos]);
+                } else {
+                    try self.sc.stream_writer.interface.writeAll(self.send_buf[0..pos]);
+                    try self.sc.stream_writer.interface.flush();
+                }
             }
         }
     };
