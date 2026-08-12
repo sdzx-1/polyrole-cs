@@ -60,10 +60,10 @@ test "tls channel: replayed record is rejected" {
 
     const key = [_]u8{0x42} ** 32;
     var sc_client: StreamChannel = undefined;
-    try sc_client.init(allocator, pair.client, 256, 256, 4096);
+    try sc_client.init(allocator, pair.client, 256, 256);
     defer sc_client.deinit(allocator);
     var sc_server: StreamChannel = undefined;
-    try sc_server.init(allocator, pair.server, 256, 256, 4096);
+    try sc_server.init(allocator, pair.server, 256, 256);
     defer sc_server.deinit(allocator);
 
     var tc: TlsChannel = undefined;
@@ -100,10 +100,10 @@ test "tls channel: corrupted tag fails AEAD" {
 
     const key = [_]u8{0x42} ** 32;
     var sc_client: StreamChannel = undefined;
-    try sc_client.init(allocator, pair.client, 256, 256, 4096);
+    try sc_client.init(allocator, pair.client, 256, 256);
     defer sc_client.deinit(allocator);
     var sc_server: StreamChannel = undefined;
-    try sc_server.init(allocator, pair.server, 256, 256, 4096);
+    try sc_server.init(allocator, pair.server, 256, 256);
     defer sc_server.deinit(allocator);
 
     var tc: TlsChannel = undefined;
@@ -132,10 +132,10 @@ test "tls channel: authenticated length mismatch is rejected" {
 
     const key = [_]u8{0x42} ** 32;
     var sc_client: StreamChannel = undefined;
-    try sc_client.init(allocator, pair.client, 256, 256, 4096);
+    try sc_client.init(allocator, pair.client, 256, 256);
     defer sc_client.deinit(allocator);
     var sc_server: StreamChannel = undefined;
-    try sc_server.init(allocator, pair.server, 256, 256, 4096);
+    try sc_server.init(allocator, pair.server, 256, 256);
     defer sc_server.deinit(allocator);
 
     var tc: TlsChannel = undefined;
@@ -164,10 +164,10 @@ test "tls channel: oversized record is rejected before reading its body" {
 
     const key = [_]u8{0x42} ** 32;
     var sc_client: StreamChannel = undefined;
-    try sc_client.init(allocator, pair.client, 256, 256, 4096);
+    try sc_client.init(allocator, pair.client, 256, 256);
     defer sc_client.deinit(allocator);
     var sc_server: StreamChannel = undefined;
-    try sc_server.init(allocator, pair.server, 256, 256, 4096);
+    try sc_server.init(allocator, pair.server, 256, 256);
     defer sc_server.deinit(allocator);
 
     // 缓冲区只有 32 字节，记录却声明 100 字节正文。
@@ -197,10 +197,10 @@ test "tls channel: key rotation keeps channel working" {
 
     const key = [_]u8{0x42} ** 32;
     var sc_client: StreamChannel = undefined;
-    try sc_client.init(allocator, pair.client, 256, 256, 4096);
+    try sc_client.init(allocator, pair.client, 256, 256);
     defer sc_client.deinit(allocator);
     var sc_server: StreamChannel = undefined;
-    try sc_server.init(allocator, pair.server, 256, 256, 4096);
+    try sc_server.init(allocator, pair.server, 256, 256);
     defer sc_server.deinit(allocator);
 
     var tc_client: TlsChannel = undefined;
@@ -243,10 +243,10 @@ test "tls channel: out-of-order key update rejected" {
 
     const key = [_]u8{0x42} ** 32;
     var sc_client: StreamChannel = undefined;
-    try sc_client.init(allocator, pair.client, 256, 256, 4096);
+    try sc_client.init(allocator, pair.client, 256, 256);
     defer sc_client.deinit(allocator);
     var sc_server: StreamChannel = undefined;
-    try sc_server.init(allocator, pair.server, 256, 256, 4096);
+    try sc_server.init(allocator, pair.server, 256, 256);
     defer sc_server.deinit(allocator);
 
     var tc: TlsChannel = undefined;
@@ -291,10 +291,10 @@ test "tls channel: simultaneous rotation on both directions" {
 
     const key = [_]u8{0x42} ** 32;
     var sc_client: StreamChannel = undefined;
-    try sc_client.init(allocator, pair.client, 256, 256, 4096);
+    try sc_client.init(allocator, pair.client, 256, 256);
     defer sc_client.deinit(allocator);
     var sc_server: StreamChannel = undefined;
-    try sc_server.init(allocator, pair.server, 256, 256, 4096);
+    try sc_server.init(allocator, pair.server, 256, 256);
     defer sc_server.deinit(allocator);
 
     var tc_client: TlsChannel = undefined;
@@ -375,8 +375,8 @@ test "smc: full-duplex - both directions flow concurrently" {
     defer half1.deinit(allocator);
     defer half2.deinit(allocator);
 
-    const ch_c: InMemoryChannel = .{ .max_slice_len = 4096, .half_self = &half1, .half_peer = &half2 };
-    const ch_s: InMemoryChannel = .{ .max_slice_len = 4096, .half_self = &half2, .half_peer = &half1 };
+    const ch_c: InMemoryChannel = .{ .half_self = &half1, .half_peer = &half2 };
+    const ch_s: InMemoryChannel = .{ .half_self = &half2, .half_peer = &half1 };
 
     const n = 200;
     const Side = struct {
@@ -429,8 +429,8 @@ test "smc: server sends first - client never receives its own message" {
     defer half1.deinit(allocator);
     defer half2.deinit(allocator);
 
-    const ch_c: InMemoryChannel = .{ .max_slice_len = 4096, .half_self = &half1, .half_peer = &half2 };
-    const ch_s: InMemoryChannel = .{ .max_slice_len = 4096, .half_self = &half2, .half_peer = &half1 };
+    const ch_c: InMemoryChannel = .{ .half_self = &half1, .half_peer = &half2 };
+    const ch_s: InMemoryChannel = .{ .half_self = &half2, .half_peer = &half1 };
 
     const Side = struct {
         fn serverFirst(c: *const InMemoryChannel) !void {

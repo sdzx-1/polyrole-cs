@@ -19,7 +19,10 @@ const Counter = struct {
     pub const A = union(enum) {
         add: polyrole.Data(void, B),
         pub const info: Info = .{ .agent = .client, .name = "A" };
-        pub fn process(ctx: *i32) @This() { _ = ctx; return .add; }
+        pub fn process(ctx: *i32) @This() {
+            _ = ctx;
+            return .add;
+        }
     };
 };
 
@@ -47,8 +50,8 @@ test "symmetric_run over InMemoryChannel" {
     defer h1.deinit(allocator);
     defer h2.deinit(allocator);
 
-    var ch_c: InMemoryChannel = .{ .max_slice_len = 1024, .half_self = &h1, .half_peer = &h2 };
-    var ch_s: InMemoryChannel = .{ .max_slice_len = 1024, .half_self = &h2, .half_peer = &h1 };
+    var ch_c: InMemoryChannel = .{ .half_self = &h1, .half_peer = &h2 };
+    var ch_s: InMemoryChannel = .{ .half_self = &h2, .half_peer = &h1 };
 
     const ClientRunner = struct {
         fn run(ch: *InMemoryChannel, ctx: *i32) !void {

@@ -67,7 +67,7 @@ test "symmetric run handshake" {
             defer stream.close();
 
             var ch: StreamChannel = undefined;
-            try ch.init(allocator, stream, 256, 256, 4096);
+            try ch.init(allocator, stream, 256, 256);
             defer ch.deinit(allocator);
 
             try R.symmetric_run(.client, ctx, &ch, tls.ClientHello, null);
@@ -83,7 +83,7 @@ test "symmetric run handshake" {
     defer stream.close();
 
     var ch: StreamChannel = undefined;
-    try ch.init(allocator, stream, 256, 256, 4096);
+    try ch.init(allocator, stream, 256, 256);
     defer ch.deinit(allocator);
 
     try R.symmetric_run(.server, &server, &ch, tls.ClientHello, null);
@@ -340,8 +340,8 @@ fn makeHandshakeChannelPair(gpa: std.mem.Allocator) !ChannelPair {
     try h1.init(gpa, 512);
     try h2.init(gpa, 512);
     return .{
-        .a = InMemoryChannel{ .max_slice_len = 4096, .half_self = h1, .half_peer = h2 },
-        .b = InMemoryChannel{ .max_slice_len = 4096, .half_self = h2, .half_peer = h1 },
+        .a = InMemoryChannel{ .half_self = h1, .half_peer = h2 },
+        .b = InMemoryChannel{ .half_self = h2, .half_peer = h1 },
         .h1 = h1,
         .h2 = h2,
         .gpa = gpa,
@@ -462,7 +462,7 @@ test "handshake: unresponsive peer times out" {
     defer stream.close();
 
     var ch: StreamChannel = undefined;
-    try ch.init(allocator, stream, 256, 256, 4096);
+    try ch.init(allocator, stream, 256, 256);
     defer ch.deinit(allocator);
 
     // 100ms 超时：client 不发消息 → server 应中止而非永久阻塞。

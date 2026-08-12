@@ -10,9 +10,6 @@ pub const StreamChannel = struct {
     stream: Stream,
     rbuff: []u8,
     wbuff: []u8,
-    /// 从线上解码单个 `[]const u8` 切片的上限。
-    /// 防止攻击者控制长度前缀导致流路径上的无界阻塞读取或缓冲膨胀。
-    max_slice_len: usize,
     stream_writer: Stream.Writer,
     stream_reader: Stream.Reader,
 
@@ -22,14 +19,12 @@ pub const StreamChannel = struct {
         stream: zio.net.Stream,
         r_size: usize,
         w_size: usize,
-        max_slice_len: usize,
     ) !void {
         self.stream = stream;
         const rbuff = try gpa.alloc(u8, r_size);
         const wbuff = try gpa.alloc(u8, w_size);
         self.rbuff = rbuff;
         self.wbuff = wbuff;
-        self.max_slice_len = max_slice_len;
         self.stream_reader = stream.reader(rbuff);
         self.stream_writer = stream.writer(wbuff);
     }
@@ -127,8 +122,6 @@ pub const HalfChannel = struct {
 /// `recv` 解码失败（IncorrectStatusReceived/MessageTooLarge）时许可已
 /// 归还，通道可继续使用。
 pub const InMemoryChannel = struct {
-    /// 从线上解码单个 `[]const u8` 切片的上限，语义同 `StreamChannel`。
-    max_slice_len: usize,
     /// 本端工作区：send 的写入目标，recv 的暂存/解码缓冲。
     half_self: *HalfChannel,
     /// 对端工作区：recv 的数据来源（对端 send 的产物）。
@@ -416,4 +409,3 @@ pub const TlsChannel = struct {
         try sw.flush();
     }
 };
-
