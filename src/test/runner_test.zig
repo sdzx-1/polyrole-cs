@@ -376,8 +376,7 @@ test "mux test" {
 }
 
 // 多协议复用传输（加密模式）：TLS 握手派生密钥，批记录整体加密
-test "mux test encrypted" {
-    const testing = std.testing;
+test "mux test encrypted" {    const testing = std.testing;
     const rt = try zio.Runtime.init(testing.allocator, .{});
     defer rt.deinit();
     const allocator = testing.allocator;
@@ -489,4 +488,69 @@ test "mux test encrypted" {
     try group.wait();
     try testing.expectEqual(client_context, 1000);
     try testing.expectEqual(client_context1, 1000);
+}
+
+// 对端中途断开：reader EOF → supervisor 毒丸 → 协议任务退出，
+// group.wait() 有界返回（无僵尸），传输错误被记录、协议以错误上报。
+test "mux: peer disconnect unwinds all tasks" {
+    const testing = std.testing;
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const allocator = testing.allocator;
+
+    const P = CreateTestProtocol("disconnect", Exit);
+    const R = Runner(P.A);
+
+    const protocol: Protocol = .{
+        .enter = P.A,
+        .runner = R,
+        .client_ct = i32,
+        .server_ct = i32,
+        .max_message_size = 1024,
+        .recv_timeout_ms = null,
+    };
+
+    const TmpMuxServer = Mux(&.{protocol}, .server, false);
+
+    const localhost = try zio.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try localhost.listen(.{});
+    defer listener.close();
+
+    // client：连接后立即断开，不发送任何协议消息
+    var group: zio.Group = .init;
+    defer group.cancel();
+    try group.spawn(struct {
+        fn run(addr: zio.net.Address) !void {
+            var stream = try addr.connect(.{});
+            stream.close();
+        }
+    }.run, .{listener.socket.address});
+
+    var stream = try listener.accept(.{});
+    defer stream.close();
+
+    var ctx: i32 = 0;
+    var sc: StreamChannel = undefined;
+    try sc.init(allocator, stream, 256, 256);
+    defer sc.deinit(allocator);
+
+    var mux: TmpMuxServer = undefined;
+    try mux.init(allocator, .{&ctx}, &sc, null);
+    defer mux.deinit(allocator);
+
+    try mux.run(&group);
+    try group.wait();
+
+    // 传输错误已记录
+    try testing.expect(mux.transport_err != null);
+    // 协议任务以错误退出（而非正常 Exit）
+    var reported = false;
+    while (mux.error_channel.tryReceive()) |info| {
+        try testing.expect(info.err != null);
+        reported = true;
+    } else |err| switch (err) {
+        error.ChannelEmpty => {},
+        error.ChannelClosed => unreachable,
+    }
+    try testing.expect(reported);
 }

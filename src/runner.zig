@@ -213,6 +213,21 @@ pub const SubChannel = struct {
         gpa.free(self.recv_buff);
     }
 
+    /// 协议任务退出时调用：关闭分发握手通道。
+    /// reader 阻塞在 `recv_start.receive()` 时以 `ChannelClosed` 唤醒，
+    /// 该协议的后续帧被丢弃，其余协议的分发与背压不受影响。
+    pub fn closeRecv(self: *@This()) void {
+        self.recv_start.close(.immediate);
+    }
+
+    /// 传输失败时由 supervisor 调用：关闭协议任务的两个阻塞点
+    /// （等帧 `recv_end.receive` / 等发送许可 `send_start.receive`），
+    /// 使其以 `ChannelClosed` 退出——不依赖 group.cancel，不会误伤同 group 的其他任务。
+    pub fn poison(self: *@This()) void {
+        self.send_start.close(.immediate);
+        self.recv_end.close(.immediate);
+    }
+
     pub fn send(self: *@This(), state_id: anytype, _: type, val: anytype) !void {
         _ = try self.send_start.receive();
         var writer = Io.Writer.fixed(self.send_buff);
@@ -246,6 +261,16 @@ pub const ErrorInfo = struct {
     err: ?anyerror,
 };
 
+/// Mux 内部事件：supervisor 通过单一通道接收协议完成与传输循环退出。
+/// 容量 = 协议数 + 2（reader/writer 各至多一条），发送永不阻塞。
+const Event = union(enum) {
+    protocol_done: void,
+    transport_exit: struct {
+        loop: enum { reader, writer },
+        err: ?anyerror,
+    },
+};
+
 fn CreateContextTuple(comptime protocols: []const Protocol, comptime role: Role) type {
     const protocol_count = protocols.len;
     var types: [protocol_count]type = undefined;
@@ -277,8 +302,16 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
         send_buf: []u8,
         recv_buf: if (encrypt) void else []u8 = if (encrypt) {} else undefined,
 
-        reader_handle: zio.JoinHandle(anyerror!void),
-        writer_handle: zio.JoinHandle(anyerror!void),
+        /// 事件通道：协议完成（×count）/ 传输循环退出（≤2），容量 = count + 2。
+        events_buf: [protocol_count + 2]Event,
+        events: zio.Channel(Event),
+
+        /// writer 退出信号（排空最后一帧批后发出），supervisor 阶段 2 等待。
+        writer_drained_buf: [1]void = undefined,
+        writer_drained: zio.Channel(void),
+
+        /// 传输级错误（supervisor 写入；调用方应在 group.wait() 后读取）。
+        transport_err: ?anyerror = null,
 
         /// 每个协议至多上报一条错误（容量 = 协议数），调用方应在 wait 后消费。
         error_channel_buf: [protocol_count]ErrorInfo,
@@ -308,8 +341,9 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
             self.send_id_collect = .initBuffer(self.send_id_collect_buff[0..]);
             self.send_id_collect.clearRetainingCapacity();
 
-            self.reader_handle = try zio.spawn(reader_loop, .{self});
-            self.writer_handle = try zio.spawn(writer_loop, .{self});
+            self.events = .init(self.events_buf[0..]);
+            self.writer_drained = .init(&self.writer_drained_buf);
+            self.transport_err = null;
 
             self.error_channel = .init(self.error_channel_buf[0..]);
 
@@ -324,29 +358,47 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
             if (comptime !encrypt) gpa.free(self.recv_buf);
             if (comptime encrypt) self.tls.deinit(gpa);
 
-            self.reader_handle.cancel();
-            self.writer_handle.cancel();
+            // 所有任务（协议/reader/writer/supervisor）都登记在调用方 group 中，
+            // group.wait() 返回即全部退出——deinit 无需（也不应）cancel。
         }
 
+        /// 启动全部任务进调用方 group：协议任务 ×count → reader → writer → supervisor。
+        /// 顺序保证 supervisor 首次运行（可能触发收尾）时所有任务均已登记。
+        /// group.wait() 返回后所有任务已退出，此时才可安全调用 deinit。
         pub fn run(self: *@This(), group: *zio.Group) !void {
             inline for (0..protocol_count) |id| {
                 const curr = protocols[id];
                 const S = struct {
                     const Ctx = if (role == .client) curr.client_ct else curr.server_ct;
-                    pub fn protocolTask(ctx: *Ctx, err_chan: *zio.Channel(ErrorInfo), channel: *SubChannel) void {
+                    pub fn protocolTask(ctx: *Ctx, err_chan: *zio.Channel(ErrorInfo), channel: *SubChannel, events: *zio.Channel(Event)) void {
                         var task_err: ?anyerror = null;
                         curr.runner.symmetric_run(role, ctx, channel, curr.enter, curr.recv_timeout_ms) catch |err| {
                             task_err = err;
                         };
+                        // 先关闭接收侧：reader 不再为已死协议阻塞（其后续帧被丢弃）
+                        channel.closeRecv();
                         err_chan.send(.{ .protocol_id = id, .err = task_err }) catch @panic("mux: error_channel full");
+                        events.send(.protocol_done) catch {};
                     }
                 };
-                try group.spawn(S.protocolTask, .{ self.ctxs[id], &self.error_channel, &self.sub_channels[id] });
+                try group.spawn(S.protocolTask, .{ self.ctxs[id], &self.error_channel, &self.sub_channels[id], &self.events });
             }
+            try group.spawn(reader_loop, .{ self, &self.events });
+            try group.spawn(writer_loop, .{ self, &self.events, &self.writer_drained });
+            try group.spawn(supervisor, .{ self, &self.events });
         }
 
-        //[total_len u32 BE][protocol_id u8][payload_len u16 BE][payload ...]
-        pub fn reader_loop(self: *@This()) anyerror!void {
+        /// 读批 → 按帧分发。任何错误（EOF/坏帧/取消）都经 events 上报，
+        /// 由 supervisor 决定级联取消；本任务始终以 void 退出，不污染 group 状态。
+        fn reader_loop(self: *@This(), events: *zio.Channel(Event)) void {
+            const err: ?anyerror = blk: {
+                reader_loop_inner(self) catch |e| break :blk e;
+                break :blk null;
+            };
+            events.send(.{ .transport_exit = .{ .loop = .reader, .err = err } }) catch {};
+        }
+
+        fn reader_loop_inner(self: *@This()) anyerror!void {
             while (true) {
                 if (comptime encrypt) {
                     const plain = try self.tls.recordReadRaw();
@@ -365,6 +417,8 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
         }
 
         /// 按帧头切分一个批明文，逐帧分发给对应 SubChannel。
+        /// 协议已退出（recv_start 被 closeRecv 关闭）时跳过握手、丢弃该帧，
+        /// 其余协议的分发与背压不受影响。
         fn dispatchFrames(self: *@This(), frames: []const u8) anyerror!void {
             var pos: usize = 0;
             while (pos < frames.len) {
@@ -380,7 +434,14 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
                     payload_len > current.recv_buff.len) return error.MessageTooLarge;
                 pos += 2;
                 if (pos + payload_len > frames.len) return error.BadLength;
-                try current.recv_start.receive();
+                // 分发握手：协议已退出（recv_start 已关闭）→ 丢弃该帧
+                _ = current.recv_start.receive() catch |err| switch (err) {
+                    error.ChannelClosed => {
+                        pos += payload_len;
+                        continue;
+                    },
+                    error.Canceled => return err,
+                };
                 current.len = payload_len;
                 @memcpy(current.recv_buff[0..payload_len], frames[pos .. pos + payload_len]);
                 try current.recv_end.send({});
@@ -388,20 +449,38 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
             }
         }
 
-        pub fn writer_loop(self: *@This()) anyerror!void {
+        /// 聚合帧批并写出。优雅关闭（send_end 被 close(.graceful)）时先排空
+        /// 已入队的帧再退出；任何写错误都经 events 上报，由 supervisor 决定级联。
+        /// 退出契约（顺序固定）：flush 最后一帧批后，先发 writer_drained
+        /// （"已停止写 socket"），再发 events 报告（err=null 表示干净排空）。
+        fn writer_loop(self: *@This(), events: *zio.Channel(Event), writer_drained: *zio.Channel(void)) void {
+            const err: ?anyerror = blk: {
+                writer_loop_inner(self) catch |e| break :blk e;
+                break :blk null;
+            };
+            writer_drained.send({}) catch {};
+            events.send(.{ .transport_exit = .{ .loop = .writer, .err = err } }) catch {};
+        }
+
+        fn writer_loop_inner(self: *@This()) anyerror!void {
             while (true) {
                 self.send_id_collect.clearRetainingCapacity();
                 {
-                    const id = try self.send_end.receive();
+                    // graceful 关闭：receive 先返回缓冲值，排空后才给 ChannelClosed
+                    const id = self.send_end.receive() catch |err| switch (err) {
+                        error.ChannelClosed => return, // 无剩余帧，直接退出
+                        else => return err,
+                    };
                     self.send_id_collect.appendAssumeCapacity(id);
                 }
 
+                var closed: bool = false;
                 while (self.send_end.tryReceive()) |id| {
                     self.send_id_collect.appendAssumeCapacity(id);
                 } else |err| {
                     switch (err) {
                         error.ChannelEmpty => {},
-                        error.ChannelClosed => return err,
+                        error.ChannelClosed => closed = true, // 缓冲已排空，写完本批再退出
                     }
                 }
                 var pos: usize = 4;
@@ -419,7 +498,43 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
                     try self.sc.stream_writer.interface.writeAll(self.send_buf[0..pos]);
                     try self.sc.stream_writer.interface.flush();
                 }
+                if (closed) return;
             }
+        }
+
+        /// 督导任务：协调全部任务的退出，不依赖 group.cancel（不会误伤同 group 的
+        /// 其他调用方任务），全部通过"通道关闭"驱动：
+        ///
+        /// 阶段 1：等待全部协议完成，或捕获首个传输失败。
+        ///   - 传输失败 → 对每个 SubChannel 下毒丸（关 recv_end/send_start），
+        ///     唤醒阻塞在内存通道上的协议任务 → 以 ChannelClosed 退出并上报。
+        /// 阶段 2：全部协议完成 → 优雅关闭 send_end（writer 排空最后一帧批）→
+        ///   等 writer_drained → shutdown 读写方向（不关 fd，调用方仍可 close）
+        ///   → reader 以 EOF 退出 → 全组归零。
+        ///
+        /// 被 cancel（调用方发起）时，events.receive 抛 error.Canceled → 直接退出。
+        fn supervisor(self: *@This(), events: *zio.Channel(Event)) void {
+            var done: usize = 0;
+            while (done < protocol_count) {
+                const ev = events.receive() catch return;
+                switch (ev) {
+                    .protocol_done => done += 1,
+                    .transport_exit => |t| {
+                        if (t.err == null) continue; // writer 干净退出（仅阶段 2 可能），防御
+                        if (self.transport_err == null) {
+                            self.transport_err = t.err;
+                            // 毒丸：唤醒阻塞中的协议任务，使其尽快上报并退出
+                            for (0..protocol_count) |id| self.sub_channels[id].poison();
+                        }
+                    },
+                }
+            }
+            // 阶段 2：全部协议完成，优雅关闭
+            self.send_end.close(.graceful);
+            // 等 writer 排空（或已因写错误退出——退出契约保证 writer_drained 必达）
+            _ = self.writer_drained.receive() catch return;
+            // writer 已停止写 socket：shutdown 读写方向唤醒 reader（fd 保持有效）
+            self.sc.stream.shutdown(.both) catch {};
         }
     };
 }
