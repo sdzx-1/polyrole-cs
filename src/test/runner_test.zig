@@ -544,13 +544,5 @@ test "mux: peer disconnect unwinds all tasks" {
     // 传输错误已记录
     try testing.expect(mux.transport_err != null);
     // 协议任务以错误退出（而非正常 Exit）
-    var reported = false;
-    while (mux.error_channel.tryReceive()) |info| {
-        try testing.expect(info.err != null);
-        reported = true;
-    } else |err| switch (err) {
-        error.ChannelEmpty => {},
-        error.ChannelClosed => unreachable,
-    }
-    try testing.expect(reported);
+    try testing.expect(mux.results[0] != null);
 }

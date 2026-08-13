@@ -86,20 +86,23 @@ try group.wait();      // 调用方决定何时汇合
 - `run` 只负责把各协议任务 spawn 进调用方的 `group`,不隐式 wait
 - group 生命周期由调用方控制,可复用、可与其它任务汇合
 
-### 4. 结果:error_channel 逐协议上报
+### 4. 结果:results 数组 + transport_err
+
+`group.wait()` 返回后（全部任务已退出）直接读取，无需消费通道:
 
 ```zig
 try group.wait();
-while (mux.error_channel.tryRecv()) |info| {
-    switch (info.err) {
-        null => log.info("protocol {d} finished ok", .{info.protocol_id}),
-        else => |e| log.err("protocol {d} failed: {s}", .{ info.protocol_id, @errorName(e) }),
-    }
+// 传输级错误(EOF/写失败/AEAD 失败/坏帧);主动停机或干净关闭时为 null
+if (mux.transport_err) |e| log.err("transport: {s}", .{@errorName(e)});
+// 每协议结果:索引 = protocol_id,null = 正常到达 Exit
+for (mux.results, 0..) |err, id| {
+    if (err) |e| log.err("protocol {d} failed: {s}", .{ id, @errorName(e) });
 }
 ```
 
-- 每个协议**恰好一条消息**:成功 `{protocol_id, err=null}`,失败 `{protocol_id, err}`
-- 容量 = 协议数,不会阻塞;**应在 `group.wait()` 后及时消费**
+- `results[id]`:该协议恰好一条结果——`null` 表示正常 Exit,否则为错误值(含被级联中止的 `ChannelClosed`/`Canceled`)
+- `transport_err`:连接级错误,supervisor 写入;两者读取都发生在 `group.wait()` 之后,无竞态
+- 任务全部登记在调用方 group 中:`group.wait()` 返回 ⇒ 所有任务已退出 ⇒ 才可安全 `deinit`
 
 ## 完整示例(明文,双协议)
 
@@ -137,9 +140,9 @@ try group_c.wait();
 
 | 场景 | 行为 |
 |---|---|
-| 某协议返回错误 | 其余协议继续;错误经 `error_channel` 上报,`group.wait()` 正常返回 |
+| 某协议返回错误 | 其余协议继续;该协议结果写入 `results[id]`,`group.wait()` 正常返回 |
 | 某协议 panic | 进程级崩溃(zio 不捕获 panic) |
-| error_channel 满 | panic(`mux: error_channel full`)——容量=协议数,每协议一条,正常不会发生 |
+| 对端断开/写失败/坏帧 | 连接级失败:supervisor 毒丸唤醒各协议任务,`transport_err` 记录错误,`group.wait()` 有界返回 |
 | 一端提前退出 | 另一端对应协议 recv 超时/EOF 失败,按各自 `recv_timeout_ms` 处理 |
 
 ## 限制与注意

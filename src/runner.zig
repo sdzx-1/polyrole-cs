@@ -255,12 +255,6 @@ pub const MuxKeys = struct {
     read_key: [32]u8,
 };
 
-pub const ErrorInfo = struct {
-    /// protocols 数组下标
-    protocol_id: usize,
-    err: ?anyerror,
-};
-
 /// Mux 内部事件：supervisor 通过单一通道接收协议完成与传输循环退出。
 /// 容量 = 协议数 + 2（reader/writer 各至多一条），发送永不阻塞。
 const Event = union(enum) {
@@ -313,9 +307,10 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
         /// 传输级错误（supervisor 写入；调用方应在 group.wait() 后读取）。
         transport_err: ?anyerror = null,
 
-        /// 每个协议至多上报一条错误（容量 = 协议数），调用方应在 wait 后消费。
-        error_channel_buf: [protocol_count]ErrorInfo,
-        error_channel: zio.Channel(ErrorInfo),
+        /// 每个协议的结果，索引 = protocol_id；err == null 表示正常到达 Exit。
+        /// 每个协议任务只写自己的槽位（无竞争）；调用方应在 group.wait() 后读取
+        /// （此时所有协议任务均已退出并写入）。
+        results: [protocol_count]?anyerror = @splat(null),
 
         ctxs: Ctxs,
 
@@ -344,8 +339,7 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
             self.events = .init(self.events_buf[0..]);
             self.writer_drained = .init(&self.writer_drained_buf);
             self.transport_err = null;
-
-            self.error_channel = .init(self.error_channel_buf[0..]);
+            self.results = @splat(null);
 
             self.ctxs = ctxs;
         }
@@ -370,18 +364,18 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
                 const curr = protocols[id];
                 const S = struct {
                     const Ctx = if (role == .client) curr.client_ct else curr.server_ct;
-                    pub fn protocolTask(ctx: *Ctx, err_chan: *zio.Channel(ErrorInfo), channel: *SubChannel, events: *zio.Channel(Event)) void {
+                    pub fn protocolTask(ctx: *Ctx, channel: *SubChannel, events: *zio.Channel(Event), results: *[protocol_count]?anyerror) void {
                         var task_err: ?anyerror = null;
                         curr.runner.symmetric_run(role, ctx, channel, curr.enter, curr.recv_timeout_ms) catch |err| {
                             task_err = err;
                         };
                         // 先关闭接收侧：reader 不再为已死协议阻塞（其后续帧被丢弃）
                         channel.closeRecv();
-                        err_chan.send(.{ .protocol_id = id, .err = task_err }) catch @panic("mux: error_channel full");
+                        results[id] = task_err;
                         events.send(.protocol_done) catch {};
                     }
                 };
-                try group.spawn(S.protocolTask, .{ self.ctxs[id], &self.error_channel, &self.sub_channels[id], &self.events });
+                try group.spawn(S.protocolTask, .{ self.ctxs[id], &self.sub_channels[id], &self.events, &self.results });
             }
             try group.spawn(reader_loop, .{ self, &self.events });
             try group.spawn(writer_loop, .{ self, &self.events, &self.writer_drained });
