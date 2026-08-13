@@ -164,8 +164,8 @@ pub const Protocol = struct {
     client_ct: type,
     //server context type
     server_ct: type,
-    //max massage size
-    max_massage_size: usize,
+    //max message size
+    max_message_size: usize,
     recv_timeout_ms: ?u64,
 };
 
@@ -292,7 +292,7 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
 
             var total: usize = 0;
             for (0..protocol_count) |id| {
-                const buff_size = protocols[id].max_massage_size + 3;
+                const buff_size = protocols[id].max_message_size + 3;
                 try self.sub_channels[id].init(gpa, id, buff_size, &self.send_end);
                 total += buff_size;
             }
@@ -376,7 +376,7 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
                 tmp_u16[1] = frames[pos + 1];
                 const payload_len: usize = @intCast(std.mem.readInt(u16, &tmp_u16, .big));
                 const current = &self.sub_channels[protocol_id];
-                if (payload_len > protocols[protocol_id].max_massage_size or
+                if (payload_len > protocols[protocol_id].max_message_size or
                     payload_len > current.recv_buff.len) return error.MessageTooLarge;
                 pos += 2;
                 if (pos + payload_len > frames.len) return error.BadLength;

@@ -157,9 +157,9 @@ const Mux = polyrole.runner.Mux;
 // Declare the protocol family (one Protocol entry per protocol)
 const protocols = [_]polyrole.runner.Protocol{
     .{ .enter = Ctrl.A, .runner = R_ctrl, .client_ct = i32, .server_ct = i32,
-       .max_massage_size = 1024, .recv_timeout_ms = null },
+       .max_message_size = 1024, .recv_timeout_ms = null },
     .{ .enter = Push.A, .runner = R_push, .client_ct = i32, .server_ct = i32,
-       .max_massage_size = 1024, .recv_timeout_ms = null },
+       .max_message_size = 1024, .recv_timeout_ms = null },
 };
 
 // Plaintext mode: pass null keys

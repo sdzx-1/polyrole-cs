@@ -18,7 +18,7 @@ pub const Protocol = struct {
     runner: type,             // Runner(协议状态机)
     client_ct: type,          // 客户端上下文类型
     server_ct: type,          // 服务端上下文类型
-    max_massage_size: usize,  // 单条消息上限(子通道缓冲)
+    max_message_size: usize,  // 单条消息上限(子通道缓冲)
     recv_timeout_ms: ?u64,    // 每协议独立接收超时
 };
 ```
@@ -106,9 +106,9 @@ while (mux.error_channel.tryRecv()) |info| {
 ```zig
 const protocols = [_]polyrole.runner.Protocol{
     .{ .enter = Ctrl.A, .runner = R_ctrl, .client_ct = i32, .server_ct = i32,
-       .max_massage_size = 1024, .recv_timeout_ms = null },
+       .max_message_size = 1024, .recv_timeout_ms = null },
     .{ .enter = Push.A, .runner = R_push, .client_ct = i32, .server_ct = i32,
-       .max_massage_size = 1024, .recv_timeout_ms = null },
+       .max_message_size = 1024, .recv_timeout_ms = null },
 };
 
 const TmpMuxClient = Mux(&protocols, .client, false);
@@ -144,7 +144,7 @@ try group_c.wait();
 
 ## 限制与注意
 
-- `max_massage_size` 决定子通道缓冲,同时是单条消息上限;总发送缓冲 = Σ(max_massage_size + 3) + 4
+- `max_message_size` 决定子通道缓冲,同时是单条消息上限;总发送缓冲 = Σ(max_message_size + 3) + 4
 - 明文模式 `recv_buf` 由 Mux 分配;加密模式批记录由 TlsChannel 处理
 - 每个协议至多一条消息在途(发送许可),高吞吐协议可适当调大消息粒度
 - KeyUpdate 透明吸收,无需在协议层处理

@@ -134,9 +134,9 @@ const Mux = polyrole.runner.Mux;
 // 声明协议族（每个协议一个 Protocol 条目）
 const protocols = [_]polyrole.runner.Protocol{
     .{ .enter = Ctrl.A, .runner = R_ctrl, .client_ct = i32, .server_ct = i32,
-       .max_massage_size = 1024, .recv_timeout_ms = null },
+       .max_message_size = 1024, .recv_timeout_ms = null },
     .{ .enter = Push.A, .runner = R_push, .client_ct = i32, .server_ct = i32,
-       .max_massage_size = 1024, .recv_timeout_ms = null },
+       .max_message_size = 1024, .recv_timeout_ms = null },
 };
 
 // 明文模式：keys 传 null

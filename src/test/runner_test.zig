@@ -308,7 +308,7 @@ test "mux test" {
         .runner = R1,
         .client_ct = i32,
         .server_ct = i32,
-        .max_massage_size = 1024,
+        .max_message_size = 1024,
         .recv_timeout_ms = null,
     };
 
@@ -317,7 +317,7 @@ test "mux test" {
         .runner = R2,
         .client_ct = i32,
         .server_ct = i32,
-        .max_massage_size = 1024,
+        .max_message_size = 1024,
         .recv_timeout_ms = null,
     };
 
@@ -406,7 +406,7 @@ test "mux test encrypted" {
         .runner = R1,
         .client_ct = i32,
         .server_ct = i32,
-        .max_massage_size = 1024,
+        .max_message_size = 1024,
         .recv_timeout_ms = null,
     };
 
@@ -415,7 +415,7 @@ test "mux test encrypted" {
         .runner = R2,
         .client_ct = i32,
         .server_ct = i32,
-        .max_massage_size = 1024,
+        .max_message_size = 1024,
         .recv_timeout_ms = null,
     };
 
