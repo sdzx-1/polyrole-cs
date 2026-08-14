@@ -458,3 +458,42 @@ test "smc: server sends first - client never receives its own message" {
     try t1.join();
     try t2.join();
 }
+
+// 伪造记录：nonce 的类型字节为非法值（非 0/1），且 counter 匹配。
+// 修复前：counter 检查通过后 @enumFromInt(200) 在 AEAD 解密前直接 panic
+// （远程可触发的进程崩溃，无需密钥）；修复后应在解密前返回 BadRecordType。
+test "tls channel: invalid record type byte is rejected before AEAD" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const pair = try SocketPair.connect();
+    defer pair.client.close();
+    defer pair.server.close();
+
+    const key = [_]u8{0x42} ** 32;
+    var sc_client: StreamChannel = undefined;
+    try sc_client.init(allocator, pair.client, 256, 256);
+    defer sc_client.deinit(allocator);
+    var sc_server: StreamChannel = undefined;
+    try sc_server.init(allocator, pair.server, 256, 256);
+    defer sc_server.deinit(allocator);
+
+    var tc: TlsChannel = undefined;
+    try tc.init(allocator, &sc_server, key, key, 256);
+    defer tc.deinit(allocator);
+
+    // 攻击者伪造：nonce = [counter=0(8) || 0(15) || type=200]，tag/ct 任意。
+    // 类型字节在 AEAD 解密前被解析——无需知道密钥即可触发（修复前崩溃）。
+    var record: [2048]u8 = undefined;
+    @memset(record[0..46], 0);
+    std.mem.writeInt(u64, record[0..8], 0, .big); // counter = read_counter
+    record[23] = 200; // 非法记录类型字节
+    std.mem.writeInt(u32, record[40..44], 2, .big); // ct_len = 2
+    record[44] = 0;
+    record[45] = 0;
+
+    try writeRaw(&sc_client, record[0..46]);
+    try testing.expectError(error.BadRecordType, tc.recordRead());
+}

@@ -311,7 +311,12 @@ pub const TlsChannel = struct {
             const counter = std.mem.readInt(u64, nonce[0..8], .big);
             if (counter != self.read_counter) return error.ReplayDetected;
             if (self.read_counter == std.math.maxInt(u64)) return error.NonceExhausted;
-            const typ: RecordType = @enumFromInt(nonce[23]);
+            // 记录类型字节在 AEAD 解密之前被解析，因此必须先校验合法范围：
+            // 否则 @enumFromInt 对非法值直接 panic，而攻击者无需密钥即可触发
+            // （nonce 明文可控，counter 可从连接状态推断）——远程进程崩溃。
+            const type_byte = nonce[23];
+            if (type_byte > @intFromEnum(RecordType.key_update)) return error.BadRecordType;
+            const typ: RecordType = @enumFromInt(type_byte);
 
             const tag = try sr.take(16);
             const ct_len = try sr.takeInt(u32, .big);
