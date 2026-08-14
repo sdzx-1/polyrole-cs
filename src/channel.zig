@@ -154,7 +154,7 @@ pub const InMemoryChannel = struct {
 /// 派生的密钥进行 AEAD 加密。
 ///
 /// 每条消息的线上格式：
-///   nonce(24) || tag(16) || ct_len(2 BE) || ciphertext(ct_len)
+///   nonce(24) || tag(16) || ct_len(4 BE) || ciphertext(ct_len)
 ///
 /// 密文内的载荷为：msg_len(2 BE) || protocol_message(msg_len)。
 /// 线上的 ct_len 是帧定界符；AEAD 信封内被认证的 msg_len 才是可信来源。
