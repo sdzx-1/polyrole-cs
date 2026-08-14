@@ -162,17 +162,21 @@ const protocols = [_]polyrole.runner.Protocol{
        .max_message_size = 1024, .recv_timeout_ms = null },
 };
 
-// Plaintext mode: pass null keys
-const TmpMux = Mux(&protocols, false);
+// Plaintext mode: role bound at compile time, pass null keys
+const TmpMux = Mux(&protocols, .client, false);
 var mux: TmpMux = undefined;
-try mux.init(gpa, &sc, null);
-try mux.run(.client, ctxs);   // ctxs: tuple of per-protocol contexts
+try mux.init(gpa, .{ &client_ctrl, &client_push }, &sc, null); // ctxs: tuple of per-protocol context pointers
+defer mux.deinit(gpa);
+
+var group: zio.Group = .init;
+try mux.run(&group);  // protocol/reader/writer/supervisor tasks all join the caller's group
+try group.wait();     // all tasks have exited once this returns; only then deinit
 
 // Encrypted mode: the whole batch is sealed as one AEAD record; keys come
 // from the TLS handshake (or out-of-band negotiation)
-const TmpMux = Mux(&protocols, true);
-try mux.init(gpa, &sc, .{ .write_key = wk, .read_key = rk });
-try mux.run(.server, ctxs);
+const TmpMuxEnc = Mux(&protocols, .server, true);
+try mux.init(gpa, .{ &server_ctrl, &server_push }, &sc, .{ .write_key = wk, .read_key = rk });
+try mux.run(&group);
 ```
 
 Encryption details: the whole batch record is AEAD-authenticated, record

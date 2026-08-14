@@ -139,16 +139,20 @@ const protocols = [_]polyrole.runner.Protocol{
        .max_message_size = 1024, .recv_timeout_ms = null },
 };
 
-// 明文模式：keys 传 null
-const TmpMux = Mux(&protocols, false);
+// 明文模式：role 编译期绑定，keys 传 null
+const TmpMux = Mux(&protocols, .client, false);
 var mux: TmpMux = undefined;
-try mux.init(gpa, &sc, null);
-try mux.run(.client, ctxs);   // ctxs 是各协议 context 的元组
+try mux.init(gpa, .{ &client_ctrl, &client_push }, &sc, null); // ctxs: 各协议 context 指针元组
+defer mux.deinit(gpa);
+
+var group: zio.Group = .init;
+try mux.run(&group);  // 协议/reader/writer/supervisor 任务全部登记进调用方 group
+try group.wait();     // 返回后所有任务已退出，方可 deinit
 
 // 加密模式：整批明文作为一条 AEAD 记录加密，密钥来自 TLS 握手（或带外协商）
-const TmpMux = Mux(&protocols, true);
-try mux.init(gpa, &sc, .{ .write_key = wk, .read_key = rk });
-try mux.run(.server, ctxs);
+const TmpMuxEnc = Mux(&protocols, .server, true);
+try mux.init(gpa, .{ &server_ctrl, &server_push }, &sc, .{ .write_key = wk, .read_key = rk });
+try mux.run(&group);
 ```
 
 加密模式细节：批记录整体 AEAD 认证，记录长度 u32（批明文可超 64 KiB）；
