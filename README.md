@@ -138,6 +138,8 @@ const protocols = [_]polyrole.runner.Protocol{
     .{ .enter = Push.A, .runner = R_push, .client_ct = i32, .server_ct = i32,
        .max_message_size = 1024, .recv_timeout_ms = null },
 };
+// 注：max_message_size 受 wire 帧头 u16 限制，须 ≤ 65535；
+//     协议数 ≤ 256（帧头 protocol_id 是 u8）。超限时 init 返回错误。
 
 // 明文模式：role 编译期绑定，keys 传 null
 const TmpMux = Mux(&protocols, .client, false);
@@ -175,7 +177,7 @@ try mux.run(&group);
 
 ```zig
 var ch: StreamChannel = undefined;
-try ch.init(allocator, stream, read_buf_size, write_buf_size, max_slice_len);
+try ch.init(allocator, stream, 4096, 4096);
 defer ch.deinit(allocator);
 ```
 

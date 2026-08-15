@@ -6,6 +6,12 @@ pub const channel = @import("channel.zig");
 pub const runner = @import("runner.zig");
 pub const tls = @import("protocol/tls.zig");
 
+// 强制分析 runner.zig（Zig 0.16 顶层声明惰性求值），
+// 使模块内部测试收集到 runner.zig 文件内的 test 块（如 Mux dispatchFrames 的）。
+comptime {
+    _ = runner;
+}
+
 pub const Role = enum {
     client,
     server,

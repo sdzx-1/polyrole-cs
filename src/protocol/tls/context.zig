@@ -113,6 +113,7 @@ pub const ServerContext = struct {
         @memset(&self.handshake_key, 0);
         @memset(&self.write_key, 0);
         @memset(&self.read_key, 0);
+        self.id_keypair = std.mem.zeroes(crypto.sign.Ed25519.KeyPair);
     }
 };
 

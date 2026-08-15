@@ -35,7 +35,7 @@ test "decode: oversized slice length is rejected" {
     var buf = [_]u8{0} ** 16;
     std.mem.writeInt(u32, buf[0..4], 0, .big); // 状态 ID
     buf[4] = 0; // 标签
-    std.mem.writeInt(usize, buf[5..13], 4096, .big); // 长度超过 max_slice_len
+    std.mem.writeInt(usize, buf[5..13], 4096, .big); // 长度超过 reader 边界
     var r = std.Io.Reader.fixed(&buf);
     try std.testing.expectError(error.EndOfStream, codec.decode(&r, TestStateId.s0, SliceMsg));
 }

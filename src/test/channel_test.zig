@@ -184,6 +184,62 @@ test "tls channel: oversized record is rejected before reading its body" {
     try testing.expectError(error.MessageTooLarge, tc.recordRead());
 }
 
+// 声明为 KeyUpdate 但明文不是 4 字节的 epoch——必须拒绝，不能读取未写入的缓冲区字节。
+test "tls channel: short key update payload is rejected" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const pair = try SocketPair.connect();
+    defer pair.client.close();
+    defer pair.server.close();
+
+    const key = [_]u8{0x42} ** 32;
+    var sc_client: StreamChannel = undefined;
+    try sc_client.init(allocator, pair.client, 256, 256);
+    defer sc_client.deinit(allocator);
+    var sc_server: StreamChannel = undefined;
+    try sc_server.init(allocator, pair.server, 256, 256);
+    defer sc_server.deinit(allocator);
+
+    var tc: TlsChannel = undefined;
+    try tc.init(allocator, &sc_server, key, key, 256);
+    defer tc.deinit(allocator);
+
+    // 合法 AEAD KeyUpdate，但明文只有 3 字节（epoch 需要 u32）
+    var short_epoch: [3]u8 = .{ 0, 0, 1 };
+    var record: [2048]u8 = undefined;
+    const n = craftRecord(key, 0, 1, &short_epoch, &record);
+
+    try writeRaw(&sc_client, record[0..n]);
+    try testing.expectError(error.BadLength, tc.recordReadRaw());
+}
+
+// sealAndSend 是公开 API：超长明文应在写 socket 前被拒绝，而不是切片越界。
+test "tls channel: oversized sealAndSend payload is rejected" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const rt = try zio.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const pair = try SocketPair.connect();
+    defer pair.client.close();
+    defer pair.server.close();
+
+    const key = [_]u8{0x42} ** 32;
+    var sc_server: StreamChannel = undefined;
+    try sc_server.init(allocator, pair.server, 256, 256);
+    defer sc_server.deinit(allocator);
+
+    var tc: TlsChannel = undefined;
+    try tc.init(allocator, &sc_server, key, key, 32);
+    defer tc.deinit(allocator);
+
+    const big = [_]u8{0xAA} ** 33; // seal_buf = 32 + 16 = 48，33 字节明文放不下
+    try testing.expectError(error.MessageTooLarge, tc.sealAndSend(&big));
+}
+
 // 密钥轮换后通道持续正常工作（epoch 推进、密钥派生）
 test "tls channel: key rotation keeps channel working" {
     const testing = std.testing;

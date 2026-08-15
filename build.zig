@@ -35,6 +35,16 @@ pub fn build(b: *std.Build) void {
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
+    // 模块内部测试：收集 polyrole_cs 模块内（root.zig/runner.zig 等文件内）
+    // 的 test 块——可访问私有函数，如 Mux 的 dispatchFrames。
+    const internal_tests = b.addTest(.{
+        .root_module = mod,
+        .use_llvm = true,
+    });
+
+    const run_internal_tests = b.addRunArtifact(internal_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_internal_tests.step);
 }

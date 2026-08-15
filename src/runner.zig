@@ -197,7 +197,9 @@ pub const SubChannel = struct {
     ) !void {
         self.id = id;
         const send_buff = try gpa.alloc(u8, buff_size);
+        errdefer gpa.free(send_buff);
         const recv_buff = try gpa.alloc(u8, buff_size);
+        errdefer gpa.free(recv_buff);
         self.send_buff = send_buff;
         self.recv_buff = recv_buff;
         self.send_start = .init(&self.send_start_buf);
@@ -235,9 +237,11 @@ pub const SubChannel = struct {
         try writer.writeInt(u16, 0, .big); //payload_len，先占位置，后面再修改
         try codec.encode(&writer, state_id, val);
         self.len = writer.buffered().len;
-        const payload_len: u16 = @intCast(self.len - 3); //payload_len = 总长度 - id(1) - payload_len(2)
+        //payload_len = 总长度 - id(1) - payload_len(2)；wire 帧头是 u16，超过即不可表示
+        const payload_len = self.len - 3;
+        if (payload_len > std.math.maxInt(u16)) return error.MessageTooLarge;
         //payload_len 传输时使用大端序, 需要判断本机的端序
-        std.mem.writeInt(u16, self.send_buff[1..3], payload_len, .big);
+        std.mem.writeInt(u16, self.send_buff[1..3], @intCast(payload_len), .big);
         try self.send_end.send(self.id);
     }
 
@@ -260,7 +264,6 @@ pub const MuxKeys = struct {
 const Event = union(enum) {
     protocol_done: void,
     transport_exit: struct {
-        loop: enum { reader, writer },
         err: ?anyerror,
     },
 };
@@ -318,15 +321,30 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
             self.send_end = .init(self.send_end_buf[0..]);
             self.sc = sc;
 
+            // wire 帧头 protocol_id 是 u8：协议数最多 256（id 0..255）
+            if (protocol_count > std.math.maxInt(u8) + 1) return error.TooManyProtocols;
+            // wire 帧头 payload_len 是 u16：单帧载荷最多 65535（id + len 头不占 payload）
+            inline for (protocols) |p| {
+                if (p.max_message_size > std.math.maxInt(u16)) return error.MaxMessageSizeTooLarge;
+            }
+
             var total: usize = 0;
+            var sub_inited: usize = 0;
             for (0..protocol_count) |id| {
                 const buff_size = protocols[id].max_message_size + 3;
                 try self.sub_channels[id].init(gpa, id, buff_size, &self.send_end);
+                sub_inited += 1;
                 total += buff_size;
             }
+            // 只清理已成功 init 的 sub_channel（未 init 的 send_buff/recv_buff 是 undefined，free 即 UB）
+            errdefer for (0..sub_inited) |id| self.sub_channels[id].deinit(gpa);
 
             self.send_buf = try gpa.alloc(u8, total + 4);
-            if (comptime !encrypt) self.recv_buf = try gpa.alloc(u8, total + 4);
+            errdefer gpa.free(self.send_buf);
+            if (comptime !encrypt) {
+                self.recv_buf = try gpa.alloc(u8, total + 4);
+                errdefer gpa.free(self.recv_buf);
+            }
 
             if (comptime encrypt) {
                 const k = keys orelse return error.MissingKeys;
@@ -389,13 +407,15 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
                 reader_loop_inner(self) catch |e| break :blk e;
                 break :blk null;
             };
-            events.send(.{ .transport_exit = .{ .loop = .reader, .err = err } }) catch {};
+            events.send(.{ .transport_exit = .{ .err = err } }) catch {};
         }
 
         fn reader_loop_inner(self: *@This()) anyerror!void {
             while (true) {
                 if (comptime encrypt) {
                     const plain = try self.tls.recordReadRaw();
+                    // 批明文 = [total_len u32 BE][frames]，至少 4 字节
+                    if (plain.len < 4) return error.BadLength;
                     const total_len = std.mem.readInt(u32, plain[0..4], .big);
                     if (plain.len != total_len + 4) return error.BadLength;
                     try self.dispatchFrames(plain[4..]);
@@ -419,6 +439,8 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
                 const protocol_id: usize = @intCast(frames[pos]);
                 if (protocol_id >= protocol_count) return error.ProtocolIdTooLarge;
                 pos += 1;
+                // 帧头被截断（缺 payload_len 字段）→ 拒绝，不能越界读 frames[pos]/frames[pos+1]
+                if (pos + 2 > frames.len) return error.BadLength;
                 var tmp_u16: [2]u8 = undefined;
                 tmp_u16[0] = frames[pos];
                 tmp_u16[1] = frames[pos + 1];
@@ -453,7 +475,7 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
                 break :blk null;
             };
             writer_drained.send({}) catch {};
-            events.send(.{ .transport_exit = .{ .loop = .writer, .err = err } }) catch {};
+            events.send(.{ .transport_exit = .{ .err = err } }) catch {};
         }
 
         fn writer_loop_inner(self: *@This()) anyerror!void {
@@ -531,4 +553,112 @@ pub fn Mux(comptime protocols: []const Protocol, comptime role: Role, comptime e
             self.sc.stream.shutdown(.both) catch {};
         }
     };
+}
+
+
+const testing = std.testing;
+
+// 单协议测试用最小协议族（Mux 实例化需要）
+const AuditProtocol = struct {
+    const Info = ProtocolInfo("audit", i32, i32);
+    pub const A = union(enum) {
+        to_b: Data(void, B),
+        pub const info: Info = .{ .agent = .client, .name = "A" };
+        pub fn process(ctx: *i32) @This() { _ = ctx; return .to_b; }
+    };
+    pub const B = union(enum) {
+        done: Data(void, Exit),
+        pub const info: Info = .{ .agent = .server, .name = "B" };
+        pub fn process(ctx: *i32) @This() { _ = ctx; return .done; }
+    };
+};
+
+fn AuditMux() type {
+    const protocol: Protocol = .{
+        .enter = AuditProtocol.A,
+        .runner = Runner(AuditProtocol.A),
+        .client_ct = i32,
+        .server_ct = i32,
+        .max_message_size = 1024,
+        .recv_timeout_ms = null,
+    };
+    return Mux(&.{protocol}, .server, false);
+}
+
+test "mux dispatchFrames: truncated frame header is rejected" {
+    const M = AuditMux();
+    var m: M = undefined;
+
+    // 手动初始化一个 SubChannel（仅 dispatchFrames 需要，不启动 Mux）
+    var send_end_buf: [1]usize = undefined;
+    var send_end: zio.Channel(usize) = .init(&send_end_buf);
+    try m.sub_channels[0].init(testing.allocator, 0, 1024 + 3, &send_end);
+    defer m.sub_channels[0].deinit(testing.allocator);
+
+    // 帧头被截断：只有 protocol_id，缺 2 字节 payload_len —— 必须返回错误而非越界读
+    const truncated = [_]u8{0x00};
+    try testing.expectError(error.BadLength, m.dispatchFrames(&truncated));
+
+    // 只有 1 字节 payload_len 高位：同样截断
+    const truncated2 = [_]u8{ 0x00, 0x01 };
+    try testing.expectError(error.BadLength, m.dispatchFrames(&truncated2));
+
+    // 正常帧头 + 超长 payload_len：BadLength（数据不足）
+    const bad_len = [_]u8{ 0x00, 0x04, 0x00, 0x00 }; // 声明 1024 字节但只有 1 字节
+    try testing.expectError(error.BadLength, m.dispatchFrames(&bad_len));
+
+    // 协议 id 越界：ProtocolIdTooLarge
+    const bad_id = [_]u8{ 0x01, 0x00, 0x00, 0x00 };
+    try testing.expectError(error.ProtocolIdTooLarge, m.dispatchFrames(&bad_id));
+
+    // 正常帧分发：模拟协议就绪（预置 recv_start token，即协议已 recv_start.send）
+    try m.sub_channels[0].recv_start.send({});
+    const good = [_]u8{ 0x00, 0x00, 0x01, 0xAB }; // protocol 0, payload_len=1, payload=0xAB
+    try m.dispatchFrames(&good);
+    try testing.expectEqual(@as(usize, 1), m.sub_channels[0].len);
+    try testing.expectEqual(@as(u8, 0xAB), m.sub_channels[0].recv_buff[0]);
+    _ = try m.sub_channels[0].recv_end.receive(); // 分发已放置就绪信号
+
+    // 协议已退出（closeRecv）→ 帧被丢弃，dispatchFrames 正常返回
+    m.sub_channels[0].closeRecv();
+    try m.dispatchFrames(&good); // 不报错，帧被跳过
+}
+
+test "mux: init validates wire limits" {
+    // max_message_size 超出 u16 帧头可表示范围 → 拒绝（校验先于任何分配，sc 不会被使用）
+    const protocol: Protocol = .{
+        .enter = AuditProtocol.A,
+        .runner = Runner(AuditProtocol.A),
+        .client_ct = i32,
+        .server_ct = i32,
+        .max_message_size = 70000,
+        .recv_timeout_ms = null,
+    };
+    const M = Mux(&.{protocol}, .server, false);
+    var m: M = undefined;
+    var c: i32 = 0;
+    try testing.expectError(error.MaxMessageSizeTooLarge, m.init(testing.allocator, .{&c}, undefined, null));
+}
+
+test "mux: init failure path releases all buffers" {
+    // 明文单协议分配序列：sub.send_buff, sub.recv_buff, send_buf, recv_buf（共 4 次）。
+    // 让第 k 次分配失败：init 必须返回错误，且 errdefer 只清理已 init 的 sub_channel
+    // （无 double free / free(undefined) / 泄漏——testing.allocator 会检测）。
+    const M = AuditMux();
+    var ctx: i32 = 0;
+
+    var fail_at: usize = 0;
+    while (fail_at < 4) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_at });
+        var m: M = undefined;
+        try testing.expectError(error.OutOfMemory, m.init(failing.allocator(), .{&ctx}, undefined, null));
+    }
+
+    // 第 5 次分配起全部成功：init 成功且 deinit 无泄漏
+    {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 4 });
+        var m: M = undefined;
+        try m.init(failing.allocator(), .{&ctx}, undefined, null);
+        m.deinit(failing.allocator());
+    }
 }

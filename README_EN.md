@@ -161,6 +161,9 @@ const protocols = [_]polyrole.runner.Protocol{
     .{ .enter = Push.A, .runner = R_push, .client_ct = i32, .server_ct = i32,
        .max_message_size = 1024, .recv_timeout_ms = null },
 };
+// Note: max_message_size is capped by the u16 wire frame header (≤ 65535);
+//       protocol count ≤ 256 (protocol_id is a u8 on the wire). init returns
+//       an error when these limits are exceeded.
 
 // Plaintext mode: role bound at compile time, pass null keys
 const TmpMux = Mux(&protocols, .client, false);
@@ -200,7 +203,7 @@ interface is identical to `StreamChannel`, so protocol code is untouched.
 
 ```zig
 var ch: StreamChannel = undefined;
-try ch.init(allocator, stream, read_buf_size, write_buf_size, max_slice_len);
+try ch.init(allocator, stream, 4096, 4096);
 defer ch.deinit(allocator);
 ```
 

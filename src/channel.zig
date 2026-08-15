@@ -22,6 +22,7 @@ pub const StreamChannel = struct {
     ) !void {
         self.stream = stream;
         const rbuff = try gpa.alloc(u8, r_size);
+        errdefer gpa.free(rbuff);
         const wbuff = try gpa.alloc(u8, w_size);
         self.rbuff = rbuff;
         self.wbuff = wbuff;
@@ -81,6 +82,7 @@ pub const HalfChannel = struct {
         buff_size: usize,
     ) !void {
         const send_buff = try gpa.alloc(u8, buff_size);
+        errdefer gpa.free(send_buff);
         const recv_buff = try gpa.alloc(u8, buff_size);
 
         self.send_buff = send_buff;
@@ -260,6 +262,10 @@ pub const TlsChannel = struct {
     }
 
     pub fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
+        @memset(self.encode_buf, 0);
+        @memset(self.decode_buf, 0);
+        @memset(self.seal_buf, 0);
+        @memset(self.open_buf, 0);
         gpa.free(self.encode_buf);
         gpa.free(self.decode_buf);
         gpa.free(self.seal_buf);
@@ -274,6 +280,7 @@ pub const TlsChannel = struct {
         var writer = Io.Writer.fixed(buf);
         try codec.encode(&writer, state_id, val);
         const msg = buf[0..writer.end];
+        if (msg.len > std.math.maxInt(u16)) return error.MessageTooLarge;
 
         // 前置被认证的长度前缀
         std.mem.writeInt(u16, self.encode_buf[0..2], @intCast(msg.len), .big);
@@ -340,6 +347,7 @@ pub const TlsChannel = struct {
             if (typ == .key_update) {
                 // 明文 = [epoch u32 BE]。计数器检查已保证按序到达，
                 // epoch 校验是第二道防线（防乱序/重放旧轮换）。
+                if (ct_len != 4) return error.BadLength;
                 const declared = std.mem.readInt(u32, self.decode_buf[0..4], .big);
                 if (declared != self.read_epoch + 1) return error.KeyRotationOutOfOrder;
                 self.read_key = deriveRotationKey(self.read_key, declared);
@@ -391,6 +399,9 @@ pub const TlsChannel = struct {
     }
 
     fn sealRecord(self: *@This(), plaintext: []const u8, typ: RecordType) !void {
+        // AEAD 加密（seal_buf = buf_size + 16，调用方不得超过）
+        if (plaintext.len > self.seal_buf.len - 16) return error.MessageTooLarge;
+
         const this_counter = self.write_counter;
         if (this_counter == std.math.maxInt(u64)) return error.NonceExhausted;
         self.write_counter += 1;
@@ -400,7 +411,6 @@ pub const TlsChannel = struct {
         std.mem.writeInt(u64, nonce[0..8], this_counter, .big);
         nonce[23] = @intFromEnum(typ);
 
-        // AEAD 加密
         const combined = self.seal_buf[0 .. plaintext.len + 16];
         crypto.nacl.SecretBox.seal(combined, plaintext, nonce, self.write_key);
         const ct = combined[16..][0..plaintext.len];

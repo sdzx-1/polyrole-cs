@@ -18,7 +18,7 @@ pub const Protocol = struct {
     runner: type,             // Runner(协议状态机)
     client_ct: type,          // 客户端上下文类型
     server_ct: type,          // 服务端上下文类型
-    max_message_size: usize,  // 单条消息上限(子通道缓冲)
+    max_message_size: usize,  // 单条消息上限(子通道缓冲)；wire 帧头 u16，须 ≤ 65535，超限 init 报 MaxMessageSizeTooLarge
     recv_timeout_ms: ?u64,    // 每协议独立接收超时
 };
 ```
@@ -151,6 +151,7 @@ try group_c.wait();
 - 明文模式 `recv_buf` 由 Mux 分配;加密模式批记录由 TlsChannel 处理
 - 每个协议至多一条消息在途(发送许可),高吞吐协议可适当调大消息粒度
 - KeyUpdate 透明吸收,无需在协议层处理
+- `poison` 只能唤醒阻塞在 `SubChannel` 通道操作上的协议任务;若协议任务阻塞在用户 `process`/`preprocess`(如阻塞式 IO)中,`group.wait()` 需要等待该任务自行返回
 
 ## 测试
 
